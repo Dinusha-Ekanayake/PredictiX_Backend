@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+sqlalchemy
+alembic
+psycopg[binary]
+python-jose
+passlib[bcrypt]
+pydantic-settings
+python-multipart
+
+passlib==1.7.4
+bcrypt==4.1.2
