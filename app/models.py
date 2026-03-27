@@ -1,0 +1,272 @@
+from sqlalchemy import Column, String, Text, Integer, Boolean, Date, DateTime, ForeignKey, Numeric
+from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.sql import func
+from app.db import Base
+import uuid
+
+
+class Warehouse(Base):
+    __tablename__ = "warehouses"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    code = Column(Text, unique=True, nullable=False)
+    name = Column(Text, nullable=False)
+    address = Column(Text)
+    city = Column(Text)
+    district = Column(Text)
+    country = Column(Text, default="Sri Lanka")
+    timezone = Column(Text, default="Asia/Colombo")
+    is_active = Column(Boolean, default=True)
+    metadata = Column(JSONB, default={})
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class Department(Base):
+    __tablename__ = "departments"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    warehouse_id = Column(UUID(as_uuid=True), ForeignKey("warehouses.id"))
+    code = Column(Text, nullable=False)
+    name = Column(Text, nullable=False)
+    description = Column(Text)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class Profile(Base):
+    __tablename__ = "profiles"
+
+    id = Column(UUID(as_uuid=True), primary_key=True)
+    employee_id = Column(Text, unique=True)
+    full_name = Column(Text, nullable=False)
+    email = Column(Text, unique=True)
+    phone = Column(Text)
+    role = Column(Text, nullable=False, default="user")
+    status = Column(Text, nullable=False, default="active")
+    warehouse_id = Column(UUID(as_uuid=True), ForeignKey("warehouses.id"))
+    department_id = Column(UUID(as_uuid=True), ForeignKey("departments.id"))
+    avatar_url = Column(Text)
+    metadata = Column(JSONB, default={})
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class Asset(Base):
+    __tablename__ = "assets"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    asset_code = Column(Text, unique=True, nullable=False)
+    warehouse_id = Column(UUID(as_uuid=True), ForeignKey("warehouses.id"), nullable=False)
+    department_id = Column(UUID(as_uuid=True), ForeignKey("departments.id"))
+    asset_name = Column(Text, nullable=False)
+    asset_type = Column(Text, nullable=False, default="vehicle")
+    category = Column(Text)
+    vehicle_type = Column(Text)
+    make = Column(Text)
+    model = Column(Text)
+    manufacture_year = Column(Integer)
+    registration_number = Column(Text)
+    vin = Column(Text, unique=True)
+    status = Column(Text, nullable=False, default="active")
+    health_band = Column(Text)
+    criticality_score = Column(Numeric(5, 2))
+    purchase_date = Column(Date)
+    warranty_expiry_date = Column(Date)
+    assigned_to = Column(UUID(as_uuid=True), ForeignKey("profiles.id"))
+    current_mileage = Column(Numeric(12, 2))
+    last_service_date = Column(Date)
+    next_service_date = Column(Date)
+    description = Column(Text)
+    metadata = Column(JSONB, default={})
+    created_by = Column(UUID(as_uuid=True), ForeignKey("profiles.id"))
+    vehicle_role = Column(Text)
+    payload_capacity_kg = Column(Numeric(12, 2))
+    vehicle_age_years = Column(Integer)
+    lifetime_service_count = Column(Integer)
+    lifetime_breakdown_count = Column(Integer)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class MaintenanceEvent(Base):
+    __tablename__ = "maintenance_events"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"), nullable=False)
+    event_type = Column(Text, nullable=False)
+    title = Column(Text, nullable=False)
+    description = Column(Text)
+    performed_by = Column(UUID(as_uuid=True), ForeignKey("profiles.id"))
+    scheduled_date = Column(DateTime(timezone=True))
+    performed_at = Column(DateTime(timezone=True))
+    odometer_reading = Column(Numeric(12, 2))
+    downtime_hours = Column(Numeric(10, 2))
+    cost_amount = Column(Numeric(12, 2))
+    currency = Column(Text, default="LKR")
+    vendor_name = Column(Text)
+    notes = Column(Text)
+    metadata = Column(JSONB, default={})
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class SensorReading(Base):
+    __tablename__ = "sensor_readings"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"), nullable=False)
+    recorded_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    temperature = Column(Numeric(10, 3))
+    vibration = Column(Numeric(10, 3))
+    pressure = Column(Numeric(10, 3))
+    humidity = Column(Numeric(10, 3))
+    rpm = Column(Numeric(10, 3))
+    voltage = Column(Numeric(10, 3))
+    fuel_level = Column(Numeric(10, 3))
+    odometer = Column(Numeric(12, 2))
+
+    engine_hours_since_last_service = Column(Numeric(12, 2))
+    days_since_last_service = Column(Integer)
+    tire_health_pct = Column(Numeric(10, 2))
+    brake_health_pct = Column(Numeric(10, 2))
+    mileage_since_last_service_km = Column(Numeric(12, 2))
+    battery_health_pct = Column(Numeric(10, 2))
+    oil_life_pct = Column(Numeric(10, 2))
+    hydraulic_health_pct = Column(Numeric(10, 2))
+    vibration_rms_mm_s = Column(Numeric(10, 3))
+    fuel_price_lkr_per_l = Column(Numeric(12, 2))
+    engine_hours_total = Column(Numeric(12, 2))
+    coolant_temp_max_c = Column(Numeric(10, 2))
+    engine_temp_avg_c = Column(Numeric(10, 2))
+    battery_voltage_v = Column(Numeric(10, 3))
+    odometer_km = Column(Numeric(12, 2))
+    downtime_hours_last_90d = Column(Numeric(10, 2))
+    active_fault_code_count = Column(Integer)
+    distance_last_30d_km = Column(Numeric(12, 2))
+    payload_utilization_pct = Column(Numeric(10, 2))
+    trip_count_30d = Column(Integer)
+    ambient_humidity_avg_pct = Column(Numeric(10, 2))
+    rough_road_pct = Column(Numeric(10, 2))
+    idle_hours_last_30d = Column(Numeric(12, 2))
+    port_route_pct = Column(Numeric(10, 2))
+    overload_events_30d = Column(Integer)
+    fuel_rate_lph = Column(Numeric(10, 3))
+    avg_payload_kg = Column(Numeric(12, 2))
+
+    reading_payload = Column(JSONB, default={})
+
+
+class Ticket(Base):
+    __tablename__ = "tickets"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    ticket_number = Column(Text, unique=True, nullable=False)
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"))
+    warehouse_id = Column(UUID(as_uuid=True), ForeignKey("warehouses.id"))
+    title = Column(Text, nullable=False)
+    description = Column(Text, nullable=False)
+    status = Column(Text, nullable=False, default="open")
+    priority = Column(Text)
+    predicted_priority = Column(Text)
+    final_priority = Column(Text)
+    predicted_category = Column(Text)
+    final_category = Column(Text)
+    ticket_summary = Column(Text)
+    asset_summary = Column(Text)
+    created_by = Column(UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=False)
+    assigned_to = Column(UUID(as_uuid=True), ForeignKey("profiles.id"))
+    reviewed_by = Column(UUID(as_uuid=True), ForeignKey("profiles.id"))
+    opened_at = Column(DateTime(timezone=True), server_default=func.now())
+    reviewed_at = Column(DateTime(timezone=True))
+    resolved_at = Column(DateTime(timezone=True))
+    closed_at = Column(DateTime(timezone=True))
+    metadata = Column(JSONB, default={})
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class PredictionRun(Base):
+    __tablename__ = "prediction_runs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    model_id = Column(UUID(as_uuid=True), ForeignKey("model_registry.id"), nullable=False)
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"))
+    ticket_id = Column(UUID(as_uuid=True), ForeignKey("tickets.id"))
+    input_snapshot = Column(JSONB, default={})
+    requested_by = Column(UUID(as_uuid=True), ForeignKey("profiles.id"))
+    run_started_at = Column(DateTime(timezone=True), server_default=func.now())
+    run_finished_at = Column(DateTime(timezone=True))
+    status = Column(Text, nullable=False, default="completed")
+    error_message = Column(Text)
+
+
+class AssetFailurePrediction(Base):
+    __tablename__ = "asset_failure_predictions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id = Column(UUID(as_uuid=True), ForeignKey("prediction_runs.id"), unique=True, nullable=False)
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"), nullable=False)
+    health_score = Column(Numeric(10, 4))
+    failure_probability = Column(Numeric(10, 4))
+    confidence = Column(Numeric(10, 4))
+    risk_level = Column(Text)
+    predicted_maintenance_date = Column(Date)
+    days_until_maintenance = Column(Integer)
+    top_explanations = Column(JSONB, default={})
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class AssetCostPrediction(Base):
+    __tablename__ = "asset_cost_predictions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id = Column(UUID(as_uuid=True), ForeignKey("prediction_runs.id"), unique=True, nullable=False)
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"), nullable=False)
+    estimated_cost = Column(Numeric(12, 2))
+    min_cost = Column(Numeric(12, 2))
+    max_cost = Column(Numeric(12, 2))
+    currency = Column(Text, default="LKR")
+    confidence_score = Column(Numeric(10, 4))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class Report(Base):
+    __tablename__ = "reports"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    report_type = Column(Text, nullable=False)
+    status = Column(Text, nullable=False, default="pending")
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"))
+    warehouse_id = Column(UUID(as_uuid=True), ForeignKey("warehouses.id"))
+    ticket_id = Column(UUID(as_uuid=True), ForeignKey("tickets.id"))
+    title = Column(Text, nullable=False)
+    generated_by = Column(UUID(as_uuid=True), ForeignKey("profiles.id"))
+    report_text = Column(Text)
+    report_json = Column(JSONB, default={})
+    file_path = Column(Text)
+    generation_started_at = Column(DateTime(timezone=True), server_default=func.now())
+    generation_completed_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=False)
+    type = Column(Text, nullable=False)
+    channel = Column(Text, nullable=False, default="in_app")
+    title = Column(Text, nullable=False)
+    message = Column(Text, nullable=False)
+    status = Column(Text, nullable=False, default="unread")
+    related_asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"))
+    related_ticket_id = Column(UUID(as_uuid=True), ForeignKey("tickets.id"))
+    related_report_id = Column(UUID(as_uuid=True), ForeignKey("reports.id"))
+    sent_at = Column(DateTime(timezone=True))
+    read_at = Column(DateTime(timezone=True))
+    metadata = Column(JSONB, default={})
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
