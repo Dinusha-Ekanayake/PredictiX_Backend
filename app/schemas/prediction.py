@@ -1,50 +1,72 @@
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Any, Optional
 from uuid import UUID
-from typing import List
 from decimal import Decimal
 from datetime import date, datetime
 
+from pydantic import BaseModel
+
+
+# =========================
+# Existing model inference schemas
+# =========================
+
 class PredictionRequest(BaseModel):
-    snapshot_date: str = Field(..., example="2025-03-01")
-
-    model_config = ConfigDict(extra="allow")
-
-
-class FeatureExplanation(BaseModel):
-    feature: str
-    impact: float
+    engine_hours_since_last_service: Optional[float] = None
+    days_since_last_service: Optional[int] = None
+    tire_health_pct: Optional[float] = None
+    brake_health_pct: Optional[float] = None
+    mileage_since_last_service_km: Optional[float] = None
+    battery_health_pct: Optional[float] = None
+    oil_life_pct: Optional[float] = None
+    hydraulic_health_pct: Optional[float] = None
+    vibration_rms_mm_s: Optional[float] = None
+    fuel_price_lkr_per_l: Optional[float] = None
+    engine_hours_total: Optional[float] = None
+    coolant_temp_max_c: Optional[float] = None
+    lifetime_service_count: Optional[int] = None
+    engine_temp_avg_c: Optional[float] = None
+    battery_voltage_v: Optional[float] = None
+    odometer_km: Optional[float] = None
+    downtime_hours_last_90d: Optional[float] = None
+    active_fault_code_count: Optional[int] = None
+    vehicle_age_years: Optional[int] = None
+    distance_last_30d_km: Optional[float] = None
+    payload_utilization_pct: Optional[float] = None
+    trip_count_30d: Optional[int] = None
+    ambient_humidity_avg_pct: Optional[float] = None
+    rough_road_pct: Optional[float] = None
+    idle_hours_last_30d: Optional[float] = None
+    vehicle_role: Optional[str] = None
+    port_route_pct: Optional[float] = None
+    overload_events_30d: Optional[int] = None
+    fuel_rate_lph: Optional[float] = None
+    payload_capacity_kg: Optional[float] = None
+    avg_payload_kg: Optional[float] = None
+    lifetime_breakdown_count: Optional[int] = None
 
 
 class ClassificationResponse(BaseModel):
-    maintenance_probability: float
-    maintenance_required_next_30d: int
-    risk_level: str
-    recommended_action: str
+    predicted_class: int
+    predicted_label: str
+    confidence: float
 
 
 class RegressionResponse(BaseModel):
-    predicted_days_until_maintenance: int
-    predicted_maintenance_date: str
-    top_explanations: List[FeatureExplanation]
+    predicted_days_until_maintenance: float
 
 
 class HealthScoreResponse(BaseModel):
     health_score: float
-    health_status: str
-    contributing_factors: List[FeatureExplanation]
+    health_band: str
 
 
 class FullPredictionResponse(BaseModel):
-    maintenance_probability: float
-    maintenance_required_next_30d: int
-    predicted_days_until_maintenance: int
-    predicted_maintenance_date: str
-    risk_level: str
-    recommended_action: str
+    predicted_class: int
+    predicted_label: str
+    confidence: float
+    predicted_days_until_maintenance: float
     health_score: float
-    health_status: str
-    top_explanations: List[FeatureExplanation]
-    contributing_factors: List[FeatureExplanation]
+    health_band: str
 
 
 class HealthResponse(BaseModel):
@@ -56,6 +78,11 @@ class DebugFeaturesResponse(BaseModel):
     classifier_features: list[str]
     regressor_features: list[str]
     regressor_categorical_features: list[str]
+
+
+# =========================
+# Database prediction schemas
+# =========================
 
 class PredictionRunOut(BaseModel):
     id: UUID
@@ -114,3 +141,20 @@ class TicketPredictionOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+class VehiclePredictionStoredResponse(BaseModel):
+    run_id: str
+    asset_id: str
+    predicted_class: int
+    predicted_label: str
+    failure_probability: float
+    confidence: float
+    predicted_days_until_maintenance: float
+    predicted_maintenance_date: str
+    health_score: float
+    health_band: str
+    risk_level: str
+    estimated_cost_lkr: float
+    min_cost_lkr: float
+    max_cost_lkr: float
+    features_used: dict[str, Any]

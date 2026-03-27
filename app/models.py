@@ -17,7 +17,7 @@ class Warehouse(Base):
     country = Column(Text, default="Sri Lanka")
     timezone = Column(Text, default="Asia/Colombo")
     is_active = Column(Boolean, default=True)
-    metadata = Column(JSONB, default={})
+    meta = Column(JSONB, default={})
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -48,7 +48,7 @@ class Profile(Base):
     warehouse_id = Column(UUID(as_uuid=True), ForeignKey("warehouses.id"))
     department_id = Column(UUID(as_uuid=True), ForeignKey("departments.id"))
     avatar_url = Column(Text)
-    metadata = Column(JSONB, default={})
+    meta = Column(JSONB, default={})
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -79,7 +79,7 @@ class Asset(Base):
     last_service_date = Column(Date)
     next_service_date = Column(Date)
     description = Column(Text)
-    metadata = Column(JSONB, default={})
+    meta = Column(JSONB, default={})
     created_by = Column(UUID(as_uuid=True), ForeignKey("profiles.id"))
     vehicle_role = Column(Text)
     payload_capacity_kg = Column(Numeric(12, 2))
@@ -107,7 +107,7 @@ class MaintenanceEvent(Base):
     currency = Column(Text, default="LKR")
     vendor_name = Column(Text)
     notes = Column(Text)
-    metadata = Column(JSONB, default={})
+    meta = Column(JSONB, default={})
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -183,7 +183,7 @@ class Ticket(Base):
     reviewed_at = Column(DateTime(timezone=True))
     resolved_at = Column(DateTime(timezone=True))
     closed_at = Column(DateTime(timezone=True))
-    metadata = Column(JSONB, default={})
+    meta = Column(JSONB, default={})
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -193,45 +193,14 @@ class PredictionRun(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     model_id = Column(UUID(as_uuid=True), ForeignKey("model_registry.id"), nullable=False)
-    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"))
-    ticket_id = Column(UUID(as_uuid=True), ForeignKey("tickets.id"))
-    input_snapshot = Column(JSONB, default={})
-    requested_by = Column(UUID(as_uuid=True), ForeignKey("profiles.id"))
-    run_started_at = Column(DateTime(timezone=True), server_default=func.now())
-    run_finished_at = Column(DateTime(timezone=True))
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"), nullable=True)
+    ticket_id = Column(UUID(as_uuid=True), ForeignKey("tickets.id"), nullable=True)
+    input_snapshot = Column(JSONB, nullable=False, default={})
+    requested_by = Column(UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=True)
+    run_started_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    run_finished_at = Column(DateTime(timezone=True), nullable=True)
     status = Column(Text, nullable=False, default="completed")
-    error_message = Column(Text)
-
-
-class AssetFailurePrediction(Base):
-    __tablename__ = "asset_failure_predictions"
-
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    run_id = Column(UUID(as_uuid=True), ForeignKey("prediction_runs.id"), unique=True, nullable=False)
-    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"), nullable=False)
-    health_score = Column(Numeric(10, 4))
-    failure_probability = Column(Numeric(10, 4))
-    confidence = Column(Numeric(10, 4))
-    risk_level = Column(Text)
-    predicted_maintenance_date = Column(Date)
-    days_until_maintenance = Column(Integer)
-    top_explanations = Column(JSONB, default={})
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-
-
-class AssetCostPrediction(Base):
-    __tablename__ = "asset_cost_predictions"
-
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    run_id = Column(UUID(as_uuid=True), ForeignKey("prediction_runs.id"), unique=True, nullable=False)
-    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"), nullable=False)
-    estimated_cost = Column(Numeric(12, 2))
-    min_cost = Column(Numeric(12, 2))
-    max_cost = Column(Numeric(12, 2))
-    currency = Column(Text, default="LKR")
-    confidence_score = Column(Numeric(10, 4))
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-
+    error_message = Column(Text, nullable=True)
 
 class Report(Base):
     __tablename__ = "reports"
@@ -268,10 +237,10 @@ class Notification(Base):
     related_report_id = Column(UUID(as_uuid=True), ForeignKey("reports.id"))
     sent_at = Column(DateTime(timezone=True))
     read_at = Column(DateTime(timezone=True))
-    metadata = Column(JSONB, default={})
+    meta = Column(JSONB, default={})
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    class AssetAssignment(Base):
+class AssetAssignment(Base):
     __tablename__ = "asset_assignments"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -306,7 +275,7 @@ class AssetDocument(Base):
     mime_type = Column(Text)
     document_type = Column(Text)
     uploaded_by = Column(UUID(as_uuid=True), ForeignKey("profiles.id"))
-    metadata = Column(JSONB, default={})
+    meta = Column(JSONB, default={})
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -358,6 +327,34 @@ class ModelRegistry(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+class AssetFailurePrediction(Base):
+    __tablename__ = "asset_failure_predictions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id = Column(UUID(as_uuid=True), ForeignKey("prediction_runs.id"), unique=True, nullable=False)
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"), nullable=False)
+    health_score = Column(Numeric(10, 4))
+    failure_probability = Column(Numeric(10, 4))
+    confidence = Column(Numeric(10, 4))
+    risk_level = Column(Text)
+    predicted_maintenance_date = Column(Date)
+    days_until_maintenance = Column(Integer)
+    top_explanations = Column(JSONB, default={})
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class AssetCostPrediction(Base):
+    __tablename__ = "asset_cost_predictions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id = Column(UUID(as_uuid=True), ForeignKey("prediction_runs.id"), unique=True, nullable=False)
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"), nullable=False)
+    estimated_cost = Column(Numeric(12, 2))
+    min_cost = Column(Numeric(12, 2))
+    max_cost = Column(Numeric(12, 2))
+    currency = Column(Text, default="LKR")
+    confidence_score = Column(Numeric(10, 4))
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 class TicketPrediction(Base):
     __tablename__ = "ticket_predictions"
@@ -365,12 +362,14 @@ class TicketPrediction(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     run_id = Column(UUID(as_uuid=True), ForeignKey("prediction_runs.id"), unique=True, nullable=False)
     ticket_id = Column(UUID(as_uuid=True), ForeignKey("tickets.id"), nullable=False)
-    predicted_category = Column(Text)
-    predicted_priority = Column(Text)
-    category_confidence = Column(Numeric(10, 4))
-    priority_confidence = Column(Numeric(10, 4))
-    generated_summary = Column(Text)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    predicted_category = Column(Text, nullable=True)
+    predicted_priority = Column(Text, nullable=True)
+    category_confidence = Column(Numeric(10, 4), nullable=True)
+    priority_confidence = Column(Numeric(10, 4), nullable=True)
+    generated_summary = Column(Text, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class PredictionExplanation(Base):
