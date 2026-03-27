@@ -270,3 +270,151 @@ class Notification(Base):
     read_at = Column(DateTime(timezone=True))
     metadata = Column(JSONB, default={})
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    class AssetAssignment(Base):
+    __tablename__ = "asset_assignments"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"), nullable=False)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=False)
+    assigned_by = Column(UUID(as_uuid=True), ForeignKey("profiles.id"))
+    assigned_at = Column(DateTime(timezone=True), server_default=func.now())
+    unassigned_at = Column(DateTime(timezone=True))
+    is_active = Column(Boolean, default=True)
+    notes = Column(Text)
+
+
+class AssetStatusHistory(Base):
+    __tablename__ = "asset_status_history"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"), nullable=False)
+    old_status = Column(Text)
+    new_status = Column(Text, nullable=False)
+    changed_by = Column(UUID(as_uuid=True), ForeignKey("profiles.id"))
+    reason = Column(Text)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class AssetDocument(Base):
+    __tablename__ = "asset_documents"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"), nullable=False)
+    title = Column(Text, nullable=False)
+    file_path = Column(Text, nullable=False)
+    mime_type = Column(Text)
+    document_type = Column(Text)
+    uploaded_by = Column(UUID(as_uuid=True), ForeignKey("profiles.id"))
+    metadata = Column(JSONB, default={})
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class TicketComment(Base):
+    __tablename__ = "ticket_comments"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    ticket_id = Column(UUID(as_uuid=True), ForeignKey("tickets.id"), nullable=False)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=False)
+    comment = Column(Text, nullable=False)
+    is_internal = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class TicketAttachment(Base):
+    __tablename__ = "ticket_attachments"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    ticket_id = Column(UUID(as_uuid=True), ForeignKey("tickets.id"), nullable=False)
+    file_path = Column(Text, nullable=False)
+    mime_type = Column(Text)
+    original_filename = Column(Text)
+    uploaded_by = Column(UUID(as_uuid=True), ForeignKey("profiles.id"))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class TicketStatusHistory(Base):
+    __tablename__ = "ticket_status_history"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    ticket_id = Column(UUID(as_uuid=True), ForeignKey("tickets.id"), nullable=False)
+    old_status = Column(Text)
+    new_status = Column(Text, nullable=False)
+    changed_by = Column(UUID(as_uuid=True), ForeignKey("profiles.id"))
+    note = Column(Text)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class ModelRegistry(Base):
+    __tablename__ = "model_registry"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    model_name = Column(Text, nullable=False)
+    model_type = Column(Text, nullable=False)
+    version = Column(Text, nullable=False)
+    framework = Column(Text)
+    artifact_path = Column(Text)
+    metrics = Column(JSONB, default={})
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class TicketPrediction(Base):
+    __tablename__ = "ticket_predictions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id = Column(UUID(as_uuid=True), ForeignKey("prediction_runs.id"), unique=True, nullable=False)
+    ticket_id = Column(UUID(as_uuid=True), ForeignKey("tickets.id"), nullable=False)
+    predicted_category = Column(Text)
+    predicted_priority = Column(Text)
+    category_confidence = Column(Numeric(10, 4))
+    priority_confidence = Column(Numeric(10, 4))
+    generated_summary = Column(Text)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class PredictionExplanation(Base):
+    __tablename__ = "prediction_explanations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id = Column(UUID(as_uuid=True), ForeignKey("prediction_runs.id"), nullable=False)
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"))
+    explanation_type = Column(Text, nullable=False, default="shap")
+    explanation_text = Column(Text)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class PredictionFeatureImportance(Base):
+    __tablename__ = "prediction_feature_importance"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    explanation_id = Column(UUID(as_uuid=True), ForeignKey("prediction_explanations.id"), nullable=False)
+    feature_name = Column(Text, nullable=False)
+    feature_value = Column(Text)
+    importance_score = Column(Numeric(16, 8), nullable=False)
+    direction = Column(Text)
+    rank_order = Column(Integer)
+
+
+class ReportSource(Base):
+    __tablename__ = "report_sources"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    report_id = Column(UUID(as_uuid=True), ForeignKey("reports.id"), nullable=False)
+    source_table = Column(Text, nullable=False)
+    source_id = Column(UUID(as_uuid=True))
+    source_label = Column(Text)
+    relevance_score = Column(Numeric(10, 4))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class UserNotificationPreference(Base):
+    __tablename__ = "user_notification_preferences"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=False)
+    channel = Column(Text, nullable=False)
+    notification_type = Column(Text, nullable=False)
+    enabled = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
