@@ -1,49 +1,32 @@
-from fastapi import APIRouter, HTTPException
-from app.repositories.vehicle_repository import (
-    get_vehicle_by_id,
-    get_latest_snapshot,
-    save_prediction,
-)
-from app.ai.services.prediction_service import run_full_prediction
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
 
-router = APIRouter(prefix="/vehicles", tags=["Vehicle Predictions"])
+from app.deps import get_db
+from app.ai.services.vehicle_prediction_service import run_vehicle_prediction_and_store
 
+router = APIRouter(prefix="/vehicle-predictions", tags=["Vehicle Predictions"])
 
-@router.post("/{vehicle_id}/predictions/full")
-def predict_vehicle(vehicle_id: str):
+from app.schemas.prediction import VehiclePredictionStoredResponse
+
+@router.post("/{asset_id}")
+def predict_vehicle(asset_id: str, requested_by: str | None = None, db: Session = Depends(get_db)):
     from app.main import clf_model, clf_features, reg_model, reg_features
 
-    vehicle = get_vehicle_by_id(vehicle_id)
-    if not vehicle:
-        raise HTTPException(status_code=404, detail="Vehicle not found")
+    if clf_model is None or reg_model is None:
+        raise HTTPException(status_code=500, detail="Models are not loaded")
 
-    snapshot = get_latest_snapshot(vehicle_id)
-    if not snapshot:
-        raise HTTPException(status_code=404, detail="No snapshot found for vehicle")
-
-    payload = {**vehicle, **snapshot}
-
-    result = run_full_prediction(
-        data=payload,
-        clf_model=clf_model,
-        clf_features=clf_features,
-        reg_model=reg_model,
-        reg_features=reg_features,
-    )
-
-    save_prediction({
-        "vehicle_id": vehicle_id,
-        "snapshot_id": snapshot["id"],
-        "maintenance_probability": result["maintenance_probability"],
-        "maintenance_required_next_30d": bool(result["maintenance_required_next_30d"]),
-        "predicted_days_until_maintenance": result["predicted_days_until_maintenance"],
-        "predicted_maintenance_date": result["predicted_maintenance_date"],
-        "health_score": result["health_score"],
-        "health_status": result["health_status"],
-        "risk_level": result["risk_level"],
-        "recommended_action": result["recommended_action"],
-        "regression_explanations": result["top_explanations"],
-        "health_contributing_factors": result["contributing_factors"],
-    })
-
-    return result
+    try:
+        result = run_vehicle_prediction_and_store(
+            db=db,
+            asset_id=asset_id,
+            requested_by=requested_by,
+            clf_model=clf_model,
+            clf_features=clf_features,
+            reg_model=reg_model,
+            reg_features=reg_features,
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Vehicle prediction failed: {str(e)}")
