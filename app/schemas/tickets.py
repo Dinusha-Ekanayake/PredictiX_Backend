@@ -2,12 +2,14 @@ from pydantic import BaseModel
 from uuid import UUID
 from typing import Optional
 
+
 class TicketCreate(BaseModel):
     asset_id: Optional[UUID] = None
     warehouse_id: Optional[UUID] = None
     title: str
     description: str
     created_by: UUID
+
 
 class TicketUpdate(BaseModel):
     status: Optional[str] = None
@@ -17,6 +19,7 @@ class TicketUpdate(BaseModel):
     final_category: Optional[str] = None
     ticket_summary: Optional[str] = None
     asset_summary: Optional[str] = None
+
 
 class TicketOut(BaseModel):
     id: UUID

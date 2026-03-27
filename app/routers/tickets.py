@@ -1,10 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
+
 from app.deps import get_db
 from app.models import Ticket
-from app.schemas.ticket import TicketCreate, TicketUpdate, TicketOut
+from app.schemas.tickets import TicketCreate, TicketUpdate, TicketOut
 
 router = APIRouter(prefix="/tickets", tags=["Tickets"])
+
 
 @router.post("/", response_model=TicketOut)
 def create_ticket(payload: TicketCreate, db: Session = Depends(get_db)):
@@ -13,6 +15,7 @@ def create_ticket(payload: TicketCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(obj)
     return obj
+
 
 @router.get("/", response_model=list[TicketOut])
 def list_tickets(
@@ -27,12 +30,14 @@ def list_tickets(
         q = q.filter(Ticket.asset_id == asset_id)
     return q.order_by(Ticket.created_at.desc()).all()
 
+
 @router.get("/{ticket_id}", response_model=TicketOut)
 def get_ticket(ticket_id: str, db: Session = Depends(get_db)):
     obj = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Ticket not found")
     return obj
+
 
 @router.put("/{ticket_id}", response_model=TicketOut)
 def update_ticket(ticket_id: str, payload: TicketUpdate, db: Session = Depends(get_db)):
