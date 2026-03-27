@@ -16,3 +16,4 @@ numpy
 scikit-learn
 catboost
 shap
+supabase

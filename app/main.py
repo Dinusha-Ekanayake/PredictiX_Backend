@@ -8,6 +8,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.routers import auth
 from app.routers.assets import router as assets_router
 from app.routers.predictions import router as predictions_router
+from app.routers.vehicle_predictions import router as vehicle_predictions_router
+
+
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -81,6 +84,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(assets_router)
 app.include_router(predictions_router)
+app.include_router(vehicle_predictions_router)
 
 
 @app.get("/")
