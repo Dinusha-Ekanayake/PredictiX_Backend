@@ -17,7 +17,7 @@ class Warehouse(Base):
     country = Column(Text, default="Sri Lanka")
     timezone = Column(Text, default="Asia/Colombo")
     is_active = Column(Boolean, default=True)
-    meta = Column(JSONB, default={})
+    # meta = Column(JSONB, default={})
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -79,7 +79,7 @@ class Asset(Base):
     last_service_date = Column(Date)
     next_service_date = Column(Date)
     description = Column(Text)
-    meta = Column(JSONB, default={})
+    # meta = Column(JSONB, default={})
     created_by = Column(UUID(as_uuid=True), ForeignKey("profiles.id"))
     vehicle_role = Column(Text)
     payload_capacity_kg = Column(Numeric(12, 2))
