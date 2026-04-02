@@ -9,6 +9,8 @@ class UserCreate(BaseModel):
     password: str
     role: str = "USER"
     dept_id: Optional[int] = None
+    warehouse: Optional[str] = None
+    contact_number: Optional[str] = None
 
 class UserOut(BaseModel):
     user_id: UUID
@@ -17,5 +19,18 @@ class UserOut(BaseModel):
     role: str
     is_active: bool
 
+class UserBase(BaseModel):
+    username: str
+    email: str
+class UserUpdate(BaseModel):
+    username: str
+    email: str
+
+class UserCreate(UserBase):
+    password: str
+
+class UserRead(UserBase):
+    id: int
+
     class Config:
-        from_attributes = True
+        orm_mode = True
