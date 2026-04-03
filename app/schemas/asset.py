@@ -1,61 +1,102 @@
-from pydantic import BaseModel, Field
-from typing import Optional, Dict, Any, List
-from datetime import date, datetime
+from pydantic import BaseModel
+from uuid import UUID
+from typing import Optional
+from decimal import Decimal
+from datetime import date
 
 
-class AssetBase(BaseModel):
-    asset_code: str = Field(..., examples=["AST-001"])
-    name: str = Field(..., examples=["Conveyor Belt A1"])
+class AssetCreate(BaseModel):
+    asset_code: str
+    warehouse_id: UUID
+    department_id: Optional[UUID] = None
+    asset_name: str
+    asset_type: str = "vehicle"
+    category: Optional[str] = None
+    vehicle_type: Optional[str] = None
+    make: Optional[str] = None
+    model: Optional[str] = None
+    manufacture_year: Optional[int] = None
+    registration_number: Optional[str] = None
+    vin: Optional[str] = None
+    status: str = "active"
+    health_band: Optional[str] = None
+    criticality_score: Optional[Decimal] = None
+    purchase_date: Optional[date] = None
+    warranty_expiry_date: Optional[date] = None
+    assigned_to: Optional[UUID] = None
+    current_mileage: Optional[Decimal] = None
+    last_service_date: Optional[date] = None
+    next_service_date: Optional[date] = None
     description: Optional[str] = None
-    category_id: Optional[int] = None
-    location: Optional[str] = None
-    asset_family: Optional[str] = None
-    status: str = Field(default="ACTIVE")  # ACTIVE / INACTIVE / RETIRED
-    criticality: str = Field(default="MEDIUM")  # LOW / MEDIUM / HIGH / CRITICAL
-    installation_date: Optional[date] = None
-    health_score: Optional[int] = Field(default=None, ge=0, le=100)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-
-
-class AssetCreate(AssetBase):
-    pass
+    created_by: Optional[UUID] = None
+    vehicle_role: Optional[str] = None
+    payload_capacity_kg: Optional[Decimal] = None
+    vehicle_age_years: Optional[int] = None
+    lifetime_service_count: Optional[int] = None
+    lifetime_breakdown_count: Optional[int] = None
 
 
 class AssetUpdate(BaseModel):
-    # allow partial updates
-    name: Optional[str] = None
-    description: Optional[str] = None
-    category_id: Optional[int] = None
-    location: Optional[str] = None
-    asset_family: Optional[str] = None
+    asset_code: Optional[str] = None
+    warehouse_id: Optional[UUID] = None
+    department_id: Optional[UUID] = None
+    asset_name: Optional[str] = None
+    asset_type: Optional[str] = None
+    category: Optional[str] = None
+    vehicle_type: Optional[str] = None
+    make: Optional[str] = None
+    model: Optional[str] = None
+    manufacture_year: Optional[int] = None
+    registration_number: Optional[str] = None
+    vin: Optional[str] = None
     status: Optional[str] = None
-    criticality: Optional[str] = None
-    installation_date: Optional[date] = None
-    health_score: Optional[int] = Field(default=None, ge=0, le=100)
-    metadata: Optional[Dict[str, Any]] = None
+    health_band: Optional[str] = None
+    criticality_score: Optional[Decimal] = None
+    purchase_date: Optional[date] = None
+    warranty_expiry_date: Optional[date] = None
+    assigned_to: Optional[UUID] = None
+    current_mileage: Optional[Decimal] = None
+    last_service_date: Optional[date] = None
+    next_service_date: Optional[date] = None
+    description: Optional[str] = None
+    created_by: Optional[UUID] = None
+    vehicle_role: Optional[str] = None
+    payload_capacity_kg: Optional[Decimal] = None
+    vehicle_age_years: Optional[int] = None
+    lifetime_service_count: Optional[int] = None
+    lifetime_breakdown_count: Optional[int] = None
 
 
 class AssetOut(BaseModel):
-    asset_id: int
+    id: UUID
     asset_code: str
-    name: str
-    description: Optional[str]
-    category_id: Optional[int]
-    location: Optional[str]
-    asset_family: Optional[str]
+    warehouse_id: UUID
+    department_id: Optional[UUID] = None
+    asset_name: str
+    asset_type: str
+    category: Optional[str] = None
+    vehicle_type: Optional[str] = None
+    make: Optional[str] = None
+    model: Optional[str] = None
+    manufacture_year: Optional[int] = None
+    registration_number: Optional[str] = None
+    vin: Optional[str] = None
     status: str
-    criticality: str
-    installation_date: Optional[date]
-    health_score: Optional[int]
-    metadata: Dict[str, Any]
-    created_at: datetime
+    health_band: Optional[str] = None
+    criticality_score: Optional[Decimal] = None
+    purchase_date: Optional[date] = None
+    warranty_expiry_date: Optional[date] = None
+    assigned_to: Optional[UUID] = None
+    current_mileage: Optional[Decimal] = None
+    last_service_date: Optional[date] = None
+    next_service_date: Optional[date] = None
+    description: Optional[str] = None
+    created_by: Optional[UUID] = None
+    vehicle_role: Optional[str] = None
+    payload_capacity_kg: Optional[Decimal] = None
+    vehicle_age_years: Optional[int] = None
+    lifetime_service_count: Optional[int] = None
+    lifetime_breakdown_count: Optional[int] = None
 
     class Config:
         from_attributes = True
-
-
-class AssetListOut(BaseModel):
-    items: List[AssetOut]
-    total: int
-    page: int
-    page_size: int

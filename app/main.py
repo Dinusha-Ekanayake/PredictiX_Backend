@@ -6,10 +6,34 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.routers import auth
+
+# existing routers
 from app.routers.assets import router as assets_router
 from app.routers.predictions import router as predictions_router
 from app.routers.warehouse_dashboard import  warehouse_dashboard_router
 app.include_router(warehouse_dashboard_router)
+from app.routers.vehicle_predictions import router as vehicle_predictions_router
+
+# additional routers created for DB endpoints
+from app.routers.warehouses import router as warehouses_router
+from app.routers.departments import router as departments_router
+from app.routers.profile import router as profiles_router
+from app.routers.maintenance import router as maintenance_router
+from app.routers.tickets import router as tickets_router
+from app.routers.sensor_readings import router as sensor_readings_router
+from app.routers.reports import router as reports_router
+from app.routers.notifications import router as notifications_router
+from app.routers.asset_assignments import router as asset_assignments_router
+from app.routers.asset_status_history import router as asset_status_history_router
+from app.routers.asset_documents import router as asset_documents_router
+from app.routers.ticket_comments import router as ticket_comments_router
+from app.routers.ticket_attachments import router as ticket_attachments_router
+from app.routers.ticket_status_history import router as ticket_status_history_router
+from app.routers.model_registry import router as model_registry_router
+from app.routers.prediction_explanations import router as prediction_explanations_router
+from app.routers.report_sources import router as report_sources_router
+from app.routers.user_notification_preferences import router as user_notification_preferences_router
+
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_DIR = BASE_DIR / "ai" / "models"
@@ -79,14 +103,48 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# auth
 app.include_router(auth.router)
+
+# existing feature routers
 app.include_router(assets_router)
 app.include_router(predictions_router)
+app.include_router(vehicle_predictions_router)
+
+# database CRUD / listing routers
+app.include_router(warehouses_router)
+app.include_router(departments_router)
+app.include_router(profiles_router)
+app.include_router(maintenance_router)
+app.include_router(tickets_router)
+app.include_router(sensor_readings_router)
+app.include_router(reports_router)
+app.include_router(notifications_router)
+
+# remaining schema routers
+app.include_router(asset_assignments_router)
+app.include_router(asset_status_history_router)
+app.include_router(asset_documents_router)
+app.include_router(ticket_comments_router)
+app.include_router(ticket_attachments_router)
+app.include_router(ticket_status_history_router)
+app.include_router(model_registry_router)
+app.include_router(prediction_explanations_router)
+app.include_router(report_sources_router)
+app.include_router(user_notification_preferences_router)
 
 
 @app.get("/")
 def home():
-    return {"message": "PredictiX API running"}
+    return {
+        "message": "PredictiX API running",
+        "models_loaded": all([
+            clf_model is not None,
+            clf_features is not None,
+            reg_model is not None,
+            reg_features is not None,
+        ]),
+    }
 
 
 @app.get("/favicon.ico", include_in_schema=False)
