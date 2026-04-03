@@ -8,7 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.routers import auth
 from app.routers.assets import router as assets_router
 from app.routers.predictions import router as predictions_router
-
+from app.routers.warehouse_dashboard import  warehouse_dashboard_router
+app.include_router(warehouse_dashboard_router)
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_DIR = BASE_DIR / "ai" / "models"
