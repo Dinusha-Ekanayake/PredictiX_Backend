@@ -1,7 +1,12 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+import os
+from dotenv import load_dotenv
+load_dotenv()  # Load environment variables from .env file
+# from app.core.config import settings
 
-from app.core.config import settings
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-engine = create_engine(settings.DATABASE_URL, pool_pre_ping=True)
+print(os.getenv("DATABASE_URL"))  # Debugging line to check if DATABASE_URL is loaded correctly
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
