@@ -1,0 +1,3 @@
+column tickets.meta does not exist
+LINE 2: ...olved_at, tickets.closed_at AS tickets_closed_at, tickets.me...
+                                                             ^
