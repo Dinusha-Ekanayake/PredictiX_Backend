@@ -32,6 +32,7 @@ from app.routers.model_registry import router as model_registry_router
 from app.routers.prediction_explanations import router as prediction_explanations_router
 from app.routers.report_sources import router as report_sources_router
 from app.routers.user_notification_preferences import router as user_notification_preferences_router
+from app.routers.db_debug import router as db_debug_router
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -134,6 +135,7 @@ app.include_router(model_registry_router)
 app.include_router(prediction_explanations_router)
 app.include_router(report_sources_router)
 app.include_router(user_notification_preferences_router)
+app.include_router(db_debug_router)
 
 
 @app.get("/")
