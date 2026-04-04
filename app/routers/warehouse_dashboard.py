@@ -168,3 +168,76 @@ def get_warehouse_summary(db: Session = Depends(get_db)):
         "monthlyTicketVolume": monthly_ticket_volume,
         "criticalAssets": critical_assets_list
     }
+
+
+# ──────────────────────────────────────────────────────────────
+# AI REPORT GENERATION ENDPOINT (Admin only)
+# ──────────────────────────────────────────────────────────────
+
+from fastapi import HTTPException
+from pydantic import BaseModel
+
+class ChatRequest(BaseModel):
+    message: str
+    asset_id: str | None = None
+
+
+@warehouse_dashboard_router.get("/generate-report")
+def generate_warehouse_report(db: Session = Depends(get_db)):
+    """
+    Warehouse Report Agent endpoint.
+    Aggregates all PostgreSQL data → injects into Llama 3 (via Groq) →
+    returns AI-generated report sections + raw data for charts.
+    Admin access only.
+    """
+    try:
+        from app.agents.report_agents import run_warehouse_agent
+        result = run_warehouse_agent(db)
+        return {
+            "status": "success",
+            "ai_sections": result["ai_sections"],
+            "context": result["context"],
+        }
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Report generation failed: {str(e)}")
+
+
+@warehouse_dashboard_router.post("/chat-route")
+def chat_route(request: ChatRequest, db: Session = Depends(get_db)):
+    """
+    Main Router Agent endpoint for chatbot integration.
+    Routes user message to the correct agent and returns response.
+    """
+    try:
+        from app.agents.report_agents import route_request, run_warehouse_agent, run_asset_agent
+
+        intent = route_request(request.message)
+
+        if intent == "warehouse_report":
+            result = run_warehouse_agent(db)
+            return {
+                "intent": intent,
+                "response": result["ai_sections"].get("insight_summary", ""),
+                "full_report": result["ai_sections"],
+                "context": result["context"],
+            }
+        elif intent == "asset_report":
+            result = run_asset_agent(asset_id=request.asset_id)
+            return {
+                "intent": intent,
+                "response": result["message"],
+                "data": result,
+            }
+        else:
+            return {
+                "intent": intent,
+                "response": "I can help you generate warehouse or asset reports. "
+                            "Please ask me to generate a report for more details.",
+            }
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Chat routing failed: {str(e)}")
+
