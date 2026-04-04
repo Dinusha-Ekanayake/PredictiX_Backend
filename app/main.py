@@ -10,8 +10,7 @@ from app.routers import auth
 # existing routers
 from app.routers.assets import router as assets_router
 from app.routers.predictions import router as predictions_router
-from app.routers.warehouse_dashboard import  warehouse_dashboard_router
-app.include_router(warehouse_dashboard_router)
+from app.routers.warehouse_dashboard import warehouse_dashboard_router
 from app.routers.vehicle_predictions import router as vehicle_predictions_router
 
 # additional routers created for DB endpoints
@@ -95,6 +94,8 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
     ],
@@ -110,6 +111,7 @@ app.include_router(auth.router)
 app.include_router(assets_router)
 app.include_router(predictions_router)
 app.include_router(vehicle_predictions_router)
+app.include_router(warehouse_dashboard_router)
 
 # database CRUD / listing routers
 app.include_router(warehouses_router)

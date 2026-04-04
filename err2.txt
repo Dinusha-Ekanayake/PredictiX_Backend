@@ -1,0 +1,4 @@
+operator does not exist: ticket_status <> character varying
+LINE 4: WHERE tickets.status != $1::VARCHAR) AS anon_1
+                             ^
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
