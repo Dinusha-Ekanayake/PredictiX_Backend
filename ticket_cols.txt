@@ -1,1 +1,0 @@
-id,ticket_number,asset_id,warehouse_id,title,description,status,priority,predicted_priority,final_priority,predicted_category,final_category,ticket_summary,asset_summary,created_by,assigned_to,reviewed_by,opened_at,reviewed_at,resolved_at,closed_at,meta,created_at,updated_at
