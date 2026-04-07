@@ -10,6 +10,7 @@ from app.routers import auth
 # existing routers
 from app.routers.assets import router as assets_router
 from app.routers.predictions import router as predictions_router
+from app.routers.warehouse_dashboard import warehouse_dashboard_router
 from app.routers.vehicle_predictions import router as vehicle_predictions_router
 
 # additional routers created for DB endpoints
@@ -31,6 +32,7 @@ from app.routers.model_registry import router as model_registry_router
 from app.routers.prediction_explanations import router as prediction_explanations_router
 from app.routers.report_sources import router as report_sources_router
 from app.routers.user_notification_preferences import router as user_notification_preferences_router
+from app.routers.db_debug import router as db_debug_router
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -93,6 +95,8 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
     ],
@@ -108,6 +112,7 @@ app.include_router(auth.router)
 app.include_router(assets_router)
 app.include_router(predictions_router)
 app.include_router(vehicle_predictions_router)
+app.include_router(warehouse_dashboard_router)
 
 # database CRUD / listing routers
 app.include_router(warehouses_router)
@@ -130,6 +135,7 @@ app.include_router(model_registry_router)
 app.include_router(prediction_explanations_router)
 app.include_router(report_sources_router)
 app.include_router(user_notification_preferences_router)
+app.include_router(db_debug_router)
 
 
 @app.get("/")
