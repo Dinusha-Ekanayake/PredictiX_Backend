@@ -1,0 +1,1 @@
+Link:   https://huggingface.co/SharadaAbeywickrama/asset_summary_model
