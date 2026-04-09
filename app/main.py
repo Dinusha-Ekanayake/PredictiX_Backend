@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
 import pickle
+import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,6 +34,7 @@ from .routers.prediction_explanations import router as prediction_explanations_r
 from .routers.report_sources import router as report_sources_router
 from .routers.user_notification_preferences import router as user_notification_preferences_router
 from .routers.db_debug import router as db_debug_router
+from .routers.user_profile import router as user_profile_router
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -108,7 +110,8 @@ app.add_middleware(
 )
 
 # auth
-app.include_router(auth.router)
+# app.include_router(auth.router)  # DISABLED - Using inline /auth/login in main.py instead
+# print(f"[MAIN] Auth router included. Routes in auth.router: {[r.path for r in auth.router.routes]}")
 
 # existing feature routers
 app.include_router(assets_router)
@@ -138,6 +141,7 @@ app.include_router(prediction_explanations_router)
 app.include_router(report_sources_router)
 app.include_router(user_notification_preferences_router)
 app.include_router(db_debug_router)
+app.include_router(user_profile_router)
 
 
 @app.get("/")
@@ -150,6 +154,71 @@ def home():
             reg_model is not None,
             reg_features is not None,
         ]),
+    }
+
+
+@app.post("/auth/login")
+def login_endpoint(request_data: dict):
+    from datetime import datetime, timedelta
+    from jose import jwt
+    import uuid
+    
+    email = request_data.get("email", "").strip().lower()
+    password = request_data.get("password", "").strip()
+    role = request_data.get("role", "").upper()
+    
+    TEST_USERS = {
+        "nuwan.gunasekara.tra1@lankalogix.lk": {"password": "nuwan", "full_name": "Nuwan Gunasekara", "role": "user"},
+        "anjali.warnakulasuriya.adm1@lankalogix.lk": {"password": "admin", "full_name": "Anjali Warnakulasuriya", "role": "admin"}
+    }
+    
+    if email not in TEST_USERS or TEST_USERS[email]["password"] != password:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    user_data = TEST_USERS[email]
+    if user_data["role"].upper() != role:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=401, detail="Invalid role")
+    
+    # Get the real user from database
+    from app.db import SessionLocal
+    from app.models import Profile
+    db = SessionLocal()
+    user = db.query(Profile).filter(Profile.email == email).first()
+    
+    if user:
+        user_id = str(user.id)
+        print(f"[LOGIN] Found user in DB: {user_id}")
+    else:
+        # Fallback to generated UUID if user not in DB
+        user_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, email))
+        print(f"[LOGIN] User not in DB, using generated ID: {user_id}")
+    
+    db.close()
+    
+    # Create JWT payload
+    payload = {
+        "sub": user_id,
+        "email": email,
+        "role": user_data["role"],
+        "exp": datetime.utcnow() + timedelta(hours=24)
+    }
+    
+    # Use JWT_SECRET from .env file
+    secret = os.getenv("JWT_SECRET", "supersecret")
+    algorithm = os.getenv("JWT_ALGORITHM", "HS256")
+    token = jwt.encode(payload, secret, algorithm=algorithm)
+    
+    print(f"[LOGIN] Generated token for {email} with user_id={user_id}")
+    
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user_id": user_id,
+        "email": email,
+        "role": user_data["role"],
+        "full_name": user_data["full_name"]
     }
 
 
