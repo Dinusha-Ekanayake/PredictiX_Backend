@@ -30,3 +30,21 @@ class TicketOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+from pydantic import BaseModel, Field
+
+
+class TicketCategorizationRequest(BaseModel):
+    title: str = Field(..., min_length=1)
+    description: str = Field(..., min_length=1)
+
+
+class TicketCategoryScore(BaseModel):
+    label: str
+    score: float
+
+
+class TicketCategorizationResponse(BaseModel):
+    predicted_label: str
+    confidence: float
+    scores: list[TicketCategoryScore]
