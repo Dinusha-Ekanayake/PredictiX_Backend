@@ -1,2 +1,0 @@
-maintenance_events sum: 94305488.95
-asset_cost_predictions sum: 36295890.00

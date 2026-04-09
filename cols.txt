@@ -1,2 +1,0 @@
-maintenance_events: id,asset_id,event_type,title,description,performed_by,scheduled_date,performed_at,odometer_reading,downtime_hours,cost_amount,currency,vendor_name,notes,metadata,created_at,updated_at
-asset_cost_predictions: id,run_id,asset_id,estimated_cost,min_cost,max_cost,currency,confidence_score,created_at
