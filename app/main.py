@@ -5,32 +5,34 @@ import pickle
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import auth
+from .routers import auth
 
 # existing routers
-from app.routers.assets import router as assets_router
-from app.routers.predictions import router as predictions_router
-from app.routers.vehicle_predictions import router as vehicle_predictions_router
+from .routers.assets import router as assets_router
+from .routers.predictions import router as predictions_router
+from .routers.warehouse_dashboard import warehouse_dashboard_router
+from .routers.vehicle_predictions import router as vehicle_predictions_router
 
 # additional routers created for DB endpoints
-from app.routers.warehouses import router as warehouses_router
-from app.routers.departments import router as departments_router
-from app.routers.profile import router as profiles_router
-from app.routers.maintenance import router as maintenance_router
-from app.routers.tickets import router as tickets_router
-from app.routers.sensor_readings import router as sensor_readings_router
-from app.routers.reports import router as reports_router
-from app.routers.notifications import router as notifications_router
-from app.routers.asset_assignments import router as asset_assignments_router
-from app.routers.asset_status_history import router as asset_status_history_router
-from app.routers.asset_documents import router as asset_documents_router
-from app.routers.ticket_comments import router as ticket_comments_router
-from app.routers.ticket_attachments import router as ticket_attachments_router
-from app.routers.ticket_status_history import router as ticket_status_history_router
-from app.routers.model_registry import router as model_registry_router
-from app.routers.prediction_explanations import router as prediction_explanations_router
-from app.routers.report_sources import router as report_sources_router
-from app.routers.user_notification_preferences import router as user_notification_preferences_router
+from .routers.warehouses import router as warehouses_router
+from .routers.departments import router as departments_router
+from .routers.profile import router as profiles_router
+from .routers.maintenance import router as maintenance_router
+from .routers.tickets import router as tickets_router
+from .routers.sensor_readings import router as sensor_readings_router
+from .routers.reports import router as reports_router
+from .routers.notifications import router as notifications_router
+from .routers.asset_assignments import router as asset_assignments_router
+from .routers.asset_status_history import router as asset_status_history_router
+from .routers.asset_documents import router as asset_documents_router
+from .routers.ticket_comments import router as ticket_comments_router
+from .routers.ticket_attachments import router as ticket_attachments_router
+from .routers.ticket_status_history import router as ticket_status_history_router
+from .routers.model_registry import router as model_registry_router
+from .routers.prediction_explanations import router as prediction_explanations_router
+from .routers.report_sources import router as report_sources_router
+from .routers.user_notification_preferences import router as user_notification_preferences_router
+from .routers.db_debug import router as db_debug_router
 
 from app.ai.services.ticket_categorization_service import warmup_ticket_categorizer
 
@@ -101,6 +103,10 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
     ],
@@ -116,6 +122,7 @@ app.include_router(auth.router)
 app.include_router(assets_router)
 app.include_router(predictions_router)
 app.include_router(vehicle_predictions_router)
+app.include_router(warehouse_dashboard_router)
 
 # database CRUD / listing routers
 app.include_router(warehouses_router)
@@ -138,6 +145,7 @@ app.include_router(model_registry_router)
 app.include_router(prediction_explanations_router)
 app.include_router(report_sources_router)
 app.include_router(user_notification_preferences_router)
+app.include_router(db_debug_router)
 
 
 @app.get("/")
