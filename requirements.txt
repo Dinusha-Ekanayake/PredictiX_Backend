@@ -17,3 +17,8 @@ scikit-learn
 catboost
 shap
 supabase
+
+transformers
+torch
+huggingface_hub
+safetensors
