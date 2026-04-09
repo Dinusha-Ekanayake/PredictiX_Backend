@@ -4,17 +4,21 @@ from sqlalchemy import func, text, extract
 import calendar
 from datetime import datetime, timedelta
 
-from app.deps import get_db
-from app.models import Asset, Ticket, AssetFailurePrediction, MaintenanceEvent, AssetCostPrediction
+from ..deps import get_db
+from ..models import Asset, Ticket, AssetFailurePrediction, MaintenanceEvent, AssetCostPrediction
 
 warehouse_dashboard_router = APIRouter(prefix="/warehouse-dashboard", tags=["Warehouse Dashboard"])
 
 @warehouse_dashboard_router.get("/summary")
 def get_warehouse_summary(db: Session = Depends(get_db)):
     """
-    Returns unified summary data for the Warehouse Dashboard by aggregating
-    data directly from the PostgreSQL backend.
+    Returns unified summary data for the Warehouse Dashboard.
+    Fetches all data directly from PostgreSQL database.
     """
+    # If database is not available, raise exception
+    if db is None:
+        raise Exception("Database connection unavailable")
+    
     # 1. Row 1: WarehouseOverviewCards
     active_tickets_count = db.query(Ticket.id).filter(text("status != 'closed'")).count()
     total_tickets_count = db.query(Ticket.id).count()
@@ -135,7 +139,7 @@ def get_warehouse_summary(db: Session = Depends(get_db)):
     for i, m in enumerate(recent_months):
         health_trends.append({
             "month": m,
-            "avgHealth": max(10, base_health - (5 - i) * 2), # Slight jitter
+            "avgHealth": max(10, base_health - (5 - i) * 2),
             "maintenance": months_dict.get(m, 0)
         })
 
