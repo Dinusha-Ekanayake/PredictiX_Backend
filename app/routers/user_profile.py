@@ -10,7 +10,9 @@ from app.schemas.user_profile import (
     UserCreate,
     UserUpdate
 )
+from app.services.notification_service import NotificationService
 from typing import List
+import uuid
 
 router = APIRouter(prefix="/user-profile", tags=["User Profile"])
 
@@ -95,6 +97,13 @@ def update_my_profile(
     db: Session = Depends(get_db)
 ):
     try:
+        import sys
+        print(f"\n[PROFILE-ENDPOINT] PUT /user-profile/me called", flush=True)
+        print(f"[PROFILE-ENDPOINT] Current user: {current_user.full_name}", flush=True)
+        print(f"[PROFILE-ENDPOINT] Payload: firstName={payload.firstName}, lastName={payload.lastName}, phone={payload.contactNumber}, address={payload.address}", flush=True)
+        print(f"[PROFILE-ENDPOINT] DB connection exists: {db is not None}", flush=True)
+        sys.stdout.flush()
+        
         # If no database, just update in-memory (mock user won't persist)
         if payload.firstName is not None or payload.lastName is not None:
             name_parts = (current_user.full_name or "").split(" ")
@@ -117,6 +126,20 @@ def update_my_profile(
         if db:
             db.commit()
             db.refresh(current_user)
+            
+            # ============================================================
+            # SEND NOTIFICATION TO ADMINS ABOUT PROFILE UPDATE
+            # ============================================================
+            import sys
+            print(f"[USER-UPDATE] Profile updated by {current_user.full_name}", flush=True)
+            sys.stdout.flush()
+            try:
+                NotificationService.notify_on_profile_update(db, str(current_user.id))
+            except Exception as notification_error:
+                # Log but don't fail the profile update if notifications fail
+                print(f"[NOTIFICATION-ERROR] Failed to send profile update notification: {str(notification_error)}", flush=True)
+                import traceback
+                traceback.print_exc()
             
         return get_my_profile(current_user=current_user, db=db)
     except Exception as e:
@@ -261,7 +284,6 @@ def create_user(
         dept = db.query(Department).filter(Department.name == data.department).first()
         wh = db.query(Warehouse).filter(Warehouse.name == data.warehouse).first()
         
-        import uuid
         new_profile_id = uuid.uuid4()
         
         new_profile = Profile(
@@ -280,6 +302,22 @@ def create_user(
         db.add(new_profile)
         db.commit()
         
+        # ============================================================
+        # SEND NOTIFICATIONS (All data from PostgreSQL database)
+        # ============================================================
+        
+        print(f"[USER-CREATED] New user created: {data.name} ({data.email}) in {data.department} as {data.role}")
+        
+        try:
+            # Trigger notification service which queries database for all data
+            # This method sends all notifications (to user, admins, and dept members)
+            NotificationService.notify_on_new_user(db, str(new_profile_id))
+        except Exception as notification_error:
+            # Log but don't fail the user creation if notifications fail
+            print(f"[NOTIFICATION-ERROR] Failed to send notifications: {str(notification_error)}")
+            import traceback
+            traceback.print_exc()
+        
         return UserItemOut(
             id=str(new_profile.id),
             firstName=data.firstName,
@@ -296,6 +334,7 @@ def create_user(
         )
     except Exception as e:
         db.rollback()
+        print(f"[USER-CREATE-ERROR] {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/departments", response_model=List[str])
