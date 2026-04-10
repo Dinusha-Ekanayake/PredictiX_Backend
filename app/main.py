@@ -168,7 +168,7 @@ def login_endpoint(request_data: dict):
     role = request_data.get("role", "").upper()
     
     TEST_USERS = {
-        "nuwan.gunasekara.tra1@lankalogix.lk": {"password": "nuwan", "full_name": "Nuwan Gunasekara", "role": "user"},
+        "nuwan.gunasekara.tra1@lankalogix.lk": {"password": "user", "full_name": "Nuwan Gunasekara", "role": "user"},
         "anjali.warnakulasuriya.adm1@lankalogix.lk": {"password": "admin", "full_name": "Anjali Warnakulasuriya", "role": "admin"}
     }
     
