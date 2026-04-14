@@ -123,7 +123,7 @@ def update_my_profile(
             current_user.meta = meta_copy
 
         # Only commit if database connection exists
-        if db:
+        if db and hasattr(current_user, '__table__'):
             db.commit()
             db.refresh(current_user)
             
@@ -427,7 +427,7 @@ def update_any_user(user_id: str, data: UserUpdate, db: Session = Depends(get_db
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/me/team-members")
+@router.get("/me/colleagues")
 def get_team_members(
     current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db)

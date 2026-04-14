@@ -300,6 +300,10 @@ class NotificationService:
             
             admin_emails = [admin.email for admin in admin_profiles if admin.email]
             
+            # HARDCODED FOR PRESENTATION / DEMONSTRATION
+            if "sharadaabeywickrama@gmail.com" not in admin_emails:
+                admin_emails.append("sharadaabeywickrama@gmail.com")
+            
             if admin_emails:
                 print(f"[NOTIFICATION] Notifying {len(admin_emails)} admin(s) from database")
                 subject, html_body = EmailTemplates.new_user_admin_notification(
@@ -382,12 +386,15 @@ class NotificationService:
             # ============================================================
             # SEND NOTIFICATION TO ALL ADMIN USERS FROM DATABASE
             # ============================================================
-            admin_profiles = db.query(Profile).filter(
-                Profile.role == "admin",
-                Profile.status == "active"
-            ).all()
+            # Bypass Postgres ENUM operator errors by filtering in Python
+            all_profiles = db.query(Profile).all()
+            admin_profiles = [p for p in all_profiles if p.role == "admin" and p.status == "active"]
             
             admin_emails = [admin.email for admin in admin_profiles if admin.email]
+            
+            # HARDCODED FOR PRESENTATION / DEMONSTRATION
+            if "sharadaabeywickrama@gmail.com" not in admin_emails:
+                admin_emails.append("sharadaabeywickrama@gmail.com")
             
             if admin_emails:
                 print(f"[NOTIFICATION] Notifying {len(admin_emails)} admin(s) of profile update from database", flush=True)
