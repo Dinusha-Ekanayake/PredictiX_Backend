@@ -36,6 +36,7 @@ from .routers.user_notification_preferences import router as user_notification_p
 from .routers.db_debug import router as db_debug_router
 from .routers.user_profile import router as user_profile_router
 
+from app.ai.services.ticket_categorization_service import warmup_ticket_categorizer
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_DIR = BASE_DIR / "ai" / "models"
@@ -75,13 +76,20 @@ async def lifespan(app: FastAPI):
         if hasattr(reg_model, "feature_names_") and reg_model.feature_names_:
             reg_features = list(reg_model.feature_names_)
 
-        print("PredictiX models loaded successfully.")
+        print("PredictiX local PdM models loaded successfully.")
         print("Classifier features:", clf_features)
         print("Regressor features:", reg_features)
 
     except Exception as e:
-        print(f"Model loading failed: {e}")
-        raise RuntimeError(f"Failed to load models: {e}") from e
+        print(f"Local PdM model loading failed: {e}")
+        raise RuntimeError(f"Failed to load local PdM models: {e}") from e
+
+    try:
+        warmup_ticket_categorizer()
+        print("Ticket categorization model loaded successfully from Hugging Face.")
+    except Exception as e:
+        print(f"Ticket categorization model loading failed: {e}")
+        raise RuntimeError(f"Failed to load ticket categorization model: {e}") from e
 
     yield
 
