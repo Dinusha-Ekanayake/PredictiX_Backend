@@ -5,6 +5,13 @@ from app.deps import get_db
 from app.models import Ticket
 from app.schemas.tickets import TicketCreate, TicketUpdate, TicketOut
 
+from fastapi import HTTPException
+from app.ai.services.ticket_categorization_service import categorize_ticket_text
+from app.schemas.tickets import (
+    TicketCategorizationRequest,
+    TicketCategorizationResponse,
+)
+
 router = APIRouter(prefix="/tickets", tags=["Tickets"])
 
 
@@ -51,3 +58,22 @@ def update_ticket(ticket_id: str, payload: TicketUpdate, db: Session = Depends(g
     db.commit()
     db.refresh(obj)
     return obj
+
+@router.post(
+    "/categorize",
+    response_model=TicketCategorizationResponse,
+)
+def categorize_ticket_endpoint(payload: TicketCategorizationRequest):
+    try:
+        result = categorize_ticket_text(
+            title=payload.title,
+            description=payload.description,
+        )
+        return TicketCategorizationResponse(**result)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to categorize ticket: {exc}",
+        ) from exc
