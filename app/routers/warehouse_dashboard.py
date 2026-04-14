@@ -4,8 +4,9 @@ from sqlalchemy import func, text, extract
 import calendar
 from datetime import datetime, timedelta
 
-from ..deps import get_db
-from ..models import Asset, Ticket, AssetFailurePrediction, MaintenanceEvent, AssetCostPrediction
+from ..deps import get_db, get_current_user
+from ..models import Asset, Ticket, AssetFailurePrediction, MaintenanceEvent, AssetCostPrediction, Profile
+from fastapi import BackgroundTasks
 
 warehouse_dashboard_router = APIRouter(prefix="/warehouse-dashboard", tags=["Warehouse Dashboard"])
 
@@ -240,18 +241,20 @@ class ChatRequest(BaseModel):
 @warehouse_dashboard_router.get("/generate-report")
 def generate_warehouse_report(db: Session = Depends(get_db)):
     """
-    Warehouse Report Agent endpoint.
-    Aggregates all PostgreSQL data → injects into Llama 3 (via Groq) →
-    returns AI-generated report sections + raw data for charts.
+    KB-Enhanced Warehouse Report Agent endpoint.
+    Aggregates all PostgreSQL data → KB Vector Store retrieval →
+    KB Annotations (deterministic) → Llama 3 (via Groq) →
+    returns AI sections + raw context + kb_annotations for PDF export.
     Admin access only.
     """
     try:
         from app.agents.report_agents import run_warehouse_agent
         result = run_warehouse_agent(db)
         return {
-            "status": "success",
-            "ai_sections": result["ai_sections"],
-            "context": result["context"],
+            "status":         "success",
+            "ai_sections":    result["ai_sections"],
+            "context":        result["context"],
+            "kb_annotations": result.get("kb_annotations", {}),  # NEW
         }
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
@@ -295,4 +298,20 @@ def chat_route(request: ChatRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Chat routing failed: {str(e)}")
+from app.services.report_notification_service import ReportNotificationService
 
+@warehouse_dashboard_router.post("/notify-print")
+def notify_report_print(
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user)
+):
+    """
+    Triggers an email notification that the Warehouse AI Report was printed.
+    """
+    background_tasks.add_task(
+        ReportNotificationService.notify_on_report_print,
+        db, 
+        str(current_user.id)
+    )
+    return {"status": "success", "message": "Notification dispatched"}
