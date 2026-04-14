@@ -16,12 +16,10 @@ def get_db():
     try:
         db = SessionLocal()
         yield db
-    except Exception as e:
-        print(f"Database connection failed: {str(e)}")
-        yield None
     finally:
         try:
-            db.close()
+            if 'db' in locals() and db:
+                db.close()
         except:
             pass
 
