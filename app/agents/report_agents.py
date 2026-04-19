@@ -4,7 +4,7 @@ Multi-Agent Warehouse Report System — PredictiX
 Architecture:
   Main Agent (Router)
     ├── Warehouse Report Agent  ← KB-Enhanced RAG + PostgreSQL → Llama 3
-    └── Asset Report Agent      ← entrance stub for asset team
+   
 
 KB-Enhanced RAG Pipeline:
   1. build_warehouse_context() — queries ALL PostgreSQL tables live
