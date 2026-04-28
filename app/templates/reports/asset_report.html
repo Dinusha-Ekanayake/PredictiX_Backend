@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      @page {
+        size: A4;
+        margin: 2cm;
+        @bottom-center {
+          content: "Page " counter(page) " of " counter(pages);
+          font-size: 10px;
+          color: #666;
+        }
+      }
+      body {
+        font-family: "Helvetica", "Arial", sans-serif;
+        color: #333;
+        line-height: 1.6;
+        margin: 0;
+        padding: 0;
+      }
+      .header {
+        border-bottom: 3px solid #0f766e;
+        padding-bottom: 15px;
+        margin-bottom: 25px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .header h1 {
+        color: #0f766e;
+        margin: 0;
+        font-size: 24px;
+      }
+      .header .meta {
+        text-align: right;
+        font-size: 12px;
+        color: #666;
+      }
+      .section {
+        margin-bottom: 20px;
+      }
+      .section-title {
+        color: #0f766e;
+        font-size: 16px;
+        font-weight: bold;
+        border-left: 4px solid #0f766e;
+        padding-left: 10px;
+        margin-bottom: 12px;
+        text-transform: uppercase;
+      }
+      .kpi-grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 15px;
+        margin-bottom: 20px;
+      }
+      .kpi-card {
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        padding: 15px;
+        border-radius: 6px;
+      }
+      .kpi-label {
+        font-size: 11px;
+        color: #64748b;
+        text-transform: uppercase;
+        margin-bottom: 5px;
+      }
+      .kpi-value {
+        font-size: 18px;
+        font-weight: bold;
+        color: #0f172a;
+      }
+      .alert-badge {
+        display: inline-block;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-size: 11px;
+        font-weight: bold;
+        color: white;
+      }
+      .alert-red {
+        background: #ef4444;
+      }
+      .alert-orange {
+        background: #f97316;
+      }
+      .alert-yellow {
+        background: #eab308;
+        color: #000;
+      }
+      .alert-green {
+        background: #22c55e;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-bottom: 15px;
+        font-size: 12px;
+      }
+      th,
+      td {
+        border: 1px solid #ddd;
+        padding: 8px;
+        text-align: left;
+      }
+      th {
+        background-color: #0f766e;
+        color: white;
+      }
+      .recommendation {
+        margin-bottom: 8px;
+        padding-left: 10px;
+        border-left: 3px solid #ccc;
+      }
+      .rec-critical {
+        border-color: #ef4444;
+      }
+      .rec-high {
+        border-color: #f97316;
+      }
+      .rec-medium {
+        border-color: #22c55e;
+      }
+
+      .footer {
+        margin-top: 40px;
+        padding-top: 15px;
+        border-top: 1px solid #ddd;
+        font-size: 10px;
+        color: #888;
+        text-align: center;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <div>
+        <h1>PredictiX Asset Report</h1>
+        <div style="font-size: 14px; color: #555">{{ context.asset_name }}</div>
+      </div>
+      <div class="meta">
+        <div>Report ID: {{ report_id }}</div>
+        <div>Generated: {{ date_now }}</div>
+        <div>Asset ID: {{ context.asset_id }}</div>
+      </div>
+    </div>
+
+    <!-- Executive Summary -->
+    <div class="section">
+      <div class="section-title">1. Executive Summary</div>
+      <div class="kpi-grid">
+        <div class="kpi-card">
+          <div class="kpi-label">Health Score</div>
+          <div class="kpi-value">{{ context.health_score }}%</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Failure Probability</div>
+          <div class="kpi-value">
+            {{ insights.health_metrics.failure_probability }}%
+          </div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Risk Level</div>
+          <div class="kpi-value">
+            <span
+              class="alert-badge {% if context.alert_level == 'red' %}alert-red {% elif context.alert_level == 'orange' %}alert-orange {% elif context.alert_level == 'yellow' %}alert-yellow {% else %}alert-green{% endif %}"
+            >
+              {{ context.risk_level }}
+            </span>
+          </div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Open Tickets</div>
+          <div class="kpi-value">{{ context.ticket_metrics.open_tickets }}</div>
+        </div>
+      </div>
+      <p>{{ insights.executive_summary }}</p>
+    </div>
+
+    <!-- Asset Details -->
+    <div class="section">
+      <div class="section-title">2. Asset Details</div>
+      <table>
+        <tr>
+          <th>Property</th>
+          <th>Value</th>
+        </tr>
+        <tr>
+          <td>Functional Location</td>
+          <td>{{ context.functional_location }}</td>
+        </tr>
+        <tr>
+          <td>Location</td>
+          <td>{{ context.location }}</td>
+        </tr>
+        <tr>
+          <td>Department</td>
+          <td>{{ context.department }}</td>
+        </tr>
+        <tr>
+          <td>Team</td>
+          <td>{{ context.team }}</td>
+        </tr>
+        <tr>
+          <td>Installation Date</td>
+          <td>{{ context.installation_date }}</td>
+        </tr>
+        <tr>
+          <td>Criticality</td>
+          <td>{{ context.criticality }}</td>
+        </tr>
+        <tr>
+          <td>Total Runtime</td>
+          <td>{{ context.total_runtime_hours }} hrs</td>
+        </tr>
+      </table>
+    </div>
+
+    <!-- Maintenance Overview -->
+    <div class="section">
+      <div class="section-title">3. Maintenance Overview</div>
+      <table>
+        <tr>
+          <th>Metric</th>
+          <th>Value</th>
+        </tr>
+        <tr>
+          <td>Last Maintenance</td>
+          <td>{{ context.last_maintenance_date }}</td>
+        </tr>
+        <tr>
+          <td>Next Maintenance</td>
+          <td>{{ context.next_maintenance_date }}</td>
+        </tr>
+        <tr>
+          <td>Total Events</td>
+          <td>{{ context.maintenance_metrics.total_events }}</td>
+        </tr>
+        <tr>
+          <td>Preventive Ratio</td>
+          <td>{{ context.maintenance_metrics.preventive_ratio }}%</td>
+        </tr>
+        <tr>
+          <td>Maintenance Interval</td>
+          <td>{{ context.maintenance_interval_days }} days</td>
+        </tr>
+      </table>
+    </div>
+
+    <!-- Recommendations -->
+    <div class="section">
+      <div class="section-title">4. Recommendations</div>
+
+      {% if insights.recommendations.critical %}
+      <div style="margin-bottom: 10px">
+        <strong style="color: #ef4444">Critical Actions:</strong>
+        {% for item in insights.recommendations.critical %}
+        <div class="recommendation rec-critical">• {{ item }}</div>
+        {% endfor %}
+      </div>
+      {% endif %} {% if insights.recommendations.high %}
+      <div style="margin-bottom: 10px">
+        <strong style="color: #f97316">High Priority:</strong>
+        {% for item in insights.recommendations.high %}
+        <div class="recommendation rec-high">• {{ item }}</div>
+        {% endfor %}
+      </div>
+      {% endif %} {% if insights.recommendations.medium %}
+      <div>
+        <strong style="color: #22c55e">Medium Priority:</strong>
+        {% for item in insights.recommendations.medium %}
+        <div class="recommendation rec-medium">• {{ item }}</div>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </div>
+
+    <!-- Future Predictions -->
+    <div class="section">
+      <div class="section-title">5. Predictions & Insights</div>
+      <table>
+        <tr>
+          <th>Prediction</th>
+          <th>Value</th>
+        </tr>
+        <tr>
+          <td>Estimated Remaining Life</td>
+          <td>{{ insights.future_predictions.estimated_remaining_life }}</td>
+        </tr>
+        <tr>
+          <td>Suggested Maintenance Type</td>
+          <td>{{ insights.future_predictions.suggested_maintenance_type }}</td>
+        </tr>
+        <tr>
+          <td>Optimal Maintenance Date</td>
+          <td>{{ insights.future_predictions.optimal_maintenance_date }}</td>
+        </tr>
+        <tr>
+          <td>Predicted Repair Cost</td>
+          <td>${{ insights.cost_analysis.predicted_repair_cost }}</td>
+        </tr>
+      </table>
+
+      <div style="margin-top: 15px">
+        <strong>Maintenance Insights:</strong>
+        <ul>
+          {% for insight in insights.maintenance_insights %}
+          <li>{{ insight }}</li>
+          {% endfor %}
+        </ul>
+      </div>
+    </div>
+
+    <div class="footer">
+      Generated by PredictiX AI System | Confidential Report | {{ date_now }}
+    </div>
+  </body>
+</html>

@@ -64,3 +64,4 @@ def delete_maintenance_event(event_id: str, db: Session = Depends(get_db)):
     db.delete(obj)
     db.commit()
     return {"message": "Maintenance event deleted"}
+
