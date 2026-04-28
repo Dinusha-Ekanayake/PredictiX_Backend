@@ -25,6 +25,7 @@ from app.routers.notifications import router as notifications_router
 from app.routers.asset_assignments import router as asset_assignments_router
 from app.routers.asset_status_history import router as asset_status_history_router
 from app.routers.asset_documents import router as asset_documents_router
+from app.routers.asset_reports import router as asset_reports_router  
 from app.routers.ticket_comments import router as ticket_comments_router
 from app.routers.ticket_attachments import router as ticket_attachments_router
 from app.routers.ticket_status_history import router as ticket_status_history_router
@@ -33,6 +34,9 @@ from app.routers.prediction_explanations import router as prediction_explanation
 from app.routers.report_sources import router as report_sources_router
 from app.routers.user_notification_preferences import router as user_notification_preferences_router
 from app.routers.db_debug import router as db_debug_router
+from app.routers.date_notifications import router as date_notifications_router
+
+from app.schedulers.notification_scheduler import setup_scheduler, shutdown_scheduler
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -81,8 +85,11 @@ async def lifespan(app: FastAPI):
         print(f"Model loading failed: {e}")
         raise RuntimeError(f"Failed to load models: {e}") from e
 
+    setup_scheduler()
+
     yield
 
+    shutdown_scheduler()
     print("Shutting down PredictiX API...")
 
 
@@ -121,8 +128,10 @@ app.include_router(profiles_router)
 app.include_router(maintenance_router)
 app.include_router(tickets_router)
 app.include_router(sensor_readings_router)
-app.include_router(reports_router)
+app.include_router(reports_router) 
+app.include_router(asset_reports_router)  
 app.include_router(notifications_router)
+
 
 # remaining schema routers
 app.include_router(asset_assignments_router)
@@ -136,6 +145,7 @@ app.include_router(prediction_explanations_router)
 app.include_router(report_sources_router)
 app.include_router(user_notification_preferences_router)
 app.include_router(db_debug_router)
+app.include_router(date_notifications_router)
 
 
 @app.get("/")

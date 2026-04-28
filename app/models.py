@@ -2,9 +2,9 @@ from sqlalchemy import Column, String, Text, Integer, Boolean, Date, DateTime, F
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.sql import func
 from app.db import Base
+from app.core.storage import supabase_storage
 import uuid
-
-
+from datetime import datetime
 class Warehouse(Base):
     __tablename__ = "warehouses"
 
@@ -417,3 +417,16 @@ class UserNotificationPreference(Base):
     enabled = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+class DateNotification(Base):
+    __tablename__ = "date_notifications"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"), nullable=False)
+    user_email = Column(Text, nullable=False)
+    notification_type = Column(String(50), nullable=False)  # e.g., '3_days', '2_days', '1_day'
+    sent_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+class Prediction(Base):
+    __tablename__ = "predictions"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

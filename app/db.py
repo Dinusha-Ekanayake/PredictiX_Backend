@@ -2,8 +2,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 import os
 from dotenv import load_dotenv
+from sqlalchemy.engine import URL
 
-load_dotenv()
+
+load_dotenv(override=True)
 
 SUPABASE_PASSWORD = os.getenv("DATABASE_PASSWORD")
 PROJECT_REF = os.getenv("PROJECT_REF")
