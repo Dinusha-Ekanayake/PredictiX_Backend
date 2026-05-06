@@ -12,7 +12,7 @@ Models used:
 
 from uuid import UUID
 from datetime import datetime
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 from fastapi import HTTPException
 
 from app.models import (
@@ -91,6 +91,7 @@ class AssetContextBuilder:
         # ── 3. Maintenance events (newest first) ───────────
         maintenance = (
             self.db.query(MaintenanceEvent)
+            .options(defer(MaintenanceEvent.meta))
             .filter(MaintenanceEvent.asset_id == asset_id)
             .order_by(MaintenanceEvent.performed_at.desc().nulls_last(),
                       MaintenanceEvent.created_at.desc())
@@ -100,6 +101,7 @@ class AssetContextBuilder:
         # ── 4. Tickets (newest first) ──────────────────────
         tickets = (
             self.db.query(Ticket)
+            .options(defer(Ticket.meta))
             .filter(Ticket.asset_id == asset_id)
             .order_by(Ticket.created_at.desc())
             .all()

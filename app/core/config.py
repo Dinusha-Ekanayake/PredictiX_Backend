@@ -12,6 +12,13 @@ class Settings(BaseSettings):
     EMAIL_USER: str = ""
     EMAIL_PASSWORD: str = ""
 
+    # Supabase configuration
+    SUPABASE_URL: str = ""
+    SUPABASE_KEY: str = ""
+
+    # AI configuration
+    GROQ_API_KEY: str = ""
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
