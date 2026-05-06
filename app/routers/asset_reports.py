@@ -24,21 +24,27 @@ router = APIRouter(prefix="/asset-reports", tags=["Asset Reports"])
 # ─────────────────────────────────────────────────────────
 #  REAL REPORT — pulls from DB
 # ─────────────────────────────────────────────────────────
-@router.post("/{asset_id}", response_model=AssetReportResponse)
+@router.post("/{asset_id}")
 def generate_asset_report_endpoint(
     asset_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
     """
-    Generates an Asset Performance PDF and returns its Supabase Storage URL.
+    Generates an Asset Performance PDF and triggers an automatic browser download.
+    The report is also uploaded to Supabase for permanent storage.
     """
     service = ReportService(db)
     try:
-        url = service.generate_asset_report(asset_id)
-        return AssetReportResponse(
-            message="Report generated successfully",
-            report_url=url,
-            report_id=asset_id,
+        url, pdf_path = service.generate_asset_report(asset_id)
+        
+        # Clean up temp file after response is sent
+        background_tasks.add_task(os.remove, pdf_path)
+
+        return FileResponse(
+            path=pdf_path,
+            filename=f"Asset_Report_{asset_id}.pdf",
+            media_type="application/pdf",
         )
     except HTTPException:
         raise

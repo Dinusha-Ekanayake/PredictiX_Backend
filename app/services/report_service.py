@@ -72,12 +72,12 @@ class ReportService:
                 destination_path=file_name,
             )
 
-            # ── 5. Save Report row ─────────────────────────
+            # ── 5. Record in Database ──────────────────────
             asset_name = context["asset"].get("asset_name", "Asset")
             report = Report(
                 id                      = report_id,
-                report_type             = "asset_performance",
-                status                  = "completed",
+                report_type             = "asset_report",
+                status                  = "generated",
                 asset_id                = asset_id,
                 title                   = f"Asset Performance Report — {asset_name}",
                 generated_by            = user_id,
@@ -95,9 +95,10 @@ class ReportService:
             self.db.commit()
             self.db.refresh(report)
 
-            return public_url
+            return public_url, pdf_path
 
-        finally:
-            # ── 6. Always clean up temp file ───────────────
-            if os.path.exists(pdf_path):
+        except Exception as e:
+            # Clean up on failure
+            if pdf_path and os.path.exists(pdf_path):
                 os.remove(pdf_path)
+            raise e

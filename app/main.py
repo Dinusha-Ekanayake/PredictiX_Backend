@@ -26,6 +26,7 @@ from .routers.notifications import router as notifications_router
 from .routers.asset_assignments import router as asset_assignments_router
 from .routers.asset_status_history import router as asset_status_history_router
 from .routers.asset_documents import router as asset_documents_router
+from .routers.asset_reports import router as asset_reports_router  
 from .routers.ticket_comments import router as ticket_comments_router
 from .routers.ticket_attachments import router as ticket_attachments_router
 from .routers.ticket_status_history import router as ticket_status_history_router
@@ -36,6 +37,9 @@ from .routers.user_notification_preferences import router as user_notification_p
 from .routers.db_debug import router as db_debug_router
 from .routers.user_profile import router as user_profile_router
 from .routers.asset_summaries import router as asset_summaries_router
+from .routers.date_notifications import router as date_notifications_router
+
+from app.schedulers.notification_scheduler import setup_scheduler, shutdown_scheduler
 
 from app.ai.services.ticket_categorization_service import warmup_ticket_categorizer
 from app.ai.services.asset_summary_service import warmup_asset_summary_model
@@ -90,15 +94,13 @@ async def lifespan(app: FastAPI):
         warmup_ticket_categorizer()
         print("Ticket categorization model loaded successfully from Hugging Face.")
     except Exception as e:
-        print(f"Ticket categorization model loading failed: {e}")
-        raise RuntimeError(f"Failed to load ticket categorization model: {e}") from e
+        print(f"Ticket categorization model loading failed (continuing anyway): {e}")
 
     try:
         warmup_asset_summary_model()
         print("Asset summary model loaded successfully from Hugging Face.")
     except Exception as e:
-        print(f"Asset summary model loading failed: {e}")
-        raise RuntimeError(f"Failed to load asset summary model: {e}") from e
+        print(f"Asset summary model loading failed (continuing anyway): {e}")
 
     setup_scheduler()
 
@@ -165,6 +167,7 @@ app.include_router(user_notification_preferences_router)
 app.include_router(db_debug_router)
 app.include_router(user_profile_router)
 app.include_router(asset_summaries_router)
+app.include_router(date_notifications_router)
 
 
 @app.get("/")
