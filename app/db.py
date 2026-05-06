@@ -15,7 +15,11 @@ DATABASE_URL = os.getenv(
     f"postgresql+psycopg://postgres:{SUPABASE_PASSWORD}@db.{PROJECT_REF}.supabase.co:5432/postgres"
 )
 
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+engine = create_engine(
+    DATABASE_URL, 
+    pool_pre_ping=True,
+    connect_args={"connect_timeout": 3}
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
