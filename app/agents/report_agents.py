@@ -3,18 +3,20 @@ Multi-Agent Warehouse Report System — PredictiX
 ================================================
 Architecture:
   Main Agent (Router)
-    ├── Warehouse Report Agent  ← full PostgreSQL injection → Llama 3
-    └── Asset Report Agent      ← entrance stub for asset team
+    ├── Warehouse Report Agent  ← KB-Enhanced RAG + PostgreSQL → Llama 3
+   
 
-Chatbot Integration:
-  POST /warehouse-dashboard/chat-route accepts free-text messages,
-  routes them via the Main Router Agent, and returns the appropriate
-  agent output. The chatbot team can call this endpoint.
+KB-Enhanced RAG Pipeline:
+  1. build_warehouse_context() — queries ALL PostgreSQL tables live
+  2. KB Vector Store (TF-IDF) — retrieves relevant KB chunks for query
+  3. KB Annotator — deterministic annotations (SHAP thresholds, health bands)
+  4. LLM Prompt — PostgreSQL data + KB context injected together
+  5. Returns: ai_sections + context + kb_annotations
 
-Data Injection Strategy (RAG):
-  All PostgreSQL tables are queried live. Aggregated metrics are
-  formatted into a structured context string that is injected directly
-  into the LLM prompt — grounding the model with real warehouse data.
+Data Sources:
+  - Live PostgreSQL data (all tables)
+  - KB Vector Store (15 documents: ISO 55000, SMRP, OEM intervals)
+  - Supabase DB has pgvector extension for future dense embedding upgrade
 """
 
 import os
@@ -31,6 +33,17 @@ from app.models import (
     Asset, AssetFailurePrediction, AssetCostPrediction,
     MaintenanceEvent, Ticket, Profile, Warehouse,
     Department, PredictionFeatureImportance, PredictionExplanation,
+)
+
+# ── KB Integration ───────────────────────────────────────────────
+from app.kb.kb_vector_store import get_kb_store
+from app.kb.kb_annotator import (
+    annotate_shap_features,
+    annotate_health_bands,
+    compute_benchmark_alerts,
+    get_ticket_category_kb,
+    generate_recommendations,
+    get_service_interval_kb_text,
 )
 
 
@@ -460,9 +473,12 @@ def _context_to_prompt_text(ctx: dict) -> str:
 # ═══════════════════════════════════════════════════════════════
 
 WAREHOUSE_SYSTEM_PROMPT = """
-You are a senior AI warehouse operations analyst for PredictiX, an AI-powered fleet asset management system.
-You will receive a comprehensive block of LIVE PostgreSQL data from the PredictiX database.
-Your task is to generate a full professional warehouse intelligence report based ONLY on the provided data.
+You are a senior AI warehouse operations analyst for PredictiX, a KB-Enhanced AI-powered fleet management system.
+You will receive:
+  (A) LIVE PostgreSQL data — all metrics computed from the actual database
+  (B) KNOWLEDGE BASE context — ISO 55000 and SMRP maintenance standards relevant to the warehouse
+
+Generate a professional warehouse intelligence report grounded in BOTH the data AND the KB standards.
 
 Respond with ONLY a valid JSON object with EXACTLY these 5 keys:
 {
@@ -476,54 +492,99 @@ Respond with ONLY a valid JSON object with EXACTLY these 5 keys:
 Section instructions (each must be 4-6 sentences, professional analytical tone):
 
 1. insight_summary:
-   Write an executive overview covering: total fleet size and composition, average health score,
-   active vs inactive assets, cost situation, active tickets, user activity, and general warehouse status.
-   Mention specific numbers from the data.
+   Write an executive overview covering: total fleet size and composition (mention specific asset types),
+   average health score, active vs critical assets, estimated maintenance cost, active tickets,
+   active users, and general warehouse status. Reference the KB benchmark (ISO 55000 5% critical target)
+   if the critical rate exceeds it. Mention specific numbers from the data.
 
 2. risk_analysis:
-   Analyse the risk landscape. Identify the count and percentage of critical/at-risk assets.
-   Name the top AI-identified failure drivers (SHAP features). Discuss which asset types or categories
-   are most affected. Comment on failure probability and urgency of maintenance required.
+   Analyse the risk landscape using the KB context. State the count and percentage of critical/at-risk assets
+   and compare to the ISO 55000 / SMRP 5% benchmark. Name the top AI-identified SHAP failure drivers
+   and their KB-defined thresholds. Identify which asset types are most critical. Comment on failure probability
+   and urgency — reference assets needing service within 7 days.
 
 3. maintenance_intelligence:
-   Outline the maintenance workload. How many assets need urgent attention (≤7 days)?
-   What is the average days until next service? Compare predicted cost vs actual spend.
-   Describe the maintenance event breakdown by type, and note average downtime implications.
+   Outline the maintenance workload using KB standards. How many assets need urgent attention (≤7 days)?
+   Compare the PM ratio against the SMRP 90% gold standard. Compare predicted cost vs actual 3M spend.
+   Describe maintenance event breakdown and note average downtime. Reference KB service interval standards
+   for the most common asset types (forklifts every 500 engine hours, vans every 60 days).
 
 4. pattern_and_trend:
    Describe observable trends over the last 3 months. Is ticket volume increasing, decreasing, or stable?
-   How are maintenance costs trending month-over-month? Note any patterns in ticket categories or priorities.
-   Comment on operational efficiency based on the data.
+   How are maintenance costs trending? Note patterns in ticket categories (electrical/mechanical/general)
+   and their link to SHAP failure drivers. Comment on operational efficiency and KB-defined improvement opportunities.
 
 5. conclusion:
-   Write a comprehensive 3-month warehouse summary. Summarise the overall state of the warehouse:
-   fleet health trajectory, financial position, ticket resolution performance, workforce utilisation,
-   and top 3 recommended actions for management. Be specific with numbers.
+   Write a comprehensive 3-month warehouse summary. Note the PM ratio strength and fleet health trajectory.
+   Reference the split operational profile (strong PM culture vs high critical asset rate).
+   Provide the top 3 recommended actions for management grounded in KB thresholds, with specific numbers.
+   Close with the financial position and ticket resolution performance.
 
 STRICT RULES:
-- Use ONLY numbers from the provided context. Never invent or estimate.
+- Use ONLY numbers from the provided data context. Never invent or estimate.
+- Reference KB standards (ISO 55000, SMRP) naturally when the data warrants it.
 - Do NOT include markdown, backticks, bullet points, or extra text outside the JSON.
-- Do NOT say "I don't have enough data." Generate from what is available.
 - Each section must be a single flowing paragraph (no sub-headings inside values).
+- KB context is grounding information — cite it when making threshold-based observations.
 """
 
 
 def run_warehouse_agent(db: Session) -> dict:
     """
-    Warehouse Report Agent:
-    1. Runs full PostgreSQL data injection (build_warehouse_context)
-    2. Formats context into structured prompt text
-    3. Sends to Llama 3 via Groq (LangChain)
-    4. Returns AI sections + raw context for frontend charts/tables
+    KB-Enhanced Warehouse Report Agent:
+    1. Queries ALL PostgreSQL tables → builds context (build_warehouse_context)
+    2. KB Vector Store retrieval → top KB chunks for each report section
+    3. KB Annotator → deterministic SHAP, health band, benchmark, ticket annotations
+    4. LLM call → PostgreSQL data + KB context injected together (RAG)
+    5. Returns: ai_sections + context + kb_annotations
     """
+    # ── Step 1: PostgreSQL data ────────────────────────────────
     ctx = build_warehouse_context(db)
     context_text = _context_to_prompt_text(ctx)
 
+    # ── Step 2: KB Vector Store retrieval ─────────────────────
+    kb_store = get_kb_store()
+    # Retrieve KB chunks relevant to the 5 report sections
+    kb_chunks = {
+        "fleet":       kb_store.get_all_text_for_section("fleet asset health overview critical rate benchmark"),
+        "risk":        kb_store.get_all_text_for_section("shap failure drivers brake hydraulic engine hours coolant threshold"),
+        "maintenance": kb_store.get_all_text_for_section("preventive maintenance pm ratio service interval cost downtime"),
+        "tickets":     kb_store.get_all_text_for_section("ticket priority electrical mechanical fault code escalation"),
+        "conclusion":  kb_store.get_all_text_for_section("recommendations action urgency critical high priority"),
+    }
+    kb_full_context = "\n\n".join([
+        f"=== KB Context for {section.title()} ===\n{text}"
+        for section, text in kb_chunks.items() if text
+    ])
+
+    # ── Step 3: KB Annotations (deterministic — no LLM) ───────
+    shap_enriched     = annotate_shap_features(ctx.get("top_shap_features", []))
+    health_bands_kb   = annotate_health_bands(ctx.get("health_score_distribution", {}))
+    benchmark_alerts  = compute_benchmark_alerts(ctx)
+    ticket_cat_kb     = get_ticket_category_kb(ctx.get("ticket_category_breakdown", {}))
+    recommendations   = generate_recommendations(ctx)
+    service_interval  = get_service_interval_kb_text()
+
+    kb_annotations = {
+        "shap_enriched":        shap_enriched,
+        "health_bands_kb":      health_bands_kb,
+        "benchmark_alerts":     benchmark_alerts,
+        "ticket_category_kb":   ticket_cat_kb,
+        "recommendations":      recommendations,
+        "service_interval_text": service_interval,
+    }
+
+    # ── Step 4: LLM call with KB-grounded prompt ───────────────
     llm = _get_llm(temperature=0.25)
+
+    combined_prompt = (
+        f"LIVE DATABASE DATA:\n{context_text}\n\n"
+        f"KNOWLEDGE BASE CONTEXT (ISO 55000 / SMRP Standards):\n{kb_full_context}"
+    )
 
     messages = [
         SystemMessage(content=WAREHOUSE_SYSTEM_PROMPT),
-        HumanMessage(content=f"Generate the full warehouse report using this live data:\n\n{context_text}"),
+        HumanMessage(content=f"Generate the full KB-Enhanced warehouse report:\n\n{combined_prompt}"),
     ]
 
     response = llm.invoke(messages)
@@ -534,7 +595,7 @@ def run_warehouse_agent(db: Session) -> dict:
         content = re.sub(r"^```[a-z]*\n?", "", content)
         content = re.sub(r"\n?```$", "", content).strip()
 
-    # Parse JSON
+    # Parse AI JSON
     try:
         ai_sections = json.loads(content)
     except json.JSONDecodeError:
@@ -543,13 +604,16 @@ def run_warehouse_agent(db: Session) -> dict:
             try:
                 ai_sections = json.loads(match.group())
             except json.JSONDecodeError:
-                ai_sections = {"insight_summary": content, "risk_analysis": "", "maintenance_intelligence": "", "pattern_and_trend": "", "conclusion": ""}
+                ai_sections = {"insight_summary": content, "risk_analysis": "",
+                               "maintenance_intelligence": "", "pattern_and_trend": "", "conclusion": ""}
         else:
-            ai_sections = {"insight_summary": content, "risk_analysis": "", "maintenance_intelligence": "", "pattern_and_trend": "", "conclusion": ""}
+            ai_sections = {"insight_summary": content, "risk_analysis": "",
+                           "maintenance_intelligence": "", "pattern_and_trend": "", "conclusion": ""}
 
     return {
-        "ai_sections": ai_sections,
-        "context": ctx,
+        "ai_sections":    ai_sections,
+        "context":        ctx,
+        "kb_annotations": kb_annotations,   # NEW — all KB enrichments for frontend
     }
 
 
