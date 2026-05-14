@@ -173,8 +173,31 @@ from sqlalchemy import or_, cast, String
 from app.deps import get_db
 from app.models import Asset
 from app.schemas.asset import AssetCreate, AssetUpdate, AssetOut
+from app.schemas.prediction import CostEstimationRequest, CostEstimationResponse
+from app.ai.services.cost_estimation_service import run_cost_estimation
 
 router = APIRouter(prefix="/assets", tags=["Assets"])
+
+
+@router.post("/estimate-cost", response_model=CostEstimationResponse)
+def estimate_maintenance_cost(payload: CostEstimationRequest):
+    """
+    Estimate the maintenance cost (min / average / max) for an asset
+    using the AI cost estimation model.
+
+    Submit any subset of asset details; unrecognised or missing fields
+    are filled with safe defaults so the model always returns a result.
+    """
+    from app.main import cost_model
+
+    if cost_model is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Cost estimation model is not loaded yet. Please try again shortly.",
+        )
+
+    data = payload.model_dump(exclude_none=False)
+    return run_cost_estimation(data, cost_model)
 
 
 @router.post("/", response_model=AssetOut)

@@ -17,10 +17,12 @@ def get_hf_credentials():
     model_repo = os.getenv("HF_ASSET_SUMMARIZATION_REPO")
     
     if not hf_token:
-        raise RuntimeError("HF_TOKEN is not set in .env")
+        print("WARNING: HF_TOKEN is not set in .env. Asset summarization will be unavailable.")
+        return None, None
     
     if not model_repo:
-        raise RuntimeError("HF_ASSET_SUMMARIZATION_REPO is not set in .env")
+        print("WARNING: HF_ASSET_SUMMARIZATION_REPO is not set in .env. Asset summarization will be unavailable.")
+        return None, None
     
     return hf_token, model_repo
 

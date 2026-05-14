@@ -11,10 +11,10 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 MODEL_REPO = os.getenv("HF_TICKET_CATEGORIZATION_REPO")
 
 if not HF_TOKEN:
-    raise RuntimeError("HF_TOKEN is not set in .env")
+    print("WARNING: HF_TOKEN is not set in .env. Ticket categorization will be unavailable.")
 
 if not MODEL_REPO:
-    raise RuntimeError("HF_TICKET_CATEGORIZATION_REPO is not set in .env")
+    print("WARNING: HF_TICKET_CATEGORIZATION_REPO is not set in .env. Ticket categorization will be unavailable.")
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

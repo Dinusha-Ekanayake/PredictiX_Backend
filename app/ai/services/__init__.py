@@ -16,6 +16,10 @@ from app.ai.services.ticket_categorization_service import (
     warmup_ticket_categorizer,
 )
 
+from app.ai.services.cost_estimation_service import (
+    run_cost_estimation,
+)
+
 __all__ = [
     "generate_asset_summary",
     "get_asset_summary_model",
@@ -24,4 +28,5 @@ __all__ = [
     "get_ticket_categorizer_model",
     "get_ticket_categorizer_tokenizer",
     "warmup_ticket_categorizer",
+    "run_cost_estimation",
 ]

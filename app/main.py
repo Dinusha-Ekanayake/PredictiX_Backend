@@ -48,16 +48,19 @@ CLF_FEATURES_PATH = MODEL_DIR / "pdm_classifier_model" / "maintenance_classifier
 
 REG_MODEL_PATH = MODEL_DIR / "pdm_regressor_model" / "days_until_next_maintenance_regressor.pkl"
 REG_FEATURES_PATH = MODEL_DIR / "pdm_regressor_model" / "regression_selected_features.pkl"
+COST_MODEL_PATH = MODEL_DIR / "cost_estimation_model" / "cost_maintenance_model.pkl"
 
 clf_model = None
 clf_features = None
 reg_model = None
 reg_features = None
+cost_model = None
+cost_features = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global clf_model, clf_features, reg_model, reg_features
+    global clf_model, clf_features, reg_model, reg_features, cost_model, cost_features
 
     try:
         with open(CLF_MODEL_PATH, "rb") as f:
@@ -78,9 +81,16 @@ async def lifespan(app: FastAPI):
         if hasattr(reg_model, "feature_names_") and reg_model.feature_names_:
             reg_features = list(reg_model.feature_names_)
 
+        with open(COST_MODEL_PATH, "rb") as f:
+            cost_model = pickle.load(f)
+
+        if hasattr(cost_model, "feature_names_") and cost_model.feature_names_:
+            cost_features = list(cost_model.feature_names_)
+
         print("PredictiX local PdM models loaded successfully.")
         print("Classifier features:", clf_features)
         print("Regressor features:", reg_features)
+        print("Cost Estimation features:", cost_features)
 
     except Exception as e:
         print(f"Local PdM model loading failed: {e}")
@@ -90,15 +100,15 @@ async def lifespan(app: FastAPI):
         warmup_ticket_categorizer()
         print("Ticket categorization model loaded successfully from Hugging Face.")
     except Exception as e:
-        print(f"Ticket categorization model loading failed: {e}")
-        raise RuntimeError(f"Failed to load ticket categorization model: {e}") from e
+        print(f"WARNING: Ticket categorization model loading failed: {e}")
+        # Non-blocking: Allow app to start even if HF is unreachable
 
     try:
         warmup_asset_summary_model()
         print("Asset summary model loaded successfully from Hugging Face.")
     except Exception as e:
-        print(f"Asset summary model loading failed: {e}")
-        raise RuntimeError(f"Failed to load asset summary model: {e}") from e
+        print(f"WARNING: Asset summary model loading failed: {e}")
+        # Non-blocking: Allow app to start even if HF is unreachable
 
     yield
 
@@ -171,6 +181,8 @@ def home():
             clf_features is not None,
             reg_model is not None,
             reg_features is not None,
+            cost_model is not None,
+            cost_features is not None,
         ]),
     }
 
