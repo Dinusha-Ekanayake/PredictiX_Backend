@@ -19,8 +19,14 @@ if not MODEL_REPO:
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def _assert_hf_enabled():
+    if os.getenv("DISABLE_HF_MODELS", "false").lower() == "true":
+        raise RuntimeError("Ticket categorization model is disabled (DISABLE_HF_MODELS=true).")
+
+
 @lru_cache(maxsize=1)
 def get_ticket_categorizer_tokenizer():
+    _assert_hf_enabled()
     return AutoTokenizer.from_pretrained(
         MODEL_REPO,
         token=HF_TOKEN,
@@ -29,6 +35,7 @@ def get_ticket_categorizer_tokenizer():
 
 @lru_cache(maxsize=1)
 def get_ticket_categorizer_model():
+    _assert_hf_enabled()
     model = AutoModelForSequenceClassification.from_pretrained(
         MODEL_REPO,
         token=HF_TOKEN,

@@ -27,7 +27,8 @@ def get_hf_credentials():
 
 @lru_cache(maxsize=1)
 def get_asset_summary_model():
-    """Load Seq2Seq model and tokenizer from Hugging Face"""
+    if os.getenv("DISABLE_HF_MODELS", "false").lower() == "true":
+        raise RuntimeError("Asset summary model is disabled (DISABLE_HF_MODELS=true).")
     try:
         hf_token, model_repo = get_hf_credentials()
         
