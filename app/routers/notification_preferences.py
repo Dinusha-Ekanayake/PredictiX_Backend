@@ -7,7 +7,7 @@ from app.schemas.misc import (
     UserNotificationPreferenceOut,
 )
 
-router = APIRouter(prefix="/user-notification-preferences", tags=["User Notification Preferences"])
+router = APIRouter(prefix="/notification-preferences", tags=["Notification Preferences"])
 
 
 @router.post("/", response_model=UserNotificationPreferenceOut)
