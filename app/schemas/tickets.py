@@ -48,3 +48,24 @@ class TicketCategorizationResponse(BaseModel):
     predicted_label: str
     confidence: float
     scores: list[TicketCategoryScore]
+
+
+class TicketPriorityRequest(BaseModel):
+    text: str = Field(
+        ...,
+        min_length=1,
+        description="Ticket text to classify priority for",
+        examples=["Engine overheating alert on Forklift FL-04, coolant leak detected"],
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "text": "Engine overheating alert on Forklift FL-04, coolant leak detected"
+            }
+        }
+    }
+
+
+class TicketPriorityResponse(BaseModel):
+    priority: str
