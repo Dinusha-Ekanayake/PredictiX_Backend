@@ -101,7 +101,7 @@ class HBarChart(Flowable):
     bars: list of (label, value, max_value, color)
     Renders as an inline horizontal bar chart.
     """
-    def __init__(self, bars, bar_h=14, gap=7, lbl_w=130):
+    def __init__(self, bars, bar_h=10, gap=4, lbl_w=130):
         super().__init__()
         self.bars  = bars
         self.bar_h = bar_h
@@ -254,21 +254,13 @@ def _cover(story, ctx, styles):
     story.append(section_divider())
     story.append(Spacer(1, 5*mm))
 
-    story.append(_kpi_row([
-        (f"{metrics['health_score']}%",          "Health Score"),
-        (str(metrics["risk_level"]),              "Risk Level"),
-        (f"{metrics['failure_probability']}%",   "Failure Probability"),
-        (str(metrics["open_tickets"]),            "Open Tickets"),
-    ], styles))
-
-    story.append(Spacer(1, 7*mm))
     story.append(Paragraph(
         f"Report Date: {ctx['generated_date']}  |  "
         f"Asset Code: {_safe(asset,'asset_code')}  |  "
         f"Warehouse: {_safe(asset,'warehouse')}",
         styles["cover_meta"]
     ))
-    story.append(PageBreak())
+    story.append(Spacer(1, 8*mm))
 
 
 # ─────────────────────────────────────────────────────────
@@ -323,7 +315,7 @@ def _asset_overview(story, ctx, styles):
         ], styles, cols=2),
     ]))
 
-    story.append(PageBreak())
+    story.append(Spacer(1, 5*mm))
 
 
 # ─────────────────────────────────────────────────────────
@@ -338,7 +330,7 @@ def _sensor_section(story, ctx, styles):
 
     if not sensor:
         story.append(Paragraph("No sensor data available for this asset.", styles["normal"]))
-        story.append(PageBreak())
+        story.append(Spacer(1, 5*mm))
         return
 
     story.append(_info_grid([
@@ -438,9 +430,9 @@ def _maintenance_section(story, ctx, insights, styles):
 
     # Maintenance history table
     if maintenance:
-        story.append(Paragraph("Maintenance History (Recent 20)", styles["subsection"]))
+        story.append(Paragraph("Maintenance History (Recent 3)", styles["subsection"]))
         rows = []
-        for m in maintenance[:20]:
+        for m in maintenance[:3]:
             rows.append([
                 _datetime(getattr(m, "performed_at", None)) or _datetime(getattr(m, "scheduled_date", None)),
                 getattr(m, "event_type", "—") or "—",
@@ -457,7 +449,7 @@ def _maintenance_section(story, ctx, insights, styles):
             styles,
         ))
 
-    story.append(PageBreak())
+    story.append(Spacer(1, 5*mm))
 
 
 # ─────────────────────────────────────────────────────────
@@ -479,9 +471,9 @@ def _tickets_section(story, ctx, styles):
     story.append(Spacer(1, 5*mm))
 
     if tickets:
-        story.append(Paragraph("Ticket Details (Recent 20)", styles["subsection"]))
+        story.append(Paragraph("Ticket Details (Recent 3)", styles["subsection"]))
         rows = []
-        for t in tickets[:20]:
+        for t in tickets[:3]:
             rows.append([
                 str(t.ticket_number or "—"),
                 str(t.title or "—")[:55],
@@ -499,7 +491,7 @@ def _tickets_section(story, ctx, styles):
             risk_col=2,
         ))
 
-    story.append(PageBreak())
+    story.append(Spacer(1, 5*mm))
 
 
 # ─────────────────────────────────────────────────────────
@@ -526,7 +518,7 @@ def _predictions_section(story, ctx, insights, styles):
     health = metrics["health_score"]
     bar_color = COLORS.LOW if health >= 80 else COLORS.MEDIUM if health >= 60 else COLORS.CRITICAL
     story.append(Paragraph("Asset Health Score", styles["subsection"]))
-    story.append(HBarChart([("Health Score", health, 100, bar_color)], bar_h=20))
+    story.append(HBarChart([("Health Score", health, 100, bar_color)], bar_h=12))
     story.append(Spacer(1, 5*mm))
 
     # AI executive summary
@@ -575,7 +567,7 @@ def _predictions_section(story, ctx, insights, styles):
             ], styles, cols=2),
         ]))
 
-    story.append(PageBreak())
+    story.append(Spacer(1, 5*mm))
 
 
 # ─────────────────────────────────────────────────────────
@@ -725,9 +717,7 @@ class PDFRenderService:
         story = []
         _cover(story, context, styles)
         _asset_overview(story, context, styles)
-        _sensor_section(story, context, styles)
         _maintenance_section(story, context, insights, styles)
-        _tickets_section(story, context, styles)
         _predictions_section(story, context, insights, styles)
         _conclusion(story, context, insights, styles)
 
