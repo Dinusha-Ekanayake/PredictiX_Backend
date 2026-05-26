@@ -288,6 +288,7 @@ from .routers.asset_summaries import router as asset_summaries_router
 
 from app.ai.services.ticket_categorization_service import warmup_ticket_categorizer
 from app.ai.services.asset_summary_service import warmup_asset_summary_model
+from app.ai.services.ticket_priority_service import warmup_priority_model
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_DIR = BASE_DIR / "ai" / "models"
@@ -346,6 +347,12 @@ async def lifespan(app: FastAPI):
             raise RuntimeError(f"Failed to load asset summary model: {e}") from e
     else:
         print("HuggingFace models disabled (DISABLE_HF_MODELS=true). Skipping warmup.")
+
+    try:
+        warmup_priority_model()
+        print("Ticket priority model loaded successfully from Hugging Face.")
+    except Exception as e:
+        print(f"WARNING: Ticket priority model loading failed (endpoint will return 503): {e}")
 
     yield
 
