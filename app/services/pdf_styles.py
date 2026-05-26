@@ -59,13 +59,13 @@ def get_styles() -> dict:
 
     return {
         # Cover
-        "cover_brand":    s("CoverBrand",   fontName="Helvetica-Bold", fontSize=32, textColor=COLORS.TEAL,     leading=38, spaceAfter=4),
-        "cover_title":    s("CoverTitle",   fontName="Helvetica-Bold", fontSize=20, textColor=COLORS.TEXT_DARK,leading=26, spaceAfter=6),
+        "cover_brand":    s("CoverBrand",   fontName="Helvetica-Bold", fontSize=20, textColor=COLORS.TEAL,     leading=24, spaceAfter=4),
+        "cover_title":    s("CoverTitle",   fontName="Helvetica-Bold", fontSize=18, textColor=COLORS.TEXT_DARK,leading=22, spaceAfter=6),
         "cover_subtitle": s("CoverSub",     fontName="Helvetica",      fontSize=12, textColor=COLORS.TEXT_MUTED,leading=17, spaceAfter=4),
         "cover_meta":     s("CoverMeta",    fontName="Helvetica",      fontSize=9,  textColor=COLORS.TEXT_MUTED,leading=14),
 
         # Section / subsection
-        "section":        s("Section",      fontName="Helvetica-Bold", fontSize=18, textColor=COLORS.TEAL,     leading=24, spaceBefore=14, spaceAfter=8),
+        "section":        s("Section",      fontName="Helvetica-Bold", fontSize=16, textColor=COLORS.TEAL,     leading=20, spaceBefore=10, spaceAfter=6),
         "subsection":     s("Subsection",   fontName="Helvetica-Bold", fontSize=12, textColor=COLORS.TEXT_DARK,leading=17, spaceBefore=8,  spaceAfter=5),
 
         # Body
@@ -75,7 +75,7 @@ def get_styles() -> dict:
         "bullet":         s("Bullet",       fontName="Helvetica",      fontSize=10, textColor=COLORS.TEXT_BODY,leading=16, leftIndent=12, spaceAfter=4),
 
         # KPI cards
-        "kpi_value":      s("KPIValue",     fontName="Helvetica-Bold", fontSize=26, textColor=COLORS.TEAL,     leading=32, spaceAfter=2),
+        "kpi_value":      s("KPIValue",     fontName="Helvetica-Bold", fontSize=18, textColor=COLORS.TEAL,     leading=22, spaceAfter=2),
         "kpi_label":      s("KPILabel",     fontName="Helvetica",      fontSize=8,  textColor=COLORS.TEXT_MUTED,leading=11, spaceAfter=0),
 
         # Tables
