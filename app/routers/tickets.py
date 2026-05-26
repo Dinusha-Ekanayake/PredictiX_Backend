@@ -7,9 +7,12 @@ from app.schemas.tickets import TicketCreate, TicketUpdate, TicketOut
 
 from fastapi import HTTPException
 from app.ai.services.ticket_categorization_service import categorize_ticket_text
+from app.ai.services.ticket_priority_service import classify_ticket_priority
 from app.schemas.tickets import (
     TicketCategorizationRequest,
     TicketCategorizationResponse,
+    TicketPriorityRequest,
+    TicketPriorityResponse,
 )
 
 router = APIRouter(prefix="/tickets", tags=["Tickets"])
@@ -76,4 +79,26 @@ def categorize_ticket_endpoint(payload: TicketCategorizationRequest):
         raise HTTPException(
             status_code=500,
             detail=f"Failed to categorize ticket: {exc}",
+        ) from exc
+
+
+@router.post(
+    "/prioritize",
+    response_model=TicketPriorityResponse,
+    summary="Classify ticket priority",
+    description=(
+        "Sends ticket text to the AroshN/priority_classif_xgb XGBoost model on Hugging Face "
+        "and returns a single priority label (e.g. Low, Medium, High, Critical)."
+    ),
+)
+def prioritize_ticket_endpoint(payload: TicketPriorityRequest):
+    try:
+        priority = classify_ticket_priority(payload.text)
+        return TicketPriorityResponse(priority=priority)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to classify ticket priority: {exc}",
         ) from exc
