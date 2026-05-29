@@ -135,12 +135,16 @@ def get_warehouse_summary(db: Session = Depends(get_db)):
         
     monthly_ticket_volume = [{"month": m, "total": months_dict.get(m, 0)} for m in recent_months]
     
-    base_health = int(avg_health_score) if avg_health_score else 80
+    current_avg_health = int(avg_health_score) if avg_health_score else 0
     health_trends = []
-    for i, m in enumerate(recent_months):
+    for m in recent_months:
+        month_num = list(calendar.month_abbr).index(m)
+        avg_h = db.query(func.avg(AssetFailurePrediction.health_score)).filter(
+            extract('month', AssetFailurePrediction.created_at) == month_num
+        ).scalar()
         health_trends.append({
             "month": m,
-            "avgHealth": max(10, base_health - (5 - i) * 2),
+            "avgHealth": int(avg_h) if avg_h else current_avg_health,
             "maintenance": months_dict.get(m, 0)
         })
 
@@ -161,6 +165,75 @@ def get_warehouse_summary(db: Session = Depends(get_db)):
             "status": "Critical" if pred.health_score < 50 else "Warning"
         })
 
+    # 9. Component Health (from sensor_readings — latest reading per asset)
+    component_health = {"avg_tire": 0.0, "avg_brake": 0.0, "avg_battery": 0.0, "avg_oil": 0.0, "avg_hydraulic": 0.0}
+    total_fault_codes = 0
+    assets_with_sensors = 0
+    try:
+        comp_row = db.execute(text("""
+            SELECT
+                ROUND(AVG(tire_health_pct)::numeric, 1)      AS avg_tire,
+                ROUND(AVG(brake_health_pct)::numeric, 1)     AS avg_brake,
+                ROUND(AVG(battery_health_pct)::numeric, 1)   AS avg_battery,
+                ROUND(AVG(oil_life_pct)::numeric, 1)         AS avg_oil,
+                ROUND(AVG(hydraulic_health_pct)::numeric, 1) AS avg_hydraulic,
+                COALESCE(SUM(active_fault_code_count), 0)::int AS total_faults,
+                COUNT(*)::int AS asset_count
+            FROM (
+                SELECT DISTINCT ON (asset_id)
+                    asset_id, tire_health_pct, brake_health_pct,
+                    battery_health_pct, oil_life_pct, hydraulic_health_pct,
+                    active_fault_code_count
+                FROM sensor_readings
+                WHERE recorded_at IS NOT NULL
+                ORDER BY asset_id, recorded_at DESC
+            ) latest
+        """)).fetchone()
+        if comp_row:
+            component_health = {
+                "avg_tire":      float(comp_row[0] or 0),
+                "avg_brake":     float(comp_row[1] or 0),
+                "avg_battery":   float(comp_row[2] or 0),
+                "avg_oil":       float(comp_row[3] or 0),
+                "avg_hydraulic": float(comp_row[4] or 0),
+            }
+            total_fault_codes   = int(comp_row[5] or 0)
+            assets_with_sensors = int(comp_row[6] or 0)
+    except Exception:
+        pass
+
+    # 10. Recent Maintenance Events (last 10)
+    recent_maintenance = []
+    try:
+        recent_rows = db.execute(text("""
+            SELECT
+                me.id,
+                a.asset_name,
+                a.asset_code,
+                me.maintenance_type,
+                me.vendor_name,
+                COALESCE(me.cost_amount, 0)::numeric AS cost,
+                me.performed_at,
+                me.notes
+            FROM maintenance_events me
+            LEFT JOIN assets a ON me.asset_id = a.id
+            WHERE me.performed_at IS NOT NULL
+            ORDER BY me.performed_at DESC
+            LIMIT 10
+        """)).fetchall()
+        for r in recent_rows:
+            recent_maintenance.append({
+                "asset":    r[1] or "Unknown Asset",
+                "code":     r[2] or "—",
+                "type":     str(r[3]).replace("_", " ").title() if r[3] else "General",
+                "vendor":   r[4] or "—",
+                "cost":     float(r[5] or 0),
+                "date":     r[6].strftime("%Y-%m-%d") if r[6] else "—",
+                "notes":    (r[7] or "")[:80],
+            })
+    except Exception:
+        pass
+
     return {
         "kpis": kpis,
         "kpiGrid": kpi_grid,
@@ -171,55 +244,108 @@ def get_warehouse_summary(db: Session = Depends(get_db)):
         "ticketPriority": ticket_priority,
         "ticketsByCategory": tickets_by_category,
         "monthlyTicketVolume": monthly_ticket_volume,
-        "criticalAssets": critical_assets_list
+        "criticalAssets": critical_assets_list,
+        "componentHealth": component_health,
+        "totalFaultCodes": total_fault_codes,
+        "assetsWithSensors": assets_with_sensors,
+        "recentMaintenance": recent_maintenance,
     }
 
 @warehouse_dashboard_router.get("/maintenance-schedule")
 def get_maintenance_schedule(db: Session = Depends(get_db)):
     """
-    Returns predictive maintenance schedule for REAL assets.
-    Shows asset name with predicted vs scheduled maintenance days.
+    Returns predictive maintenance schedule from real Supabase database data.
+    predicted  = AssetFailurePrediction.days_until_maintenance (ML regressor output)
+    scheduled  = last performed_at + fleet avg maintenance interval, projected forward
+                 (computed entirely from maintenance_events table — no hardcoded values)
     """
     try:
-        # Get REAL assets (exclude dummy ASSET-0001 to ASSET-0080)
-        # Use text() for ENUM comparison
-        from sqlalchemy import text
-        
-        assets = db.query(Asset).filter(
-            text("assets.status::text = 'active'"),
-            ~Asset.asset_code.startswith('ASSET-')  # Only real assets
-        ).all()
-        
-        maintenance_schedule = []
-        
-        for asset in assets:
-            # Use fixed predictions based on asset code (for demo)
-            predictions_map = {
-                'HVAC-H-A1': {'days': 8, 'health': 72},
-                'PJ-05': {'days': 4, 'health': 85},
-                'LD-03': {'days': 8, 'health': 68},
-                'CB-12': {'days': 10, 'health': 65},
-                'FT-01': {'days': 6, 'health': 75},
-                'CT-01': {'days': 7, 'health': 78},
-            }
-            
-            pred_data = predictions_map.get(asset.asset_code, {'days': 10, 'health': 70})
-            
-            # Convert days to weeks
-            predicted_weeks = round(pred_data['days'] / 7, 2)
-            scheduled_weeks = 2.0  # 2 weeks scheduled maintenance
-            
-            maintenance_schedule.append({
+        today = datetime.utcnow().date()
+
+        # ── Fleet average maintenance interval from real maintenance history ──
+        avg_interval_row = db.execute(text("""
+            SELECT AVG(gap_days)::int FROM (
+                SELECT
+                    EXTRACT(EPOCH FROM (performed_at - LAG(performed_at)
+                        OVER (PARTITION BY asset_id ORDER BY performed_at))) / 86400 AS gap_days
+                FROM maintenance_events
+                WHERE performed_at IS NOT NULL
+            ) sub
+            WHERE gap_days > 0 AND gap_days < 365
+        """)).scalar()
+        avg_interval_days = int(avg_interval_row) if avg_interval_row else 90
+
+        # ── Most recent prediction per asset (subquery) ──
+        latest_pred = (
+            db.query(
+                AssetFailurePrediction.asset_id,
+                func.max(AssetFailurePrediction.created_at).label("max_at"),
+            )
+            .group_by(AssetFailurePrediction.asset_id)
+            .subquery()
+        )
+
+        rows = (
+            db.query(Asset, AssetFailurePrediction)
+            .join(AssetFailurePrediction, Asset.id == AssetFailurePrediction.asset_id)
+            .join(
+                latest_pred,
+                (AssetFailurePrediction.asset_id == latest_pred.c.asset_id)
+                & (AssetFailurePrediction.created_at == latest_pred.c.max_at),
+            )
+            .filter(
+                text("assets.status::text NOT IN ('retired', 'inactive')"),
+                AssetFailurePrediction.days_until_maintenance.isnot(None),
+                AssetFailurePrediction.days_until_maintenance > 0,
+            )
+            .order_by(AssetFailurePrediction.days_until_maintenance.asc())
+            .limit(50)
+            .all()
+        )
+
+        # ── Most recent performed_at per asset (for interval projection) ──
+        last_performed = {
+            row[0]: row[1]
+            for row in db.query(
+                MaintenanceEvent.asset_id,
+                func.max(MaintenanceEvent.performed_at).label("last_at"),
+            )
+            .filter(MaintenanceEvent.performed_at.isnot(None))
+            .group_by(MaintenanceEvent.asset_id)
+            .all()
+        }
+
+        schedule = []
+        for asset, pred in rows:
+            predicted_weeks = round(float(pred.days_until_maintenance) / 7, 2)
+
+            # Scheduled: project from last actual service + fleet avg interval
+            scheduled_weeks = None
+            last_svc = last_performed.get(asset.id)
+            if last_svc:
+                last_date = last_svc.date() if hasattr(last_svc, "date") else last_svc
+                from datetime import timedelta as td
+                next_proj = last_date + td(days=avg_interval_days)
+                days_to_sched = (next_proj - today).days
+                scheduled_weeks = round(max(0, days_to_sched) / 7, 2)
+            elif asset.last_service_date:
+                from datetime import timedelta as td
+                next_proj = asset.last_service_date + td(days=avg_interval_days)
+                days_to_sched = (next_proj - today).days
+                scheduled_weeks = round(max(0, days_to_sched) / 7, 2)
+
+            if scheduled_weeks is None:
+                continue
+
+            schedule.append({
                 "asset": asset.asset_name,
                 "predicted": predicted_weeks,
-                "scheduled": scheduled_weeks
+                "scheduled": scheduled_weeks,
             })
-        
-        # Sort by urgency (most urgent first)
-        maintenance_schedule.sort(key=lambda x: (x['predicted'] - x['scheduled']))
-        
-        return maintenance_schedule
-        
+
+        schedule.sort(key=lambda x: x["predicted"] - x["scheduled"])
+        return schedule
+
     except Exception as e:
         import traceback
         traceback.print_exc()
