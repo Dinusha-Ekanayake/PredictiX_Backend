@@ -136,7 +136,10 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
     risk_breakdown = {str(r).title() if r else "Unknown": c for r, c in risk_level_dist}
 
     avg_failure_prob = db.query(func.avg(AssetFailurePrediction.failure_probability)).scalar() or 0
-    avg_failure_prob_pct = round(float(avg_failure_prob) * 100, 1)
+    raw_prob = float(avg_failure_prob)
+    # Normalize: if DB stores decimals (0-1), multiply by 100; if already percentage (0-100), use directly
+    avg_failure_prob_pct = round(raw_prob * 100 if raw_prob <= 1.0 else raw_prob, 1)
+    avg_failure_prob_pct = min(avg_failure_prob_pct, 100.0)  # cap at 100% for display safety
 
     urgent_maintenance = db.query(func.count(AssetFailurePrediction.id)).filter(
         AssetFailurePrediction.days_until_maintenance <= 7,
@@ -311,6 +314,126 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
         "decreasing" if current_month_tickets < oldest_month_tickets else "stable"
     )
 
+    # ── PHASE B: EXTENDED DB QUERIES ─────────────────────
+
+    # B1. Fleet Age Distribution (from assets.manufacture_year)
+    current_year = now.year
+    fleet_age_distribution = {"0-3 yrs": 0, "4-6 yrs": 0, "7-10 yrs": 0, "10+ yrs": 0}
+    try:
+        age_rows = db.query(Asset.manufacture_year, func.count(Asset.id))\
+            .filter(Asset.manufacture_year.isnot(None)).group_by(Asset.manufacture_year).all()
+        for yr, cnt in age_rows:
+            age = current_year - int(yr)
+            band = "0-3 yrs" if age <= 3 else "4-6 yrs" if age <= 6 else "7-10 yrs" if age <= 10 else "10+ yrs"
+            fleet_age_distribution[band] += cnt
+    except Exception:
+        pass
+
+    # B2. Warranty Expiry Alert (assets expiring within 90 days)
+    warranty_expiring_90d = 0
+    try:
+        expiry_cutoff = (now + timedelta(days=90)).date()
+        today_date = now.date()
+        warranty_expiring_90d = db.execute(text("""
+            SELECT COUNT(*) FROM assets
+            WHERE warranty_expiry_date IS NOT NULL
+              AND warranty_expiry_date >= :today
+              AND warranty_expiry_date <= :cutoff
+        """), {"today": today_date, "cutoff": expiry_cutoff}).scalar() or 0
+    except Exception:
+        pass
+
+    # B3. Component Health Averages (sensor_readings — latest per asset)
+    component_health: dict[str, float] = {
+        "avg_tire": 0.0, "avg_brake": 0.0, "avg_battery": 0.0,
+        "avg_oil": 0.0, "avg_hydraulic": 0.0,
+    }
+    total_fault_codes = 0
+    avg_fault_codes_per_asset = 0.0
+    try:
+        comp_row = db.execute(text("""
+            SELECT
+                ROUND(AVG(tire_health_pct)::numeric, 1)        AS avg_tire,
+                ROUND(AVG(brake_health_pct)::numeric, 1)       AS avg_brake,
+                ROUND(AVG(battery_health_pct)::numeric, 1)     AS avg_battery,
+                ROUND(AVG(oil_life_pct)::numeric, 1)           AS avg_oil,
+                ROUND(AVG(hydraulic_health_pct)::numeric, 1)   AS avg_hydraulic,
+                COALESCE(SUM(active_fault_code_count), 0)::int  AS total_faults,
+                ROUND(AVG(active_fault_code_count)::numeric, 2) AS avg_faults
+            FROM (
+                SELECT DISTINCT ON (asset_id)
+                    asset_id, tire_health_pct, brake_health_pct,
+                    battery_health_pct, oil_life_pct, hydraulic_health_pct,
+                    active_fault_code_count
+                FROM sensor_readings
+                WHERE recorded_at IS NOT NULL
+                ORDER BY asset_id, recorded_at DESC
+            ) latest
+        """)).fetchone()
+        if comp_row:
+            component_health = {
+                "avg_tire":     float(comp_row[0] or 0),
+                "avg_brake":    float(comp_row[1] or 0),
+                "avg_battery":  float(comp_row[2] or 0),
+                "avg_oil":      float(comp_row[3] or 0),
+                "avg_hydraulic":float(comp_row[4] or 0),
+            }
+            total_fault_codes          = int(comp_row[5] or 0)
+            avg_fault_codes_per_asset  = float(comp_row[6] or 0)
+    except Exception:
+        pass
+
+    # B4. Vendor & Service Provider Breakdown (maintenance_events)
+    vendor_breakdown: list[dict] = []
+    try:
+        vendor_rows = db.execute(text("""
+            SELECT vendor_name,
+                   COUNT(*)::int                            AS event_count,
+                   COALESCE(SUM(cost_amount), 0)::numeric  AS total_cost
+            FROM maintenance_events
+            WHERE vendor_name IS NOT NULL AND vendor_name <> ''
+            GROUP BY vendor_name
+            ORDER BY event_count DESC
+            LIMIT 6
+        """)).fetchall()
+        vendor_breakdown = [
+            {"vendor": r[0], "events": int(r[1]), "cost": float(r[2])}
+            for r in vendor_rows
+        ]
+    except Exception:
+        pass
+
+    # B5. Ticket MTTR — Mean Time to Resolve
+    avg_resolution_hours = 0.0
+    avg_resolution_days  = 0.0
+    mttr_by_priority: list[dict] = []
+    try:
+        mttr_row = db.execute(text("""
+            SELECT
+                ROUND(AVG(EXTRACT(EPOCH FROM (resolved_at - opened_at)) / 3600)::numeric,  1) AS avg_hours,
+                ROUND(AVG(EXTRACT(EPOCH FROM (resolved_at - opened_at)) / 86400)::numeric, 1) AS avg_days
+            FROM tickets
+            WHERE resolved_at IS NOT NULL AND opened_at IS NOT NULL
+        """)).fetchone()
+        if mttr_row:
+            avg_resolution_hours = float(mttr_row[0] or 0)
+            avg_resolution_days  = float(mttr_row[1] or 0)
+
+        prio_rows = db.execute(text("""
+            SELECT COALESCE(final_priority, priority, 'Unknown') AS priority,
+                   ROUND(AVG(EXTRACT(EPOCH FROM (resolved_at - opened_at)) / 3600)::numeric, 1) AS avg_hours
+            FROM tickets
+            WHERE resolved_at IS NOT NULL AND opened_at IS NOT NULL
+            GROUP BY COALESCE(final_priority, priority, 'Unknown')
+            ORDER BY avg_hours DESC
+        """)).fetchall()
+        mttr_by_priority = [
+            {"priority": str(r[0]).title(), "avg_hours": float(r[1] or 0)}
+            for r in prio_rows
+        ]
+    except Exception:
+        pass
+
     return {
         # Warehouse
         "warehouse_name": warehouse_name,
@@ -381,6 +504,17 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
         "inactive_users": inactive_users,
         "admin_users": admin_users,
         "standard_users": standard_users,
+
+        # Phase B — Extended DB fields
+        "fleet_age_distribution": fleet_age_distribution,
+        "warranty_expiring_90d": int(warranty_expiring_90d),
+        "component_health": component_health,
+        "total_fault_codes": total_fault_codes,
+        "avg_fault_codes_per_asset": avg_fault_codes_per_asset,
+        "vendor_breakdown": vendor_breakdown,
+        "avg_resolution_hours": avg_resolution_hours,
+        "avg_resolution_days": avg_resolution_days,
+        "mttr_by_priority": mttr_by_priority,
     }
 
 
