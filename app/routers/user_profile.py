@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.deps import get_db, get_current_user
-from app.models import Profile, Warehouse, Department, Asset
+from app.models import Profile, Warehouse, Department, Asset, AssetAssignment, AssetFailurePrediction
 from app.schemas.user_profile import (
-    UserProfileOut, 
-    UserProfileUpdate, 
-    UserAssignedAssetOut, 
+    UserProfileOut,
+    UserProfileUpdate,
+    UserAssignedAssetOut,
     UserItemOut,
     UserCreate,
     UserUpdate
@@ -13,6 +13,7 @@ from app.schemas.user_profile import (
 from app.services.notification_service import NotificationService
 from typing import List
 import uuid
+import traceback
 
 router = APIRouter(prefix="/user-profile", tags=["User Profile"])
 
@@ -44,13 +45,18 @@ def get_my_profile(
             if wh:
                 warehouse_name = wh.name
         
-        # Asset count
+        # Asset count — check both direct assignment and assignment table
         asset_count = 0
         try:
-            asset_count = db.query(Asset).filter(
-                Asset.assigned_to == str(real_user.id),
-                Asset.status == "active"
+            direct = db.query(Asset).filter(
+                Asset.assigned_to == real_user.id,
+                Asset.status != "retired"
             ).count()
+            via_table = db.query(AssetAssignment).filter(
+                AssetAssignment.user_id == real_user.id,
+                AssetAssignment.is_active == True
+            ).count()
+            asset_count = max(direct, via_table)
         except:
             asset_count = 0
         
@@ -84,7 +90,6 @@ def get_my_profile(
         
     except Exception as e:
         print(f"[PROFILE ERROR] {type(e).__name__}: {str(e)}")
-        import traceback
         traceback.print_exc()
         return {
             "error": str(e)
@@ -97,14 +102,6 @@ def update_my_profile(
     db: Session = Depends(get_db)
 ):
     try:
-        import sys
-        print(f"\n[PROFILE-ENDPOINT] PUT /user-profile/me called", flush=True)
-        print(f"[PROFILE-ENDPOINT] Current user: {current_user.full_name}", flush=True)
-        print(f"[PROFILE-ENDPOINT] Payload: firstName={payload.firstName}, lastName={payload.lastName}, phone={payload.contactNumber}, address={payload.address}", flush=True)
-        print(f"[PROFILE-ENDPOINT] DB connection exists: {db is not None}", flush=True)
-        sys.stdout.flush()
-        
-        # If no database, just update in-memory (mock user won't persist)
         if payload.firstName is not None or payload.lastName is not None:
             name_parts = (current_user.full_name or "").split(" ")
             curr_first = name_parts[0] if len(name_parts) > 0 else ""
@@ -112,35 +109,24 @@ def update_my_profile(
             new_first = payload.firstName if payload.firstName is not None else curr_first
             new_last = payload.lastName if payload.lastName is not None else curr_last
             current_user.full_name = f"{new_first} {new_last}".strip()
-            
+
         if payload.contactNumber is not None:
             current_user.phone = payload.contactNumber
-            
+
         if payload.address is not None:
             meta = current_user.meta or {}
             meta_copy = dict(meta)
             meta_copy["address"] = payload.address
             current_user.meta = meta_copy
 
-        # Only commit if database connection exists
         if db and hasattr(current_user, '__table__'):
             db.commit()
             db.refresh(current_user)
-            
-            # ============================================================
-            # SEND NOTIFICATION TO ADMINS ABOUT PROFILE UPDATE
-            # ============================================================
-            import sys
-            print(f"[USER-UPDATE] Profile updated by {current_user.full_name}", flush=True)
-            sys.stdout.flush()
             try:
                 NotificationService.notify_on_profile_update(db, str(current_user.id))
             except Exception as notification_error:
-                # Log but don't fail the profile update if notifications fail
-                print(f"[NOTIFICATION-ERROR] Failed to send profile update notification: {str(notification_error)}", flush=True)
-                import traceback
-                traceback.print_exc()
-            
+                print(f"[NOTIFICATION-ERROR] {str(notification_error)}", flush=True)
+
         return get_my_profile(current_user=current_user, db=db)
     except Exception as e:
         if db:
@@ -152,46 +138,79 @@ def get_my_assets(
     current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    from sqlalchemy import text as sql_text
     try:
-        # If no database connection, return empty list (mock user)
         if not db:
             return []
-            
-        assets = db.query(Asset).filter(
-            Asset.assigned_to == str(current_user.id),
-            Asset.status == "active"
-        ).all()
-        
+
+        # Get the real profile email and resolve UUID via raw SQL (bypasses ORM type issues)
+        email = current_user.email
+        uid_row = db.execute(sql_text(
+            "SELECT id FROM profiles WHERE email = :email LIMIT 1"
+        ), {"email": email}).fetchone()
+
+        if not uid_row:
+            print(f"[ASSETS] no profile found for email={email}", flush=True)
+            return []
+
+        uid = str(uid_row.id)
+        print(f"[ASSETS] email={email} uid={uid}", flush=True)
+
+        rows = db.execute(sql_text("""
+            SELECT
+                a.id, a.asset_code, a.asset_name, a.asset_type, a.vehicle_type,
+                a.category, a.status, a.criticality_score, a.next_service_date,
+                a.make, a.model,
+                w.name AS wh_name, w.city AS wh_city,
+                sr.tire_health_pct, sr.brake_health_pct,
+                sr.battery_health_pct, sr.oil_life_pct, sr.hydraulic_health_pct
+            FROM assets a
+            LEFT JOIN warehouses w ON w.id = a.warehouse_id
+            LEFT JOIN LATERAL (
+                SELECT tire_health_pct, brake_health_pct, battery_health_pct,
+                       oil_life_pct, hydraulic_health_pct
+                FROM sensor_readings
+                WHERE asset_id = a.id
+                ORDER BY recorded_at DESC
+                LIMIT 1
+            ) sr ON true
+            WHERE a.assigned_to = :uid
+              AND a.status != 'retired'
+        """), {"uid": uid}).fetchall()
+
+        print(f"[ASSETS] raw SQL returned {len(rows)} rows", flush=True)
+
         result = []
-        for asset in assets:
-            warehouse_loc = ""
-            if asset.warehouse_id:
-                wh = db.query(Warehouse).filter(Warehouse.id == asset.warehouse_id).first()
-                if wh:
-                    warehouse_loc = f"{wh.name}"
-                    if wh.city: warehouse_loc += f" - {wh.city}"
-                    
-            health_score = 100.0
-            if asset.criticality_score is not None:
-                health_score = float(asset.criticality_score)
-                
+        for r in rows:
+            loc = r.wh_name or ""
+            if r.wh_city:
+                loc += f" - {r.wh_city}"
+            health = float(r.criticality_score) if r.criticality_score else 100.0
             result.append({
-                "assignment_id": str(asset.id),
-                "asset_id": str(asset.id),
-                "asset_code": asset.asset_code,
-                "name": asset.asset_name,
-                "asset_type": asset.asset_type,
-                "category": asset.category,
-                "location": warehouse_loc,
-                "status": asset.status or "active",
-                "healthPercent": health_score,
-                "nextServiceDate": asset.next_service_date.isoformat() if asset.next_service_date else None
+                "assignment_id": str(r.id),
+                "asset_id": str(r.id),
+                "asset_code": r.asset_code or "",
+                "name": r.asset_name or "",
+                "asset_type": r.vehicle_type or r.asset_type or "",
+                "category": r.category or "",
+                "make": r.make or "",
+                "model": r.model or "",
+                "location": loc,
+                "status": r.status or "active",
+                "healthPercent": round(health, 1),
+                "nextServiceDate": r.next_service_date.isoformat() if r.next_service_date else None,
+                "sensorHealth": {
+                    "tire": round(float(r.tire_health_pct), 1) if r.tire_health_pct else None,
+                    "brake": round(float(r.brake_health_pct), 1) if r.brake_health_pct else None,
+                    "battery": round(float(r.battery_health_pct), 1) if r.battery_health_pct else None,
+                    "oil": round(float(r.oil_life_pct), 1) if r.oil_life_pct else None,
+                    "hydraulic": round(float(r.hydraulic_health_pct), 1) if r.hydraulic_health_pct else None,
+                },
             })
-            
+
         return result
     except Exception as e:
-        print(f"[ASSETS-ERROR] {str(e)}")
-        import traceback
+        print(f"[ASSETS-ERROR] {str(e)}", flush=True)
         traceback.print_exc()
         return []
 
@@ -200,33 +219,33 @@ def get_my_stats(
     current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    from sqlalchemy import text as sql_text
     try:
-        # If no database, return zero counts (mock user)
         if not db:
-            return {
-                "assignedAssets": 0,
-                "activeAssets": 0
-            }
-            
-        assigned_assets_count = db.query(Asset).filter(
-            Asset.assigned_to == str(current_user.id),
-            Asset.status == "active"
-        ).count()
-        
-        return {
-            "assignedAssets": assigned_assets_count,
-            "activeAssets": assigned_assets_count
-        }
-    except Exception as e:
-        print(f"[STATS-ERROR] {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return {
-            "assignedAssets": 0,
-            "activeAssets": 0
-        }
+            return {"assignedAssets": 0, "activeAssets": 0}
 
-import traceback
+        uid_row = db.execute(sql_text(
+            "SELECT id FROM profiles WHERE email = :email LIMIT 1"
+        ), {"email": current_user.email}).fetchone()
+
+        if not uid_row:
+            return {"assignedAssets": 0, "activeAssets": 0}
+
+        uid = str(uid_row.id)
+
+        total = db.execute(sql_text(
+            "SELECT count(*) FROM assets WHERE assigned_to = :uid AND status != 'retired'"
+        ), {"uid": uid}).scalar() or 0
+
+        active = db.execute(sql_text(
+            "SELECT count(*) FROM assets WHERE assigned_to = :uid AND status IN ('active','operational','critical')"
+        ), {"uid": uid}).scalar() or 0
+
+        return {"assignedAssets": int(total), "activeAssets": int(active)}
+    except Exception as e:
+        print(f"[STATS-ERROR] {str(e)}", flush=True)
+        traceback.print_exc()
+        return {"assignedAssets": 0, "activeAssets": 0}
 
 @router.get("/users")
 def get_all_users(
@@ -244,10 +263,15 @@ def get_all_users(
             if user.warehouse_id:
                 warehouse_name = db.query(Warehouse.name).filter(Warehouse.id == user.warehouse_id).scalar()
                 
-            assigned_assets_count = db.query(Asset).filter(
-                Asset.assigned_to == str(user.id),
-                Asset.status == "active"
+            direct_cnt = db.query(Asset).filter(
+                Asset.assigned_to == user.id,
+                Asset.status != "retired"
             ).count()
+            table_cnt = db.query(AssetAssignment).filter(
+                AssetAssignment.user_id == user.id,
+                AssetAssignment.is_active == True
+            ).count()
+            assigned_assets_count = max(direct_cnt, table_cnt)
             
             meta = user.meta or {}
             address = meta.get("address", "") if isinstance(meta, dict) else ""
@@ -350,10 +374,24 @@ def list_user_warehouses(db: Session = Depends(get_db)):
 @router.get("/users/{user_id}/assets", response_model=List[UserAssignedAssetOut])
 def get_user_assets(user_id: str, db: Session = Depends(get_db)):
     try:
-        assets = db.query(Asset).filter(
-            Asset.assigned_to == user_id,
-            Asset.status == "active"
+        import uuid as _uuid
+        try:
+            uid = _uuid.UUID(user_id)
+        except ValueError:
+            return []
+
+        direct_assets = db.query(Asset).filter(
+            Asset.assigned_to == uid,
+            Asset.status != "retired"
         ).all()
+
+        assignment_rows = db.query(AssetAssignment).filter(
+            AssetAssignment.user_id == uid,
+            AssetAssignment.is_active == True
+        ).all()
+        extra_ids = {r.asset_id for r in assignment_rows} - {a.id for a in direct_assets}
+        extra_assets = db.query(Asset).filter(Asset.id.in_(extra_ids)).all() if extra_ids else []
+        assets = direct_assets + extra_assets
         
         result = []
         for asset in assets:
@@ -421,7 +459,10 @@ def update_any_user(user_id: str, data: UserUpdate, db: Session = Depends(get_db
             role=user.role,
             department=dp_name or "Not assigned",
             status=user.status,
-            assignedAssets=db.query(Asset).filter(Asset.assigned_to == user_id, Asset.status == "active").count()
+            assignedAssets=max(
+                db.query(Asset).filter(Asset.assigned_to == user.id, Asset.status != "retired").count(),
+                db.query(AssetAssignment).filter(AssetAssignment.user_id == user.id, AssetAssignment.is_active == True).count()
+            )
         )
     except Exception as e:
         db.rollback()
@@ -472,6 +513,5 @@ def get_team_members(
         
     except Exception as e:
         print(f"[TEAM-ERROR] {str(e)}")
-        import traceback
         traceback.print_exc()
         return []
