@@ -286,8 +286,14 @@ from .routers.db_debug import router as db_debug_router
 from .routers.user_profile import router as user_profile_router
 from .routers.asset_summaries import router as asset_summaries_router
 
+# Sharada — user-role ticket section (/user/tickets)
+from .routers.user_tickets import router as user_tickets_router
+
 from app.ai.services.ticket_categorization_service import warmup_ticket_categorizer
 from app.ai.services.asset_summary_service import warmup_asset_summary_model
+# Ticket priority + summary models are loaded lazily on first request (see
+# user_ticket_service.predict_priority_safely / generate_summary_safely) to
+# keep server cold-start fast.
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_DIR = BASE_DIR / "ai" / "models"
@@ -406,6 +412,9 @@ app.include_router(user_notification_preferences_router)
 app.include_router(db_debug_router)
 app.include_router(user_profile_router)
 app.include_router(asset_summaries_router)
+
+# Sharada — user-role ticket section (/user/tickets)
+app.include_router(user_tickets_router)
 
 
 @app.get("/")
