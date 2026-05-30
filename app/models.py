@@ -1,8 +1,23 @@
 from sqlalchemy import Column, String, Text, Integer, Boolean, Date, DateTime, ForeignKey, Numeric
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.dialects.postgresql import ENUM, UUID, JSONB
 from sqlalchemy.sql import func
 from app.db import Base
 import uuid
+
+# Postgres ENUM types already defined in the DB. `create_type=False` tells
+# SQLAlchemy "this enum already exists, don't try to CREATE TYPE it".
+TicketStatusEnum = ENUM(
+    "open", "in_progress", "pending", "resolved", "closed", "cancelled",
+    name="ticket_status", create_type=False,
+)
+TicketPriorityEnum = ENUM(
+    "low", "medium", "high",
+    name="ticket_priority", create_type=False,
+)
+TicketCategoryEnum = ENUM(
+    "electrical", "mechanical", "software",
+    name="ticket_category", create_type=False,
+)
 
 
 class Warehouse(Base):
@@ -168,12 +183,14 @@ class Ticket(Base):
     warehouse_id = Column(UUID(as_uuid=True), ForeignKey("warehouses.id"))
     title = Column(Text, nullable=False)
     description = Column(Text, nullable=False)
-    status = Column(Text, nullable=False, default="open")
-    priority = Column(Text)
-    predicted_priority = Column(Text)
-    final_priority = Column(Text)
-    predicted_category = Column(Text)
-    final_category = Column(Text)
+    # These six columns are Postgres ENUMs in the DB, not text — see top of
+    # file for the ENUM type definitions.
+    status = Column(TicketStatusEnum, nullable=False, default="open")
+    priority = Column(TicketPriorityEnum)
+    predicted_priority = Column(TicketPriorityEnum)
+    final_priority = Column(TicketPriorityEnum)
+    predicted_category = Column(TicketCategoryEnum)
+    final_category = Column(TicketCategoryEnum)
     ticket_summary = Column(Text)
     asset_summary = Column(Text)
     created_by = Column(UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=False)
@@ -183,7 +200,9 @@ class Ticket(Base):
     reviewed_at = Column(DateTime(timezone=True))
     resolved_at = Column(DateTime(timezone=True))
     closed_at = Column(DateTime(timezone=True))
-    meta = Column(JSONB, default={})
+    # DB column is `metadata` but the Python attribute stays `meta` so existing
+    # callers (admin code, partner work) keep working unchanged.
+    meta = Column("metadata", JSONB, default={})
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
