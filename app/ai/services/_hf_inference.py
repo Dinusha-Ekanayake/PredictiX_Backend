@@ -21,7 +21,11 @@ from typing import Any
 
 import requests
 
-HF_API_URL = "https://api-inference.huggingface.co/models/{repo}"
+# Legacy host ``api-inference.huggingface.co`` was retired by HF and no longer
+# resolves (DNS ``getaddrinfo`` failure). Serverless inference now lives behind
+# the Inference Providers router; the ``hf-inference`` provider keeps the same
+# ``{"inputs", "parameters"}`` request / pipeline-style response shape.
+HF_API_URL = "https://router.huggingface.co/hf-inference/models/{repo}"
 
 
 def _token() -> str:
