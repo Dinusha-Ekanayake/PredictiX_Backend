@@ -12,7 +12,7 @@ from app.schemas.tickets import (
     TicketPriorityResponse,
 )
 from app.ai.services.ticket_categorization_service import categorize_ticket_text
-from app.ai.services.ticket_priority_service import classify_ticket_priority
+from app.ai.services.ticket_priority_service import predict_ticket_priority
 
 router = APIRouter(prefix="/tickets", tags=["Tickets"])
 
@@ -171,8 +171,8 @@ def categorize_ticket_endpoint(payload: TicketCategorizationRequest):
 )
 def prioritize_ticket_endpoint(payload: TicketPriorityRequest):
     try:
-        priority = classify_ticket_priority(payload.text)
-        return TicketPriorityResponse(priority=priority)
+        priority = predict_ticket_priority(title="", description=payload.text)
+        return TicketPriorityResponse(**priority)
     except HTTPException:
         raise
     except Exception as exc:
