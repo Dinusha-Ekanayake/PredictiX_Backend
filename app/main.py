@@ -289,6 +289,9 @@ from .routers.asset_summaries import router as asset_summaries_router
 # Sharada — user-role ticket section (/user/tickets)
 from .routers.user_tickets import router as user_tickets_router
 
+# Sharada — FRSO warehouse-level survival predictions (/survival/*)
+from .routers.survival_predictions import router as survival_predictions_router
+
 from app.ai.services.ticket_categorization_service import warmup_ticket_categorizer
 from app.ai.services.asset_summary_service import warmup_asset_summary_model
 # Ticket priority + summary models are loaded lazily on first request (see
@@ -415,6 +418,9 @@ app.include_router(asset_summaries_router)
 
 # Sharada — user-role ticket section (/user/tickets)
 app.include_router(user_tickets_router)
+
+# Sharada — FRSO warehouse-level survival predictions (/survival/*)
+app.include_router(survival_predictions_router)
 
 
 @app.get("/")
