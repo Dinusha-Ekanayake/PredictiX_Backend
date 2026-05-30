@@ -1,103 +1,81 @@
+"""Asset summary generation service — raw HF Inference API (online).
+
+Raw HTTP to the Inference API URL — bypasses ``huggingface_hub``'s
+client-side ``pipeline_tag`` validation, which rejects models whose model
+card doesn't declare the field.
+
+Public functions (``generate_asset_summary``, ``warmup_asset_summary_model``,
+``get_asset_summary_model``) keep their existing names so the
+``/asset-summaries`` router and shared callers don't need to change.
+"""
+
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional
 
 from dotenv import load_dotenv
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
-# Load .env file from project root
+from app.ai.services._hf_inference import call_hf_inference
+
 env_path = Path(__file__).resolve().parent.parent.parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
 
-def get_hf_credentials():
-    """Get HuggingFace credentials from environment variables"""
+def get_hf_credentials() -> tuple[str, str]:
+    """Read HF credentials from the environment."""
     hf_token = os.getenv("HF_TOKEN")
     model_repo = os.getenv("HF_ASSET_SUMMARIZATION_REPO")
-    
     if not hf_token:
         raise RuntimeError("HF_TOKEN is not set in .env")
-    
     if not model_repo:
         raise RuntimeError("HF_ASSET_SUMMARIZATION_REPO is not set in .env")
-    
     return hf_token, model_repo
 
 
 @lru_cache(maxsize=1)
-def get_asset_summary_model():
-    if os.getenv("DISABLE_HF_MODELS", "false").lower() == "true":
-        raise RuntimeError("Asset summary model is disabled (DISABLE_HF_MODELS=true).")
-    try:
-        hf_token, model_repo = get_hf_credentials()
-        
-        # Load tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_repo,
-            token=hf_token,
-        )
-        
-        # Load model
-        model = AutoModelForSeq2SeqLM.from_pretrained(
-            model_repo,
-            token=hf_token,
-        )
-        
-        print(f"Asset summary model loaded successfully from HuggingFace: {model_repo}")
-        return {"model": model, "tokenizer": tokenizer}
-    except Exception as e:
-        print(f"Failed to load asset summary model from HuggingFace: {e}")
-        raise
+def get_asset_summary_repo() -> str:
+    _, repo = get_hf_credentials()
+    return repo
+
+
+def get_asset_summary_model() -> dict:
+    """Back-compat shim — older callers expected a ``{"model","tokenizer"}``
+    dict. We return a truthy stand-in so their ``is not None`` checks pass."""
+    return {"model": get_asset_summary_repo(), "tokenizer": None}
 
 
 def generate_asset_summary(input_text: str) -> str:
-    """
-    Generate summary for an asset using the Seq2Seq model
-    
+    """Call the HF Inference API to summarise the formatted asset text.
+
     Args:
-        input_text: Formatted input text (pipe-separated vehicle/asset attributes)
-                   Example: "Vehicle: SLW0225 | Type: Light Truck 3.5T | Model: Mitsubishi Canter | ..."
-        
+        input_text: Formatted input text (pipe-separated vehicle/asset attributes).
+            Example: ``"Vehicle: SLW0225 | Type: Light Truck 3.5T | ..."``
+
     Returns:
-        Generated summary string
+        Generated summary string.
     """
+    if not input_text or not input_text.strip():
+        raise ValueError("input_text cannot be empty")
+
     try:
-        model_data = get_asset_summary_model()
-        
-        if model_data is None:
-            raise RuntimeError("Asset summary model not loaded")
-        
-        if not input_text or not input_text.strip():
-            raise ValueError("input_text cannot be empty")
-        
-        model = model_data["model"]
-        tokenizer = model_data["tokenizer"]
-        
-        # Tokenize input
-        inputs = tokenizer(input_text, return_tensors="pt", max_length=512, truncation=True)
-        
-        # Generate summary
-        summary_ids = model.generate(
-            inputs["input_ids"],
-            max_length=256,
-            min_length=50,
-            num_beams=4,
-            early_stopping=True
+        repo = get_asset_summary_repo()
+        raw = call_hf_inference(
+            repo,
+            input_text,
+            parameters={"min_length": 50, "max_length": 256},
         )
-        
-        # Decode summary
-        summary = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
-        
-        return summary
     except Exception as e:
         raise RuntimeError(f"Summary generation failed: {e}")
 
-def warmup_asset_summary_model():
-    """Pre-load the model on application startup"""
-    try:
-        get_asset_summary_model()
-        print("Asset summary model warmed up successfully")
-    except Exception as e:
-        print(f"Asset summary model warmup failed: {e}")
-        raise
+    if isinstance(raw, list) and raw:
+        item = raw[0]
+        if isinstance(item, dict) and "summary_text" in item:
+            return item["summary_text"]
+    if isinstance(raw, dict) and "summary_text" in raw:
+        return raw["summary_text"]
+    return str(raw)
+
+
+def warmup_asset_summary_model() -> None:
+    """No-op for raw HTTP. Kept for symmetry with the old API."""
+    get_asset_summary_repo()
