@@ -1,36 +1,45 @@
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 from uuid import UUID
+from datetime import date
+
 
 class UserCreate(BaseModel):
-    user_name: str
-    email: EmailStr
+    first_name: str
+    last_name: str
+    email: str
+    password: Optional[str] = None
+    role: Optional[str] = "USER"
+    status: Optional[str] = "active"
+    department: Optional[str] = None
+    residence_address: Optional[str] = None
     contact_no: Optional[str] = None
-    password: str
-    role: str = "USER"
-    dept_id: Optional[int] = None
     warehouse: Optional[str] = None
-    contact_number: Optional[str] = None
+
+
+class UserUpdate(BaseModel):
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    email: Optional[str] = None
+    role: Optional[str] = None
+    status: Optional[str] = None
+    department: Optional[str] = None
+    residence_address: Optional[str] = None
+    contact_no: Optional[str] = None
+    warehouse: Optional[str] = None
+
 
 class UserOut(BaseModel):
     user_id: UUID
-    user_name: str
-    email: EmailStr
-    role: str
-    is_active: bool
+    first_name: str
+    last_name: str
+    email: Optional[str] = None
+    role: Optional[str] = None
+    status: Optional[str] = None
+    department: Optional[str] = None
+    residence_address: Optional[str] = None
+    contact_no: Optional[str] = None
+    warehouse: Optional[str] = None
+    created_at: Optional[date] = None
 
-class UserBase(BaseModel):
-    username: str
-    email: str
-class UserUpdate(BaseModel):
-    username: str
-    email: str
-
-class UserCreate(UserBase):
-    password: str
-
-class UserRead(UserBase):
-    id: int
-
-    class Config:
-        orm_mode = True
+    model_config = {"from_attributes": True}
