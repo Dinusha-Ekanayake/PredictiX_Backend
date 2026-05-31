@@ -349,14 +349,13 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             print(f"Asset summary model loading failed: {e}")
             raise RuntimeError(f"Failed to load asset summary model: {e}") from e
+        try:
+            warmup_priority_model()
+            print("Ticket priority model loaded successfully from Hugging Face.")
+        except Exception as e:
+            print(f"WARNING: Ticket priority model loading failed (endpoint will return 503): {e}")
     else:
         print("HuggingFace models disabled (DISABLE_HF_MODELS=true). Skipping warmup.")
-
-    try:
-        warmup_priority_model()
-        print("Ticket priority model loaded successfully from Hugging Face.")
-    except Exception as e:
-        print(f"WARNING: Ticket priority model loading failed (endpoint will return 503): {e}")
 
     setup_scheduler()
 
