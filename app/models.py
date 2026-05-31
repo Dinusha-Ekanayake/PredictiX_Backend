@@ -183,7 +183,7 @@ class Ticket(Base):
     reviewed_at = Column(DateTime(timezone=True))
     resolved_at = Column(DateTime(timezone=True))
     closed_at = Column(DateTime(timezone=True))
-    meta = Column(JSONB, default={})
+    meta = Column("metadata", JSONB, default={})
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

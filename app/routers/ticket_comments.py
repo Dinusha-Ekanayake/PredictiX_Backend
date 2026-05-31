@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from app.deps import get_db
 from app.models import TicketComment
@@ -24,4 +24,14 @@ def list_ticket_comments(
     q = db.query(TicketComment)
     if ticket_id:
         q = q.filter(TicketComment.ticket_id == ticket_id)
-    return q.order_by(TicketComment.created_at.desc()).all()
+    return q.order_by(TicketComment.created_at.asc()).all()
+
+
+@router.delete("/{comment_id}")
+def delete_ticket_comment(comment_id: str, db: Session = Depends(get_db)):
+    obj = db.query(TicketComment).filter(TicketComment.id == comment_id).first()
+    if not obj:
+        raise HTTPException(status_code=404, detail="Comment not found")
+    db.delete(obj)
+    db.commit()
+    return {"message": "Comment deleted"}
