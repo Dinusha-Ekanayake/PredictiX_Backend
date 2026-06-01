@@ -15,6 +15,7 @@ import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.deps import get_db
@@ -31,20 +32,16 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/users", tags=["Users"])
 
 
-def _user_to_item(user: Profile, db: Session) -> UserItemOut:
-    department_name = (
-        db.query(Department.name).filter(Department.id == user.department_id).scalar()
-        if user.department_id else None
-    )
-    warehouse_name = (
-        db.query(Warehouse.name).filter(Warehouse.id == user.warehouse_id).scalar()
-        if user.warehouse_id else None
-    )
-    assigned = (
-        db.query(Asset)
-        .filter(Asset.assigned_to == str(user.id), Asset.status == "active")
-        .count()
-    )
+def _build_item(
+    user: Profile,
+    dept_names: dict,
+    warehouse_names: dict,
+    asset_counts: dict,
+) -> UserItemOut:
+    """Build a UserItemOut from in-memory lookup maps — no DB calls."""
+    department_name = dept_names.get(user.department_id) if user.department_id else None
+    warehouse_name = warehouse_names.get(user.warehouse_id) if user.warehouse_id else None
+    assigned = asset_counts.get(str(user.id), 0)
 
     name_parts = (user.full_name or "").split(" ")
     first_name = name_parts[0] if name_parts else ""
@@ -67,9 +64,43 @@ def _user_to_item(user: Profile, db: Session) -> UserItemOut:
     )
 
 
+def _user_to_item(user: Profile, db: Session) -> UserItemOut:
+    """Single-user variant (used by create/update). Three small scoped queries."""
+    dept_names = {}
+    if user.department_id:
+        name = db.query(Department.name).filter(Department.id == user.department_id).scalar()
+        if name is not None:
+            dept_names[user.department_id] = name
+    warehouse_names = {}
+    if user.warehouse_id:
+        name = db.query(Warehouse.name).filter(Warehouse.id == user.warehouse_id).scalar()
+        if name is not None:
+            warehouse_names[user.warehouse_id] = name
+    assigned = (
+        db.query(func.count(Asset.id))
+        .filter(Asset.assigned_to == str(user.id), Asset.status == "active")
+        .scalar()
+        or 0
+    )
+    asset_counts = {str(user.id): assigned}
+    return _build_item(user, dept_names, warehouse_names, asset_counts)
+
+
 @router.get("/", response_model=list[UserItemOut])
 def list_users(db: Session = Depends(get_db)):
-    return [_user_to_item(u, db) for u in db.query(Profile).all()]
+    # Pre-fetch lookup maps once — avoids per-user N+1 queries.
+    dept_names = {d.id: d.name for d in db.query(Department.id, Department.name).all()}
+    warehouse_names = {w.id: w.name for w in db.query(Warehouse.id, Warehouse.name).all()}
+    asset_counts = {
+        str(assigned_to): count
+        for assigned_to, count in db.query(Asset.assigned_to, func.count(Asset.id))
+        .filter(Asset.assigned_to.isnot(None), Asset.status == "active")
+        .group_by(Asset.assigned_to)
+        .all()
+    }
+
+    users = db.query(Profile).all()
+    return [_build_item(u, dept_names, warehouse_names, asset_counts) for u in users]
 
 
 @router.post("/", response_model=UserItemOut)

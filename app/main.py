@@ -55,6 +55,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # ─── Routers ──────────────────────────────────────────────────────────────────
+from .routers.admin_dashboard import admin_dashboard_router
 from .routers.asset_assignments import router as asset_assignments_router
 from .routers.asset_documents import router as asset_documents_router
 from .routers.asset_status_history import router as asset_status_history_router
@@ -201,6 +202,7 @@ app.include_router(vehicle_predictions_router)
 app.include_router(prediction_explanations_router)
 app.include_router(model_registry_router)
 app.include_router(warehouse_dashboard_router)
+app.include_router(admin_dashboard_router)
 
 # Notifications & reports
 app.include_router(notifications_router)
