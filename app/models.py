@@ -237,7 +237,6 @@ class Notification(Base):
     related_report_id = Column(UUID(as_uuid=True), ForeignKey("reports.id"))
     sent_at = Column(DateTime(timezone=True))
     read_at = Column(DateTime(timezone=True))
-    meta = Column(JSONB, default={})
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 class AssetAssignment(Base):
