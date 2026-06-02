@@ -44,7 +44,10 @@ class AssetDocumentCreate(BaseModel):
     mime_type: Optional[str] = None
     document_type: Optional[str] = None
     uploaded_by: Optional[UUID] = None
-    metadata: Optional[Any] = None
+    # Maps to the ORM attribute `AssetDocument.meta` (DB column "metadata").
+    # Must NOT be named `metadata` here, or Pydantic's from_attributes reads
+    # SQLAlchemy's reserved MetaData object instead of the JSONB value.
+    meta: Optional[Any] = None
 
 
 class AssetDocumentOut(AssetDocumentCreate):
