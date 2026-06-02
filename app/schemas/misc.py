@@ -66,6 +66,7 @@ class TicketCommentCreate(BaseModel):
 
 class TicketCommentOut(TicketCommentCreate):
     id: UUID
+    created_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -81,6 +82,7 @@ class TicketAttachmentCreate(BaseModel):
 
 class TicketAttachmentOut(TicketAttachmentCreate):
     id: UUID
+    created_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -96,6 +98,7 @@ class TicketStatusHistoryCreate(BaseModel):
 
 class TicketStatusHistoryOut(TicketStatusHistoryCreate):
     id: UUID
+    created_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
