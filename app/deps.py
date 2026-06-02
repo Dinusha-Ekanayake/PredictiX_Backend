@@ -1,131 +1,107 @@
-from .db import SessionLocal
+"""FastAPI dependencies: database session and current-user resolution."""
+import logging
 import os
+from typing import Generator, Optional
 
-def get_db():
-    """
-    Database session dependency.
-    If DATABASE_PASSWORD is not configured, yields None to avoid connection timeout.
-    Otherwise attempts to create a live session.
-    """
-    # Check if database credentials are configured before attempting connection
-    if not os.getenv("DATABASE_PASSWORD"):
-        print("[INFO] DATABASE_PASSWORD not configured - returning None")
-        yield None
-        return
-    
-    try:
-        db = SessionLocal()
-        yield db
-    finally:
-        try:
-            if 'db' in locals() and db:
-                db.close()
-        except:
-            pass
-
-# dinusha
 from fastapi import Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
+from app.db import SessionLocal
+
+log = logging.getLogger(__name__)
+
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
+
+def get_db() -> Generator[Optional[Session], None, None]:
+    """Yield a SQLAlchemy session, or None if the DB is not configured.
+
+    Returning None keeps dev environments without a DB password from
+    hanging on connection timeout; routers must handle the None case.
+    """
+    if not os.getenv("DATABASE_PASSWORD") and not os.getenv("DATABASE_URL"):
+        yield None
+        return
+
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 
 def get_current_user(
     token: str = Depends(oauth2_scheme),
-    db: Session = Depends(get_db)
+    db: Optional[Session] = Depends(get_db),
 ):
-    """Decode JWT token and return the Profile of the logged-in user."""
-    print(f"[DEBUG] get_current_user called with token: {token[:20] if token else 'NO TOKEN'}...")
-    
+    """Decode JWT and return the matching Profile.
+
+    Falls back to a lightweight in-memory profile when the DB row is
+    missing — supports development logins for accounts that exist in
+    auth's TEST_USERS but not yet in the profiles table.
+    """
     try:
-        secret = os.getenv("JWT_SECRET", "supersecret")
-        algorithm = os.getenv("JWT_ALGORITHM", "HS256")
-        print(f"[DEBUG] Decoding token with secret: {secret}, algorithm: {algorithm}")
-        
         payload = jwt.decode(
             token,
-            secret,
-            algorithms=[algorithm]
+            os.getenv("JWT_SECRET", "supersecret"),
+            algorithms=[os.getenv("JWT_ALGORITHM", "HS256")],
         )
-        print(f"[DEBUG] Token decoded successfully. Payload: {payload}")
-        
-        user_id: str = payload.get("sub")
-        if not user_id:
-            print("[DEBUG] No user_id in token payload")
-            raise HTTPException(status_code=401, detail="Invalid token")
-            
-        print(f"[DEBUG] User ID from token: {user_id}")
-    except JWTError as e:
-        print(f"[DEBUG] JWTError during token decode: {e}")
+    except JWTError as exc:
+        log.warning("JWT decode failed: %s", exc)
         raise HTTPException(status_code=401, detail="Not authenticated")
 
-    from app.models import Profile
-    
-    # Try to find user in database
-    user = None
-    if db:
-        try:
-            user = db.query(Profile).filter(Profile.id == user_id).first()
-            if user:
-                print(f"[DEBUG] User found in database: {user.email}")
-            else:
-                print(f"[DEBUG] User not found in database for ID: {user_id}")
-        except Exception as e:
-            print(f"[DEBUG] Error querying database: {e}")
-            user = None
-    else:
-        print("[DEBUG] No database connection available")
-    
-    if not user:
-        # For development: create a mock user object that works with endpoints
-        # This has all the attributes needed by the profile endpoints
-        email = payload.get("email", "test@example.com")
-        role = payload.get("role", "user")
-        
-        print(f"[DEBUG] Creating MockProfile for email={email}, role={role}")
-        
-        # Try to find Transportation department (default) for the mock user
-        # or use the user's email to find their real department
-        dept_id = None
-        try:
-            from app.models import Department
-            
-            # First try to find based on email pattern or default to Transportation
-            if "transportation" in email.lower():
-                dept = db.query(Department).filter(Department.name == "Transportation").first()
-            elif "electrical" in email.lower():
-                dept = db.query(Department).filter(Department.name == "Electrical").first()
-            elif "software" in email.lower():
-                dept = db.query(Department).filter(Department.name == "Software").first()
-            elif "mechanical" in email.lower():
-                dept = db.query(Department).filter(Department.name == "Mechanical").first()
-            else:
-                # Default to Transportation (most users)
-                dept = db.query(Department).filter(Department.name == "Transportation").first()
-            
-            if dept:
-                dept_id = dept.id
-                print(f"[DEBUG] Found department: {dept.name} ({dept_id})")
-        except Exception as e:
-            print(f"[DEBUG] Error fetching department: {e}")
-        
-        # Create a mock Profile class instance
-        class MockProfile:
-            def __init__(self, user_id, email, role, dept_id):
-                self.id = user_id
-                self.email = email
-                self.role = role
-                self.full_name = email.split("@")[0].replace(".", " ").title()
-                self.phone = None
-                self.status = "active"
-                self.warehouse_id = None
-                self.department_id = dept_id  # Set to actual department
-                self.meta = {}
-                self.employee_id = f"EMP-{user_id[:8]}"
-        
-        user = MockProfile(user_id, email, role, dept_id)
-        print(f"[DEBUG] MockProfile created: id={user.id}, email={user.email}, role={user.role}, dept_id={user.department_id}")
-        return user
-    
-    return user
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    from app.models import Profile  # local import to avoid circular deps
+
+    if db is not None:
+        user = db.query(Profile).filter(Profile.id == user_id).first()
+        if user:
+            return user
+
+    return _build_mock_profile(
+        user_id=user_id,
+        email=payload.get("email", "test@example.com"),
+        role=payload.get("role", "user"),
+        db=db,
+    )
+
+
+def _build_mock_profile(*, user_id: str, email: str, role: str, db: Optional[Session]):
+    """Construct a duck-typed Profile when the DB record is missing."""
+    from app.models import Department
+
+    department_id = None
+    if db is not None:
+        keyword_to_dept = {
+            "transportation": "Transportation",
+            "electrical": "Electrical",
+            "software": "Software",
+            "mechanical": "Mechanical",
+        }
+        dept_name = next(
+            (name for kw, name in keyword_to_dept.items() if kw in email.lower()),
+            "Transportation",
+        )
+        dept = db.query(Department).filter(Department.name == dept_name).first()
+        if dept:
+            department_id = dept.id
+
+    class MockProfile:
+        def __init__(self) -> None:
+            self.id = user_id
+            self.email = email
+            self.role = role
+            self.full_name = email.split("@")[0].replace(".", " ").title()
+            self.phone = None
+            self.status = "active"
+            self.warehouse_id = None
+            self.department_id = department_id
+            self.meta = {}
+            self.employee_id = f"EMP-{user_id[:8]}"
+
+    return MockProfile()

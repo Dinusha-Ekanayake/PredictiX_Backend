@@ -1,7 +1,8 @@
 from pydantic import BaseModel
 from uuid import UUID
-from typing import Optional
+from typing import Optional, Any
 from decimal import Decimal
+from datetime import datetime
 
 class SensorReadingCreate(BaseModel):
     asset_id: UUID
@@ -42,3 +43,31 @@ class SensorReadingCreate(BaseModel):
     overload_events_30d: Optional[int] = None
     fuel_rate_lph: Optional[Decimal] = None
     avg_payload_kg: Optional[Decimal] = None
+
+
+class SensorReadingOut(SensorReadingCreate):
+    id: int
+    recorded_at: Optional[datetime] = None
+
+    ambient_temp_avg_c: Optional[Decimal] = None
+    avg_trip_distance_km: Optional[Decimal] = None
+    cargo_type: Optional[str] = None
+    fuel_efficiency_km_per_l: Optional[Decimal] = None
+    is_home_warehouse_service: Optional[bool] = None
+    last_service_type: Optional[str] = None
+    maintenance_cost_last_service_lkr: Optional[Decimal] = None
+    major_component_replaced: Optional[str] = None
+    operating_hours_last_30d: Optional[Decimal] = None
+    operating_shift: Optional[str] = None
+    parts_replaced_last_service: Optional[str] = None
+    rainfall_mm_30d: Optional[Decimal] = None
+    route_type: Optional[str] = None
+    sensor_fault_flag: Optional[bool] = None
+    start_stop_burden_30d: Optional[int] = None
+    tire_pressure_psi: Optional[Decimal] = None
+    urban_route_pct: Optional[Decimal] = None
+
+    reading_payload: Optional[Any] = None
+
+    class Config:
+        from_attributes = True
