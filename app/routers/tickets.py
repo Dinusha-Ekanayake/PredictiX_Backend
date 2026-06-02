@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from app.deps import get_db
+from app.deps import get_db, get_current_user
 from app.models import Ticket, TicketStatusHistory
 from app.schemas.tickets import TicketCreate, TicketUpdate, TicketOut
 from app.schemas.tickets import (
@@ -55,7 +55,7 @@ def _generate_ticket_number(db: Session) -> str:
 
 
 @router.post("/", response_model=TicketOut)
-def create_ticket(payload: TicketCreate, db: Session = Depends(get_db)):
+def create_ticket(payload: TicketCreate, db: Session = Depends(get_db), _: object = Depends(get_current_user)):
     data = payload.model_dump()
     data["ticket_number"] = _generate_ticket_number(db)
     if data.get("priority"):
@@ -75,6 +75,7 @@ def list_tickets(
     warehouse_id: str | None = Query(default=None),
     assigned_to: str | None = Query(default=None),
     db: Session = Depends(get_db),
+    _: object = Depends(get_current_user),
 ):
     q = db.query(Ticket)
     if status:
@@ -91,7 +92,7 @@ def list_tickets(
 
 
 @router.get("/{ticket_id}", response_model=TicketOut)
-def get_ticket(ticket_id: str, db: Session = Depends(get_db)):
+def get_ticket(ticket_id: str, db: Session = Depends(get_db), _: object = Depends(get_current_user)):
     obj = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Ticket not found")
@@ -99,7 +100,9 @@ def get_ticket(ticket_id: str, db: Session = Depends(get_db)):
 
 
 @router.put("/{ticket_id}", response_model=TicketOut)
-def update_ticket(ticket_id: str, payload: TicketUpdate, db: Session = Depends(get_db)):
+def update_ticket(ticket_id: str, payload: TicketUpdate, db: Session = Depends(get_db), current_user: object = Depends(get_current_user)):
+    if getattr(current_user, "role", "") != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can update tickets")
     obj = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Ticket not found")
@@ -140,7 +143,9 @@ def update_ticket(ticket_id: str, payload: TicketUpdate, db: Session = Depends(g
 
 
 @router.delete("/{ticket_id}")
-def delete_ticket(ticket_id: str, db: Session = Depends(get_db)):
+def delete_ticket(ticket_id: str, db: Session = Depends(get_db), current_user: object = Depends(get_current_user)):
+    if getattr(current_user, "role", "") != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can delete tickets")
     obj = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Ticket not found")
