@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from uuid import UUID
-from typing import Optional
+from typing import Optional, Any
 
 class WarehouseCreate(BaseModel):
     code: str
@@ -12,6 +12,9 @@ class WarehouseCreate(BaseModel):
 
 class WarehouseOut(WarehouseCreate):
     id: UUID
+    climate_zone: Optional[str] = None
+    warehouse_type: Optional[str] = None
+    meta: Optional[Any] = None
 
     class Config:
         from_attributes = True
