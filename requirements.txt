@@ -23,3 +23,6 @@ transformers
 torch
 huggingface_hub
 safetensors
+groq
+nltk
+sentence-transformers
