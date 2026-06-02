@@ -16,10 +16,22 @@ def get_warehouse_summary(db: Session = Depends(get_db)):
     Returns unified summary data for the Warehouse Dashboard.
     Fetches all data directly from PostgreSQL database.
     """
-    # If database is not available, raise exception
+    # If database is not available, surface a clear 503 instead of a bare 500
     if db is None:
-        raise Exception("Database connection unavailable")
-    
+        raise HTTPException(
+            status_code=503,
+            detail="Database connection unavailable — check DATABASE_URL / DATABASE_PASSWORD in the backend .env",
+        )
+
+    try:
+        return _build_warehouse_summary(db)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Warehouse summary failed: {e}")
+
+
+def _build_warehouse_summary(db: Session):
     # 1. Row 1: WarehouseOverviewCards
     active_tickets_count = db.query(Ticket.id).filter(text("status != 'closed'")).count()
     total_tickets_count = db.query(Ticket.id).count()
