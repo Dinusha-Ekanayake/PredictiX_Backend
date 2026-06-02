@@ -14,7 +14,10 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(password: str, hashed: str) -> bool:
-    return pwd_context.verify(password, hashed)
+    try:
+        return pwd_context.verify(password, hashed)
+    except Exception:
+        return False
 
 
 def create_access_token(data: dict, expires_minutes: int | None = None) -> str:
