@@ -8,7 +8,7 @@ from app.schemas.maintenance import (
     MaintenanceEventOut,
 )
 
-router = APIRouter(prefix="/maintenance-events", tags=["Maintenance Events"])
+router = APIRouter(prefix="/maintenance", tags=["Maintenance"])
 
 
 @router.post("/", response_model=MaintenanceEventOut)

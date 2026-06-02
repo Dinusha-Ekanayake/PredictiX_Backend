@@ -1,104 +1,8 @@
-# from fastapi import APIRouter, Depends, HTTPException, status
-# from sqlalchemy.orm import Session
-# from pydantic import BaseModel
-# from jose import jwt
-# from datetime import datetime, timedelta
-# import os
-# from app.db import SessionLocal
-# from app.models import Profile
-# from app.deps import get_db
+"""Authentication router — issues JWTs for the test accounts.
 
-# print("[AUTH MODULE] Auth module is being loaded...")
-
-# router = APIRouter(prefix="/auth", tags=["Auth"])
-# print(f"[AUTH MODULE] Router created: {router}")
-
-# # ================================
-# # Schemas
-# # ================================
-
-# class LoginRequest(BaseModel):
-#     email: str
-#     password: str
-#     role: str  # "user" or "admin"
-
-# class LoginResponse(BaseModel):
-#     access_token: str
-#     token_type: str
-#     user_id: str
-#     email: str
-#     role: str
-#     full_name: str
-
-# # ================================
-# # Login Endpoint
-# # ================================
-
-# @router.post("/login")
-# def post_login(request: LoginRequest, db: Session = Depends(get_db)):
-#     print("[LOGIN ENDPOINT] Called with request:", request)
-    
-#     TEST_USERS = {
-#         "nuwan.gunasekara.tra1@lankalogix.lk": {
-#             "password": "nuwan",
-#             "full_name": "Nuwan Gunasekara",
-#             "role": "user"
-#         },
-#         "anjali.warnakulasuriya.adm1@lankalogix.lk": {
-#             "password": "admin",
-#             "full_name": "Anjali Warnakulasuriya",
-#             "role": "admin"
-#         }
-#     }
-    
-#     email = request.email.strip().lower()
-#     password = request.password.strip()
-#     role = request.role.upper()
-    
-#     if email not in TEST_USERS:
-#         raise HTTPException(status_code=401, detail="Invalid credentials")
-    
-#     user_data = TEST_USERS[email]
-#     if user_data["password"] != password or user_data["role"].upper() != role:
-#         raise HTTPException(status_code=401, detail="Invalid credentials")
-    
-#     import uuid
-#     user_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, email))
-    
-#     payload = {
-#         "sub": user_id,
-#         "email": email,
-#         "role": user_data["role"],
-#         "exp": datetime.utcnow() + timedelta(hours=24)
-#     }
-    
-#     secret = os.getenv("JWT_SECRET", "supersecret")
-#     algorithm = os.getenv("JWT_ALGORITHM", "HS256")
-#     token = jwt.encode(payload, secret, algorithm=algorithm)
-    
-#     return LoginResponse(
-#         access_token=token,
-#         token_type="bearer",
-#         user_id=user_id,
-#         email=email,
-#         role=user_data["role"],
-#         full_name=user_data["full_name"]
-#     )
-
-# # ================================
-# # Test endpoint
-# # ================================
-
-# @router.get("/test")
-# def test_auth():
-#     return {"message": "Auth working"}
-
-# # Debug: Print all routes after they're registered
-# print(f"[AUTH MODULE] Final routes in auth.router after all endpoints: {[r.path for r in router.routes]}")
-# for route in router.routes:
-#     if hasattr(route, 'methods'):
-#         print(f"[AUTH MODULE]   {route.path}: {route.methods}")
-
+Replace TEST_USERS with a real DB-backed lookup once the profiles
+table is seeded for staging.
+"""
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from jose import jwt
@@ -106,7 +10,16 @@ from datetime import datetime, timedelta
 import os
 import uuid
 
+from app.core.security import verify_password
+
 router = APIRouter(prefix="/auth", tags=["Auth"])
+
+
+def _default_password() -> str:
+    """Read DEFAULT_PASSWORD from env, stripping surrounding spaces/quotes."""
+    raw = os.getenv("DEFAULT_PASSWORD", "Predictix@123")
+    cleaned = raw.strip().strip('"').strip("'").strip()
+    return cleaned or "Predictix@123"
 
 # ─── Schemas ───────────────────────────────────────────────────────────────────
 
@@ -148,17 +61,74 @@ def post_login(request: LoginRequest):
     # Normalise to lowercase so "ADMIN" == "admin"
     requested_role: str = request.role.strip().lower()
 
-    # 1. Check email exists
+    # 1. Try DB-backed authentication first.
+    profile = _lookup_profile(email)
+    if profile is not None:
+        return _login_with_profile(profile, email, password, requested_role)
+
+    # 2. No DB profile — fall back to the hardcoded demo accounts.
+    print(f"[LOGIN] No DB profile for {email}; trying TEST_USERS fallback")
+    return _login_with_test_user(email, password, requested_role)
+
+
+def _login_with_profile(profile, email: str, password: str, requested_role: str) -> LoginResponse:
+    """Authenticate against a DB Profile row."""
+    profile_role = (profile.role or "").strip().lower()
+    profile_status = (profile.status or "").strip().lower()
+    full_name = profile.full_name or "Unknown"
+
+    # Reject inactive accounts.
+    if profile_status != "active":
+        print(f"[LOGIN] ✗ {email} | account inactive (status={profile_status})")
+        raise HTTPException(status_code=401, detail="This account is inactive.")
+
+    # Determine which password check applies.
+    meta = profile.meta if isinstance(profile.meta, dict) else {}
+    stored_hash = meta.get("password_hash") or ""
+
+    if stored_hash:
+        ok = verify_password(password, stored_hash)
+    elif email in TEST_USERS:
+        ok = password == TEST_USERS[email]["password"]
+    else:
+        ok = password == _default_password()
+
+    if not ok:
+        print(f"[LOGIN] ✗ {email} | invalid password")
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+    # Validate the declared role against the account role.
+    if requested_role and requested_role != profile_role:
+        raise HTTPException(
+            status_code=401,
+            detail=f"This account is registered as '{profile_role}', not '{requested_role}'. "
+                   f"Please select the correct role.",
+        )
+
+    user_id = str(profile.id)
+    token = _create_token(user_id, email, profile_role)
+    print(f"[LOGIN] ✓ (DB) {email} | role={profile_role} | id={user_id}")
+
+    return LoginResponse(
+        access_token=token,
+        token_type="bearer",
+        user_id=user_id,
+        email=email,
+        role=profile_role,
+        full_name=full_name,
+    )
+
+
+def _login_with_test_user(email: str, password: str, requested_role: str) -> LoginResponse:
+    """Backward-compat path for the hardcoded demo accounts."""
     if email not in TEST_USERS:
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 
     user = TEST_USERS[email]
 
-    # 2. Check password
     if user["password"] != password:
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 
-    # 3. Check role matches the account type
     if requested_role and requested_role != user["role"]:
         raise HTTPException(
             status_code=401,
@@ -166,13 +136,9 @@ def post_login(request: LoginRequest):
                    f"Please select the correct role.",
         )
 
-    # 4. Resolve user_id from DB (graceful fallback to deterministic UUID)
     user_id: str = _resolve_user_id(email)
-
-    # 5. Issue JWT
     token: str = _create_token(user_id, email, user["role"])
-
-    print(f"[LOGIN] ✓ {email} | role={user['role']} | id={user_id}")
+    print(f"[LOGIN] ✓ (TEST) {email} | role={user['role']} | id={user_id}")
 
     return LoginResponse(
         access_token=token,
@@ -190,6 +156,30 @@ def test_auth():
     return {"message": "Auth router working"}
 
 # ─── Helpers ───────────────────────────────────────────────────────────────────
+
+def _lookup_profile(email: str):
+    """Case-insensitive Profile lookup by email.
+
+    Returns the Profile or None. Any DB failure is swallowed (returns None)
+    so login cleanly falls back to the TEST_USERS path — never a 500.
+    """
+    try:
+        from sqlalchemy import func
+        from app.db import SessionLocal
+        from app.models import Profile
+        db = SessionLocal()
+        try:
+            return (
+                db.query(Profile)
+                .filter(func.lower(Profile.email) == email)
+                .first()
+            )
+        finally:
+            db.close()
+    except Exception as e:
+        print(f"[LOGIN] DB profile lookup failed (non-fatal): {e}")
+        return None
+
 
 def _resolve_user_id(email: str) -> str:
     """Try to get real user_id from DB; fall back to deterministic UUID."""
