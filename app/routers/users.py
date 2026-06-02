@@ -42,6 +42,55 @@ def _default_password() -> str:
     return cleaned or "Predictix@123"
 
 
+def _create_supabase_auth_user(email: str, password: str) -> str:
+    """Create a Supabase auth user via the Admin API (service-role key) and
+    return its id. The profiles.id FK references auth.users.id, so the auth
+    user MUST exist before the profile row is inserted.
+
+    Raises HTTPException with a clean status on any failure (409 if the email
+    already exists, 502/400 otherwise) so the caller never leaks a bare 500.
+    """
+    service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    supabase_url = os.getenv("SUPABASE_URL")
+    if not service_key or not supabase_url:
+        raise HTTPException(
+            status_code=502,
+            detail="Auth provider is not configured (missing service-role key).",
+        )
+
+    # Admin client must use the service-role key (the shared `supabase` client
+    # is created with the anon/SUPABASE_KEY and can't perform admin auth ops).
+    try:
+        from supabase import create_client
+
+        admin = create_client(supabase_url, service_key)
+        resp = admin.auth.admin.create_user(
+            {"email": email, "password": password, "email_confirm": True}
+        )
+        user = getattr(resp, "user", None)
+        auth_id = getattr(user, "id", None) if user else None
+        if not auth_id:
+            raise HTTPException(
+                status_code=502,
+                detail="Auth provider did not return a user id.",
+            )
+        return str(auth_id)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc)
+        log.warning("Supabase admin create_user failed for %s: %s", email, msg)
+        low = msg.lower()
+        if "already" in low and ("registered" in low or "exist" in low):
+            raise HTTPException(
+                status_code=409, detail="A user with this email already exists."
+            )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to create auth user: {msg}",
+        )
+
+
 def _build_item(
     user: Profile,
     dept_names: dict,
@@ -122,7 +171,9 @@ def create_user(data: UserCreate, db: Session = Depends(get_db)):
     # so users created by the frontend (which sends no password yet) can log in.
     raw_password = (data.password or "").strip() or _default_password()
 
-    new_id = uuid.uuid4()
+    # profiles.id has an FK to Supabase auth.users.id (profiles_id_fkey), so the
+    # auth user must be created FIRST and its id reused as the profile id.
+    new_id = uuid.UUID(_create_supabase_auth_user(data.email, raw_password))
     profile = Profile(
         id=new_id,
         employee_id=data.id,
