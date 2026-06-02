@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Iterable, Optional
 from uuid import UUID
 
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, or_, func
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -98,8 +98,9 @@ def get_owned_ticket_or_none(
 
 
 def user_can_view_ticket(ticket: Ticket, user_id: UUID) -> bool:
-    """Users can view tickets they created or are assigned to."""
-    return ticket.created_by == user_id or ticket.assigned_to == user_id
+    """A user may only view tickets they created — not others' tickets,
+    even if assigned to them."""
+    return ticket.created_by == user_id
 
 
 # ---------------------------------------------------------------------------
@@ -128,10 +129,10 @@ def build_user_tickets_query(
     sort_by: str = "created_at",
     sort_dir: str = "desc",
 ):
-    """Build a SQLAlchemy query scoped to tickets the user can see."""
-    q = db.query(Ticket).filter(
-        or_(Ticket.created_by == user_id, Ticket.assigned_to == user_id)
-    )
+    """Build a SQLAlchemy query scoped to the tickets the user CREATED.
+    A user only sees their own tickets — never tickets created by others,
+    even if assigned to them."""
+    q = db.query(Ticket).filter(Ticket.created_by == user_id)
 
     if status:
         q = q.filter(Ticket.status == status)
@@ -162,6 +163,28 @@ def build_user_tickets_query(
         q = q.order_by(sort_col.desc())
 
     return q
+
+
+def get_user_ticket_status_counts(db: Session, user_id: UUID) -> dict[str, int]:
+    """Authoritative status counts for the user's OWN tickets, computed directly
+    in Postgres (GROUP BY status) and independent of any list filter/pagination.
+    These are the numbers the KPI cards should display."""
+    rows = (
+        db.query(Ticket.status, func.count(Ticket.id))
+        .filter(Ticket.created_by == user_id)
+        .group_by(Ticket.status)
+        .all()
+    )
+    counts = {str(s): int(c) for s, c in rows}
+    return {
+        "open":        counts.get("open", 0),
+        "in_progress": counts.get("in_progress", 0),
+        "pending":     counts.get("pending", 0),
+        "resolved":    counts.get("resolved", 0),
+        "closed":      counts.get("closed", 0),
+        "cancelled":   counts.get("cancelled", 0),
+        "total":       sum(counts.values()),
+    }
 
 
 # ---------------------------------------------------------------------------
