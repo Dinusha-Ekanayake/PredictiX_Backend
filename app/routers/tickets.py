@@ -1,9 +1,19 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from app.deps import get_db
-from app.models import Ticket, TicketStatusHistory
+from app.deps import get_db, get_current_user
+from app.models import (
+    Notification,
+    PredictionRun,
+    Report,
+    Ticket,
+    TicketAttachment,
+    TicketComment,
+    TicketPrediction,
+    TicketStatusHistory,
+)
 from app.schemas.tickets import TicketCreate, TicketUpdate, TicketOut
 from app.schemas.tickets import (
     TicketCategorizationRequest,
@@ -55,7 +65,7 @@ def _generate_ticket_number(db: Session) -> str:
 
 
 @router.post("/", response_model=TicketOut)
-def create_ticket(payload: TicketCreate, db: Session = Depends(get_db)):
+def create_ticket(payload: TicketCreate, db: Session = Depends(get_db), _: object = Depends(get_current_user)):
     data = payload.model_dump()
     data["ticket_number"] = _generate_ticket_number(db)
     if data.get("priority"):
@@ -75,6 +85,7 @@ def list_tickets(
     warehouse_id: str | None = Query(default=None),
     assigned_to: str | None = Query(default=None),
     db: Session = Depends(get_db),
+    _: object = Depends(get_current_user),
 ):
     q = db.query(Ticket)
     if status:
@@ -91,7 +102,7 @@ def list_tickets(
 
 
 @router.get("/{ticket_id}", response_model=TicketOut)
-def get_ticket(ticket_id: str, db: Session = Depends(get_db)):
+def get_ticket(ticket_id: str, db: Session = Depends(get_db), _: object = Depends(get_current_user)):
     obj = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Ticket not found")
@@ -99,7 +110,9 @@ def get_ticket(ticket_id: str, db: Session = Depends(get_db)):
 
 
 @router.put("/{ticket_id}", response_model=TicketOut)
-def update_ticket(ticket_id: str, payload: TicketUpdate, db: Session = Depends(get_db)):
+def update_ticket(ticket_id: str, payload: TicketUpdate, db: Session = Depends(get_db), current_user: object = Depends(get_current_user)):
+    if getattr(current_user, "role", "") != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can update tickets")
     obj = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Ticket not found")
@@ -141,15 +154,58 @@ def update_ticket(ticket_id: str, payload: TicketUpdate, db: Session = Depends(g
 
 @router.delete("/{ticket_id}")
 def delete_ticket(ticket_id: str, db: Session = Depends(get_db)):
+    """Delete a ticket and clean up its dependent rows in one transaction.
+
+    Child rows (comments, attachments, status history, predictions) are
+    deleted; soft references (notifications, prediction_runs, reports) are
+    NULLed out. Then the ticket itself is removed. FK violations roll back
+    and return 409.
+    """
     obj = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    db.delete(obj)
-    db.commit()
-    return {"message": "Ticket deleted"}
+
+    try:
+        # Delete owned child rows.
+        db.query(TicketComment).filter(TicketComment.ticket_id == ticket_id).delete(
+            synchronize_session=False
+        )
+        db.query(TicketAttachment).filter(
+            TicketAttachment.ticket_id == ticket_id
+        ).delete(synchronize_session=False)
+        db.query(TicketStatusHistory).filter(
+            TicketStatusHistory.ticket_id == ticket_id
+        ).delete(synchronize_session=False)
+        db.query(TicketPrediction).filter(
+            TicketPrediction.ticket_id == ticket_id
+        ).delete(synchronize_session=False)
+
+        # NULL out soft references.
+        db.query(Notification).filter(
+            Notification.related_ticket_id == ticket_id
+        ).update({Notification.related_ticket_id: None}, synchronize_session=False)
+        db.query(PredictionRun).filter(PredictionRun.ticket_id == ticket_id).update(
+            {PredictionRun.ticket_id: None}, synchronize_session=False
+        )
+        db.query(Report).filter(Report.ticket_id == ticket_id).update(
+            {Report.ticket_id: None}, synchronize_session=False
+        )
+
+        db.delete(obj)
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        orig = getattr(exc, "orig", None)
+        detail = str(orig) if orig else str(exc)
+        raise HTTPException(status_code=409, detail=f"Cannot delete ticket: {detail}")
+
+    return {"message": "Ticket deleted", "id": ticket_id}
 
 
-@router.post("/categorize", response_model=TicketCategorizationResponse)
+@router.post(
+    "/categorize",
+    response_model=TicketCategorizationResponse,
+)
 def categorize_ticket_endpoint(payload: TicketCategorizationRequest):
     try:
         result = categorize_ticket_text(title=payload.title, description=payload.description)
