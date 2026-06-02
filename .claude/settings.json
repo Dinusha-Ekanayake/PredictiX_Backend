@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/USER/Desktop/chakablast/PredictiX-Frontend/PredictiX-Frontend/src/components/chat/**)",
+      "Bash(venv\\\\Scripts\\\\pip install *)"
+    ]
+  }
+}
