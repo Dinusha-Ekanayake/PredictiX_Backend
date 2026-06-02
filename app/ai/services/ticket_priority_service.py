@@ -52,6 +52,13 @@ def _get_hf_config() -> tuple[str, str]:
 
 
 @lru_cache(maxsize=1)
+def get_ticket_priority_repo() -> str:
+    """Back-compat shim — returns the HF repo id for the priority model."""
+    _, repo = _get_hf_config()
+    return repo
+
+
+@lru_cache(maxsize=1)
 def _load_model_and_encoder():
     token, repo = _get_hf_config()
 
@@ -139,5 +146,58 @@ def classify_ticket_priority(
         raise HTTPException(status_code=500, detail=f"Priority classification failed: {e}")
 
 
-def warmup_priority_model() -> None:
-    _load_model_and_encoder()
+def warmup_ticket_priority() -> None:
+    """Pre-load the model on application startup."""
+    try:
+        _load_model_and_encoder()
+        print("Ticket priority model warmed up successfully")
+    except Exception as e:
+        print(f"Ticket priority model warmup failed: {e}")
+        raise
+
+
+def predict_ticket_priority(
+    title: str = "",
+    description: str = "",
+    vehicle_type: str = "Truck",
+    issue_category: str = "Engine",
+    sensor_alert: str = "Check engine light",
+    operating_environment: str = "Urban",
+    weather_condition: str = "Normal",
+    vehicle_age: int = 5,
+    mileage_km: int = 100000,
+    downtime_hours: float = 0.0,
+    maintenance_overdue_days: int = 0,
+    previous_failures: int = 0,
+) -> str:
+    """Predict ticket priority from title and description.
+    
+    Combines title and description into a single text for classification.
+    Uses rule-based override first, then ML model if no keywords match.
+    
+    Args:
+        title: Ticket title.
+        description: Ticket description.
+        **kwargs: Additional parameters passed to classify_ticket_priority.
+        
+    Returns:
+        Priority level: "Low", "Medium", or "High".
+    """
+    combined_text = f"{title} {description}".strip()
+    if not combined_text:
+        combined_text = "No issue description"
+    
+    return classify_ticket_priority(
+        text=combined_text,
+        vehicle_type=vehicle_type,
+        issue_category=issue_category,
+        sensor_alert=sensor_alert,
+        operating_environment=operating_environment,
+        weather_condition=weather_condition,
+        vehicle_age=vehicle_age,
+        mileage_km=mileage_km,
+        downtime_hours=downtime_hours,
+        maintenance_overdue_days=maintenance_overdue_days,
+        previous_failures=previous_failures,
+    )
+

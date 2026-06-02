@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Knowledge Base &amp; Vector Store — A Ground-to-High-Level Lesson (PredictiX)</title>
+<style>
+  :root{
+    --teal:#0d9488; --teal-light:#2dd4bf; --teal-bg:#f0fdf9; --teal-border:#99f6e4;
+    --navy:#0f172a; --navy-med:#1e293b; --slate:#475569; --slate-mid:#64748b; --slate-light:#94a3b8;
+    --border:#e2e8f0; --border-light:#f1f5f9; --bg:#f8fafc; --white:#fff;
+    --amber:#d97706; --amber-bg:#fef3c7; --amber-border:#fcd34d;
+    --blue:#2563eb; --blue-bg:#dbeafe; --violet:#7c3aed; --violet-bg:#ede9fe;
+    --red:#dc2626; --red-bg:#fee2e2; --green:#16a34a; --green-bg:#dcfce7;
+    --code-bg:#0f172a; --code-fg:#e2e8f0;
+  }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    margin:0; background:var(--bg); color:var(--navy-med);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.7; font-size:16px;
+  }
+  .wrap{max-width:880px; margin:0 auto; padding:0 22px 80px;}
+
+  /* Cover */
+  header.cover{
+    background:linear-gradient(135deg,var(--navy),#13243f 60%,#0b3b37);
+    color:#fff; padding:54px 22px 46px; text-align:center; margin-bottom:34px;
+    border-bottom:5px solid var(--teal);
+  }
+  header.cover .brand{font-size:34px;font-weight:800;letter-spacing:-1px;}
+  header.cover .brand span{color:var(--teal-light);}
+  header.cover h1{font-size:27px;margin:18px 0 8px;font-weight:800;line-height:1.25;}
+  header.cover p.sub{color:#b9c6d6;font-size:15px;margin:0;max-width:640px;margin-inline:auto;}
+  header.cover .pill{display:inline-block;margin-top:18px;background:rgba(45,212,191,.15);
+    border:1px solid var(--teal);color:var(--teal-light);font-size:12px;font-weight:700;
+    padding:5px 14px;border-radius:20px;letter-spacing:.05em;text-transform:uppercase;}
+
+  h2{font-size:23px;font-weight:800;color:var(--navy);margin:46px 0 6px;
+     padding-bottom:10px;border-bottom:3px solid var(--teal);scroll-margin-top:14px;}
+  h2 .num{color:var(--teal);font-size:15px;font-weight:700;display:block;letter-spacing:.08em;
+     text-transform:uppercase;margin-bottom:4px;}
+  h3{font-size:17px;font-weight:700;color:var(--navy-med);margin:26px 0 6px;}
+  p{margin:12px 0;}
+  a{color:var(--teal);text-decoration:none;border-bottom:1px solid var(--teal-border);}
+  a:hover{border-bottom-color:var(--teal);}
+
+  /* Table of contents */
+  nav.toc{background:var(--white);border:1px solid var(--border);border-radius:12px;
+    padding:22px 26px;margin-bottom:10px;box-shadow:0 2px 8px rgba(15,23,42,.05);}
+  nav.toc h4{margin:0 0 12px;font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--slate-mid);}
+  nav.toc ol{margin:0;padding-left:20px;columns:2;column-gap:34px;}
+  nav.toc li{margin:5px 0;font-size:14.5px;break-inside:avoid;}
+  nav.toc a{border:none;color:var(--navy-med);}
+  nav.toc a:hover{color:var(--teal);}
+
+  /* Callouts */
+  .box{border-radius:10px;padding:14px 18px;margin:18px 0;border-left:5px solid;font-size:15px;}
+  .box .label{font-weight:800;font-size:12px;text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:4px;}
+  .box p:first-of-type{margin-top:2px;} .box p:last-child{margin-bottom:0;}
+  .lesson{background:var(--teal-bg);border-color:var(--teal);} .lesson .label{color:#065f46;}
+  .note{background:var(--violet-bg);border-color:var(--violet);} .note .label{color:var(--violet);}
+  .check{background:var(--blue-bg);border-color:var(--blue);} .check .label{color:var(--blue);}
+  .gold{background:var(--amber-bg);border-color:var(--amber);} .gold .label{color:var(--amber);}
+  .warn{background:var(--red-bg);border-color:var(--red);} .warn .label{color:var(--red);}
+
+  /* Code */
+  pre{background:var(--code-bg);color:var(--code-fg);border-radius:10px;padding:16px 18px;
+    overflow-x:auto;font-size:13.5px;line-height:1.6;margin:16px 0;
+    font-family:"SF Mono",Consolas,"Liberation Mono",Menlo,monospace;}
+  pre .c{color:#64748b;font-style:italic;}      /* comment */
+  pre .k{color:#7dd3fc;}                          /* keyword-ish */
+  pre .s{color:#86efac;}                          /* string */
+  code{background:#eef2f7;color:#0b3b37;padding:2px 6px;border-radius:5px;
+    font-family:"SF Mono",Consolas,monospace;font-size:14px;}
+  pre code{background:none;color:inherit;padding:0;font-size:inherit;}
+
+  /* Tables */
+  table{width:100%;border-collapse:collapse;margin:18px 0;font-size:14.5px;
+    background:var(--white);border-radius:10px;overflow:hidden;border:1px solid var(--border);}
+  th{background:var(--navy);color:#fff;text-align:left;padding:10px 13px;font-weight:600;font-size:13.5px;}
+  td{padding:9px 13px;border-bottom:1px solid var(--border-light);vertical-align:top;}
+  tr:nth-child(even) td{background:#fafbfc;}
+  td code{font-size:13px;}
+
+  .ascii{background:#0f172a;color:#93c5fd;border-radius:10px;padding:18px;margin:16px 0;
+    font-family:"SF Mono",Consolas,monospace;font-size:13px;line-height:1.5;white-space:pre;overflow-x:auto;}
+
+  hr{border:none;border-top:1px dashed var(--border);margin:34px 0;}
+
+  .recap{background:var(--navy);color:#e8eef5;border-radius:14px;padding:8px 28px 24px;margin-top:40px;}
+  .recap h2{color:#fff;border-bottom-color:var(--teal-light);}
+  .recap h2 .num{color:var(--teal-light);}
+  .recap ol{padding-left:22px;} .recap li{margin:9px 0;}
+  .recap strong{color:var(--teal-light);}
+
+  .next{background:var(--white);border:1px dashed var(--teal);border-radius:12px;padding:20px 24px;margin-top:26px;}
+  .next h3{margin-top:0;color:var(--teal);}
+
+  footer{text-align:center;color:var(--slate-light);font-size:13px;margin-top:40px;}
+
+  @media (max-width:680px){ nav.toc ol{columns:1;} header.cover h1{font-size:22px;} }
+  @media print{
+    body{background:#fff;} .wrap{max-width:100%;} header.cover{margin-bottom:20px;}
+    pre,.ascii{white-space:pre-wrap;} h2{break-after:avoid;} .box,table,pre{break-inside:avoid;}
+    nav.toc{break-inside:avoid;}
+  }
+</style>
+</head>
+<body>
+
+<header class="cover">
+  <div class="brand">Predic<span>tiX</span></div>
+  <h1>Knowledge Base &amp; Vector Database<br/>— from the ground up to high level</h1>
+  <p class="sub">A teacher-style lesson on how standing knowledge (ISO&nbsp;55000, SMRP, OEM manuals, Sri&nbsp;Lankan law) reaches your AI warehouse report — every small step, grounded in your actual code.</p>
+  <div class="pill">Warehouse Report Generation · RAG · TF-IDF · pgvector</div>
+</header>
+
+<div class="wrap">
+
+<nav class="toc">
+  <h4>Lesson plan</h4>
+  <ol>
+    <li><a href="#l0">The problem we're solving</a></li>
+    <li><a href="#l1">What is a Knowledge Base?</a></li>
+    <li><a href="#l2">Why keyword search fails</a></li>
+    <li><a href="#l3">The big idea: text → vectors</a></li>
+    <li><a href="#l4">TF-IDF, explained slowly</a></li>
+    <li><a href="#l5">Cosine similarity (nearness)</a></li>
+    <li><a href="#l6">Two retrieval styles you built</a></li>
+    <li><a href="#l7">RAG: KB reaches the report</a></li>
+    <li><a href="#l8">Deterministic annotation</a></li>
+    <li><a href="#l9">The pgvector future</a></li>
+    <li><a href="#worked">Worked example: TF-IDF by hand</a></li>
+    <li><a href="#recap">Recap — cards to keep</a></li>
+  </ol>
+</nav>
+
+<!-- ───────────────────────── LESSON 0 ───────────────────────── -->
+<h2 id="l0"><span class="num">Lesson 0</span>The problem we're actually solving</h2>
+
+<p>Your warehouse report blends <strong>two kinds of knowledge</strong>:</p>
+<table>
+  <tr><th>Kind</th><th>Example</th><th>Source</th><th>Changes?</th></tr>
+  <tr><td><strong>Live facts</strong></td><td>“1,156 assets, 341 critical, PM ratio 99%”</td><td>PostgreSQL</td><td>Every day</td></tr>
+  <tr><td><strong>Standing knowledge</strong></td><td>“ISO 55000: &lt;5% of a fleet should be critical”, “Toyota forklift: service every 500 engine hours”, “Factories Ordinance: hoist inspection every 12 months”</td><td>Standards, manuals, laws</td><td>Rarely</td></tr>
+</table>
+
+<p>A language model (Llama&nbsp;3.3 via Groq) is great at <em>writing</em>, but it does <strong>not</strong> reliably know your specific standards, and it must <strong>never invent numbers</strong>. So the whole game is one sentence:</p>
+
+<div class="box gold">
+  <span class="label">The one sentence</span>
+  Feed the model the <em>right</em> live facts <strong>and</strong> the <em>right</em> standing knowledge, then ask it to write.
+</div>
+
+<p>That “feed the right standing knowledge” part is exactly what the <strong>Knowledge Base</strong> and <strong>Vector Store</strong> do. Everything below builds toward that one sentence.</p>
+
+<!-- ───────────────────────── LESSON 1 ───────────────────────── -->
+<h2 id="l1"><span class="num">Lesson 1</span>What is a Knowledge Base?</h2>
+
+<p><strong>Intuition first.</strong> A KB is just <em>curated, trusted notes</em> — like the index cards a good teacher keeps. Not the whole textbook (too much noise), but the distilled, reliable bits.</p>
+
+<p>In your project the KB is a plain Python list of “cards” in <a href="../app/kb/kb_documents.py"><code>app/kb/kb_documents.py</code></a>. Each card looks like this:</p>
+
+<pre><span class="c"># one KB "card" (a chunk of trusted text)</span>
+{
+  <span class="s">"id"</span>:      <span class="s">"kb_engine_hours"</span>,
+  <span class="s">"section"</span>: <span class="s">"Engine Hours — Primary SHAP Failure Driver"</span>,
+  <span class="s">"tags"</span>:    [<span class="s">"engine"</span>, <span class="s">"hours"</span>, <span class="s">"shap"</span>, <span class="s">"forklift"</span>, <span class="s">"overdue"</span>],
+  <span class="s">"text"</span>:    <span class="s">"Engine hours since last service is the top SHAP failure driver... &gt;500 hours is overdue..."</span>,
+  <span class="s">"source"</span>:  <span class="s">"Toyota 7FG/7FD Repair Manual"</span>,   <span class="c"># provenance</span>
+}</pre>
+
+<h3>Lesson 1.1 — A KB is two things, not one</h3>
+<p>This distinction is the most important idea on this page. Your <code>kb_documents.py</code> holds <em>two</em> shapes of knowledge:</p>
+
+<table>
+  <tr><th>Shape</th><th>In your code</th><th>Consumed by</th></tr>
+  <tr><td><strong>Unstructured text cards</strong> (<code>KB_DOCUMENTS</code>)</td><td>the 26 chunks of ISO / SMRP / OEM / legal prose</td><td>the <strong>vector store</strong> → fed to the LLM</td></tr>
+  <tr><td><strong>Structured lookup tables</strong> (dicts/lists)</td><td><code>SHAP_KB_MAP</code>, <code>HEALTH_BAND_KB</code>, <code>BENCHMARKS</code>, <code>OEM_SERVICE_TIERS</code>, <code>STATUTORY_INSPECTION_INTERVALS</code>, <code>FMEA_SEVERITY_BY_TYPE</code></td><td>the <strong>annotator</strong> → deterministic, no LLM</td></tr>
+</table>
+
+<div class="box note">
+  <span class="label">Teacher's note — why two shapes?</span>
+  Prose is flexible but <em>fuzzy</em> (you search it by <em>meaning</em>). Tables are rigid but <em>exact</em> (you look them up by <em>key</em>). You want exact numbers (a 40% brake-health threshold) to come from a <strong>table</strong>, never from a model's paraphrase. You want rich explanation to come from <strong>prose</strong>. Mixing these up is how reports get wrong numbers.
+</div>
+
+<div class="box check">
+  <span class="label">✔ Checkpoint</span>
+  Open <code>kb_documents.py</code>. Find one <code>KB_DOCUMENTS</code> entry (prose) and one dict like <code>BENCHMARKS</code> (table). Those are the two halves of your KB.
+</div>
+
+<!-- ───────────────────────── LESSON 2 ───────────────────────── -->
+<h2 id="l2"><span class="num">Lesson 2</span>Why we can't just keyword-search the KB</h2>
+
+<p>Say the report needs the “risk analysis” section. The query is conceptually <em>“what drives failure — brakes, hydraulics, engine hours, coolant?”</em></p>
+
+<p>A naive approach: keyword match — search the KB text for the word “risk.” Problem: a card about <strong>brake health</strong> is <em>highly relevant</em> to risk but may never use the word “risk.” Keyword search is <strong>literal</strong>; it misses <strong>meaning</strong>.</p>
+
+<div class="box lesson">
+  <span class="label">The core difficulty</span>
+  Humans search by <em>meaning</em>; computers store <em>characters</em>. We need a way to make the computer compare <em>meaning</em> — and that is exactly the gap a <strong>vector representation</strong> closes.
+</div>
+
+<!-- ───────────────────────── LESSON 3 ───────────────────────── -->
+<h2 id="l3"><span class="num">Lesson 3</span>The big idea: turn text into numbers (vectors)</h2>
+
+<p><strong>Intuition.</strong> Imagine every document becomes a <em>dot</em> in a giant space. Similar-topic documents sit <em>close together</em>; unrelated ones sit far apart. Place your <em>query</em> as a dot too, and “find relevant docs” becomes “find the nearest dots.” That list of coordinates is a <strong>vector</strong>; a searchable store of them is a <strong>vector store / vector database</strong>.</p>
+
+<div class="ascii">        brake card •        • hydraulic card
+                       \    /
+   "risk drivers?" ●───→  (lands here, near brake / hydraulic)
+                       /
+   battery card •                 • ISO 55000 benchmark card
+        forklift-climate card •</div>
+
+<h3>Lesson 3.1 — Two ways to make the vectors</h3>
+<p>This is the fork in the road, and your project deliberately took the simpler path:</p>
+
+<table>
+  <tr><th>Method</th><th>How it builds the vector</th><th>Pros</th><th>Cons</th></tr>
+  <tr><td><strong>TF-IDF</strong> <em>(what you use)</em></td><td>counts word importance statistically</td><td>tiny, instant, no model, already in sklearn</td><td>understands <em>words</em>, not deep meaning</td></tr>
+  <tr><td><strong>Dense embeddings</strong> (<code>pgvector</code>)</td><td>a neural net maps text → ~1536 numbers of meaning</td><td>true semantic understanding</td><td>needs a model, slower, costs</td></tr>
+</table>
+
+<p>Your <a href="../app/kb/kb_vector_store.py"><code>kb_vector_store.py</code></a> docstring says this out loud: <em>“Why TF-IDF instead of dense embeddings: sklearn is already installed… KB is small… no model download.”</em> That's a <strong>real engineering trade-off</strong>, not a shortcut — and it's the right call at 26 documents.</p>
+
+<div class="box note">
+  <span class="label">Teacher's note</span>
+  At small scale, TF-IDF is <em>accurate enough</em> and ~1000× cheaper. Dense embeddings earn their cost when you have thousands of docs or must match paraphrases with no shared words. You even left the door open: Supabase has <code>pgvector</code> installed for the day you upgrade. That's mature thinking — pick the simplest tool that works, leave a migration path.
+</div>
+
+<!-- ───────────────────────── LESSON 4 ───────────────────────── -->
+<h2 id="l4"><span class="num">Lesson 4</span>TF-IDF, explained slowly (the heart of it)</h2>
+
+<p>TF-IDF = <strong>Term Frequency × Inverse Document Frequency</strong>. Two ideas multiplied.</p>
+
+<p><strong>Term Frequency (TF):</strong> how often a word appears in <em>this</em> document. “brake” appearing 5 times in the brake card → that card is <em>about</em> brakes.</p>
+<p><strong>Inverse Document Frequency (IDF):</strong> how <em>rare</em> the word is across <em>all</em> cards. “the” appears everywhere → useless → low weight. “hydraulic” appears in few cards → very informative → high weight.</p>
+
+<div class="box lesson">
+  <span class="label">The intuition in one line</span>
+  A word matters if it is <strong>frequent here but rare elsewhere</strong> — that's a word that <em>characterizes</em> this document.
+</div>
+
+<h3>Lesson 4.1 — Your exact configuration</h3>
+<p>In <code>kb_vector_store.py</code> you build the vectorizer like this — and every setting is a deliberate lesson:</p>
+
+<pre>TfidfVectorizer(
+    strip_accents=<span class="s">"unicode"</span>,   <span class="c"># "Colombo" == "Cólombo"</span>
+    lowercase=<span class="k">True</span>,            <span class="c"># "Brake" == "brake"</span>
+    stop_words=<span class="s">"english"</span>,      <span class="c"># drop "the/and/of" — pure noise</span>
+    ngram_range=(<span class="k">1</span>, <span class="k">2</span>),        <span class="c"># index single words AND word-pairs</span>
+    max_features=<span class="k">2000</span>,         <span class="c"># keep the 2000 most useful terms</span>
+    sublinear_tf=<span class="k">True</span>,         <span class="c"># 10 mentions ≠ 10× important (use log)</span>
+)
+self._matrix = self._vectorizer.fit_transform(self._texts)</pre>
+
+<p>The two clever ones, decoded:</p>
+<ul>
+  <li><strong><code>ngram_range=(1,2)</code></strong> — also index <em>pairs</em> of words (“engine hours”, “brake health”) as single features. “engine hours” together means far more than “engine” + “hours” apart. Bigrams capture little phrases.</li>
+  <li><strong><code>sublinear_tf=True</code></strong> — uses <code>1 + log(count)</code> instead of raw count. A word said 20 times isn't 20× more important than once. Log-scaling tames that and stops long documents from dominating.</li>
+</ul>
+
+<p>That last line, <code>fit_transform</code>, is the moment your 26 text cards become a <strong>matrix of numbers</strong> (rows = documents, columns = the 2000 terms). That matrix <em>is</em> your vector store. It is built <strong>once</strong>, in memory, when the app starts.</p>
+
+<div class="box check">
+  <span class="label">✔ Checkpoint</span>
+  You now understand that “building the vector store” = “running TF-IDF over the KB text to get one number-vector per card.”
+</div>
+
+<!-- ───────────────────────── LESSON 5 ───────────────────────── -->
+<h2 id="l5"><span class="num">Lesson 5</span>Measuring “nearness”: cosine similarity</h2>
+
+<p>We have document-vectors and a query-vector. How do we measure <em>close</em>? <strong>Not</strong> straight-line distance (a long doc and a short one on the same topic would look “far”). Instead: <strong>cosine similarity</strong> — the <em>angle</em> between two vectors.</p>
+
+<table>
+  <tr><th>Angle</th><th>Cosine</th><th>Meaning</th></tr>
+  <tr><td>0° (same direction)</td><td><strong>1.0</strong></td><td>identical topic</td></tr>
+  <tr><td>90° (perpendicular)</td><td><strong>0</strong></td><td>unrelated</td></tr>
+</table>
+
+<div class="box lesson">
+  <span class="label">Why angle, not length?</span>
+  Length reflects <em>how much text</em>; angle reflects <em>what it's about</em>. We care about topic, so we compare <em>direction</em>. Two arrows pointing the same way are “about the same thing,” whether one is long or short.
+</div>
+
+<p>In your <code>retrieve()</code>:</p>
+<pre>q_vec  = self._vectorizer.transform([query])        <span class="c"># query → vector (same 2000-term space)</span>
+scores = cosine_similarity(q_vec, self._matrix)[<span class="k">0</span>]  <span class="c"># angle vs every doc</span>
+top_idx = np.argsort(scores)[::-<span class="k">1</span>][:top_k]          <span class="c"># sort, take the best k</span>
+<span class="k">return</span> [ ... <span class="k">for</span> i <span class="k">in</span> top_idx <span class="k">if</span> scores[i] &gt;= min_score ] <span class="c"># drop weak matches</span></pre>
+
+<p>Three small steps, each a lesson:</p>
+<ol>
+  <li><strong><code>transform</code></strong> (not <code>fit_transform</code>!) — the query is placed into the <em>existing</em> space. You never re-learn the vocabulary for a query.</li>
+  <li><strong><code>argsort[::-1][:top_k]</code></strong> — sort ascending, reverse, take the top <code>top_k</code> (default 4): “give me the 4 nearest cards.”</li>
+  <li><strong><code>min_score=0.05</code></strong> — a <em>quality floor</em>. If even the best match is basically unrelated, return nothing rather than garbage.</li>
+</ol>
+
+<div class="box warn">
+  <span class="label">⚠ Common beginner bug</span>
+  Re-fitting the vectorizer on the query (<code>fit_transform([query])</code>). That builds a brand-new vocabulary from one sentence, so the query and documents no longer live in the same space and every score breaks. Always <code>transform</code> the query.
+</div>
+
+<!-- ───────────────────────── LESSON 6 ───────────────────────── -->
+<h2 id="l6"><span class="num">Lesson 6</span>Two retrieval styles you built</h2>
+
+<p>Your store exposes two doors — knowing <em>which door, when</em> is a genuine skill:</p>
+
+<table>
+  <tr><th>Method</th><th>How it finds docs</th><th>Use when</th></tr>
+  <tr><td><code>retrieve(query)</code></td><td><strong>semantic</strong> — cosine similarity on meaning</td><td>open-ended (“what about failure risk?”)</td></tr>
+  <tr><td><code>retrieve_by_tags(tags)</code></td><td><strong>deterministic</strong> — exact tag overlap</td><td>you know <em>exactly</em> the category you want</td></tr>
+</table>
+
+<p><code>retrieve_by_tags</code> is the “I want the brake card, no surprises” door — it just counts tag matches. <code>retrieve</code> is the “find me whatever is <em>about</em> this” door. A good system keeps both: fuzzy search for discovery, exact lookup for control.</p>
+
+<!-- ───────────────────────── LESSON 7 ───────────────────────── -->
+<h2 id="l7"><span class="num">Lesson 7</span>RAG: how the KB actually reaches the report</h2>
+
+<p>Now we assemble everything. The pattern is <strong>RAG — Retrieval-Augmented Generation</strong>. Read it backwards: we <em>Generate</em> text, <em>Augmented</em> by knowledge we <em>Retrieved</em>. The LLM doesn't work from memory; it works from notes we hand it.</p>
+
+<p>The full pipeline in <a href="../app/agents/report_agents.py"><code>app/agents/report_agents.py</code></a>, as a story:</p>
+
+<pre><span class="c">Step 1</span>  build_warehouse_context(db)            <span class="c"># live PostgreSQL facts (the "what is")</span>
+<span class="c">Step 2</span>  get_kb_store().build_full_kb_context() <span class="c"># standing knowledge (the "what should be")</span>
+<span class="c">Step 3</span>  KB Annotator (deterministic)           <span class="c"># exact threshold/band/FMEA tables, NO LLM</span>
+<span class="c">Step 4</span>  LLM call: data + KB → JSON report
+<span class="c">Step 5</span>  _guard_narrative()                     <span class="c"># fact-check the model's prose</span></pre>
+
+<h3>Lesson 7.1 — A subtle, important choice you made</h3>
+<p>For the <em>report</em>, you don't use <code>retrieve()</code> at all — you call <code>build_full_kb_context()</code>, which dumps <strong>all 26 cards</strong>:</p>
+
+<pre>kb_full_context = kb_store.build_full_kb_context()   <span class="c"># the WHOLE KB</span></pre>
+
+<p>Why abandon clever retrieval here? Because <strong>26 curated cards ≈ 5,000 tokens</strong>, and Llama&nbsp;3.3 has a <strong>128,000-token</strong> window. The whole KB fits with room to spare — so <em>why risk top-k retrieval dropping a relevant card?</em> Inject everything; let the model see the full picture.</p>
+
+<div class="box note">
+  <span class="label">The lesson behind the lesson</span>
+  Retrieval exists to handle <em>scale you can't fit</em>. When everything fits, retrieval is <em>premature optimization</em>. You correctly use full-context for the report (completeness matters) and keep <code>retrieve()</code> for the <strong>chatbot</strong> (<code>route_request</code>), where a focused answer beats a data dump. <em>Right tool, right place.</em>
+</div>
+
+<!-- ───────────────────────── LESSON 8 ───────────────────────── -->
+<h2 id="l8"><span class="num">Lesson 8</span>The other half: deterministic annotation</h2>
+
+<p>This is where your design is genuinely sophisticated — and the lesson most tutorials skip.</p>
+
+<p>The LLM writes <em>prose</em>. But the <strong>exact numbers</strong> — “brake health &lt;40% → ground the asset,” “FMEA criticality = severity × occurrence” — must be <em>computed</em>, not <em>narrated</em>. So <a href="../app/kb/kb_annotator.py"><code>app/kb/kb_annotator.py</code></a> takes the live data and the <strong>structured</strong> KB tables and produces facts with <strong>zero LLM involvement</strong>:</p>
+
+<pre>annotate_shap_features(...)   <span class="c"># look up each SHAP driver's KB threshold</span>
+annotate_health_bands(...)    <span class="c"># attach the KB interpretation to each band</span>
+rank_fmea_criticality(...)    <span class="c"># severity × occurrence, computed in Python</span>
+compute_benchmark_alerts(...) <span class="c"># compare live % against ISO/SMRP benchmarks</span></pre>
+
+<div class="box gold">
+  <span class="label">The golden rule you're enforcing</span>
+  <em>Words from the model; numbers from the data.</em> The model never decides a threshold — it only describes one the annotator already fixed. This is why your reports can be <strong>defended in a viva</strong>: every number traces to a query or a KB constant, not a guess.
+</div>
+
+<p>And <code>_guard_narrative()</code> (Lesson 7, Step 5) is the <em>seatbelt</em>: even after all that, it re-reads the model's paragraph and corrects it if it claims “costs rising” when the data says falling. <strong>Trust, but verify.</strong></p>
+
+<!-- ───────────────────────── LESSON 9 ───────────────────────── -->
+<h2 id="l9"><span class="num">Lesson 9</span>The <code>pgvector</code> future (where this grows)</h2>
+
+<p>Your docstrings mention Supabase has <code>pgvector</code> installed. Here's the upgrade path, so you can speak to it:</p>
+
+<table>
+  <tr><th>Stage</th><th>How vectors are made &amp; stored</th><th>How you search</th></tr>
+  <tr><td><strong>Today</strong></td><td>TF-IDF vectors live <em>in memory</em> (sklearn matrix), rebuilt at startup. Perfect for 26 static cards.</td><td><code>cosine_similarity()</code> in Python</td></tr>
+  <tr><td><strong>Tomorrow</strong></td><td>Each card → an <strong>embedding model</strong> → a dense vector, stored in a Postgres <code>vector</code> column via <strong>pgvector</strong>.</td><td><code>ORDER BY embedding &lt;=&gt; q LIMIT k</code> (<code>&lt;=&gt;</code> = cosine distance, <em>in the database</em>)</td></tr>
+</table>
+
+<p>Same three concepts — <strong>vectorize → store → nearest-neighbour search</strong> — just industrial-strength. The mental model you learned today doesn't change; only the engine does. <em>That's why concepts beat tools.</em></p>
+
+<!-- ───────────────────────── WORKED EXAMPLE ───────────────────────── -->
+<h2 id="worked"><span class="num">Bonus</span>Worked example: TF-IDF + cosine by hand</h2>
+
+<p>Let's make it concrete with 3 tiny “cards” and one query, so you <em>see</em> the numbers form.</p>
+
+<pre><span class="c"># Tiny KB (imagine these are the full card texts)</span>
+D1 = <span class="s">"brake health critical ground asset"</span>
+D2 = <span class="s">"engine hours service overdue forklift"</span>
+D3 = <span class="s">"battery health swap electric forklift"</span>
+
+Query = <span class="s">"forklift overdue for service"</span></pre>
+
+<p><strong>Step 1 — vocabulary</strong> (unique informative words across all cards): <code>brake, health, critical, ground, asset, engine, hours, service, overdue, forklift, battery, swap, electric</code>.</p>
+
+<p><strong>Step 2 — IDF (rarity).</strong> A word in fewer cards scores higher. “forklift” is in D2 &amp; D3 (common → lower IDF); “overdue” and “service” are only in D2 (rare → higher IDF).</p>
+
+<p><strong>Step 3 — vectorize the query.</strong> The query shares <code>forklift</code>, <code>overdue</code>, <code>service</code> — all present in <strong>D2</strong>. It shares <em>nothing meaningful</em> with D1, and only the (common, low-weight) <code>forklift</code> with D3.</p>
+
+<p><strong>Step 4 — cosine scores</strong> (illustrative):</p>
+<table>
+  <tr><th>Card</th><th>Shared informative terms with query</th><th>Cosine ≈</th><th>Result</th></tr>
+  <tr><td><strong>D2</strong></td><td>forklift, overdue, service</td><td><strong>0.71</strong></td><td>✅ returned (top match)</td></tr>
+  <tr><td>D3</td><td>forklift (low weight only)</td><td>0.12</td><td>returned if k allows</td></tr>
+  <tr><td>D1</td><td>—</td><td>0.00</td><td>❌ below <code>min_score</code> → dropped</td></tr>
+</table>
+
+<div class="box lesson">
+  <span class="label">What you just saw</span>
+  The engine-hours / service card (D2) won — <strong>without the query ever using its exact words</strong> like “engine” or “hours.” It won because the <em>rare, characterizing</em> words (“overdue”, “service”) lined up. That's meaning-by-statistics, and that's the whole trick.
+</div>
+
+<!-- ───────────────────────── RECAP ───────────────────────── -->
+<div class="recap">
+<h2 id="recap"><span class="num">Recap</span>The cards to keep</h2>
+<ol>
+  <li><strong>KB = curated trusted notes</strong>, in two shapes: <em>prose cards</em> (search by meaning) and <em>lookup tables</em> (look up by key).</li>
+  <li><strong>Vectors turn meaning into geometry</strong> — similar text → nearby points.</li>
+  <li><strong>TF-IDF</strong> weights words that are <em>frequent here but rare elsewhere</em>; bigrams, sublinear TF and stop-words all sharpen that signal.</li>
+  <li><strong>Cosine similarity</strong> compares <em>direction</em> (topic), not <em>length</em> (size).</li>
+  <li><strong><code>transform</code> the query into the existing space</strong>, sort, apply a <code>min_score</code> floor — say nothing rather than mislead.</li>
+  <li><strong>RAG</strong> = hand the model retrieved notes instead of trusting its memory.</li>
+  <li><strong>Full-context beats retrieval when everything fits</strong> — retrieval is for scale you can't fit.</li>
+  <li><strong>Words from the model, numbers from the data</strong> — deterministic annotation + a narrative guard keep the report honest.</li>
+  <li><strong><code>pgvector</code></strong> is the same idea at scale; the concept is portable.</li>
+</ol>
+</div>
+
+<div class="next">
+  <h3>Want to go deeper?</h3>
+  <p>Pick one and we can extend this document:</p>
+  <ul>
+    <li><strong>(A)</strong> Fully hand-compute the TF-IDF weights + cosine for the 3 cards above (real arithmetic).</li>
+    <li><strong>(B)</strong> Trace one real query through <em>your</em> <code>retrieve()</code> line by line with sample scores.</li>
+    <li><strong>(C)</strong> Draw the full RAG data-flow for one report section (e.g. <code>risk_analysis</code>) from DB row → KB card → LLM sentence.</li>
+  </ul>
+</div>
+
+<footer>
+  PredictiX · Knowledge Base &amp; Vector Store lesson · generated for warehouse report generation study.<br/>
+  Tip: open in a browser and use <strong>Ctrl/Cmd&nbsp;+&nbsp;P → Save as PDF</strong> for an offline handout.
+</footer>
+
+</div>
+</body>
+</html>
