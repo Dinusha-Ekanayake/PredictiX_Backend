@@ -91,12 +91,22 @@ class KBVectorStore:
 
     def build_full_kb_context(self) -> str:
         """
-        Return all KB documents as a structured string for full-context LLM injection.
-        Use when generating the complete warehouse report.
+        Return ALL KB documents as a structured, source-grouped string for
+        full-context LLM injection. Preferred for the complete warehouse report:
+        the curated corpus is small enough to inject in full, guaranteeing no
+        relevant standard is dropped by top-k retrieval.
         """
-        lines = ["=" * 60, "PREDICTIХ KNOWLEDGE BASE — MAINTENANCE STANDARDS", "=" * 60]
+        lines = [
+            "=" * 64,
+            "PREDICTIX KNOWLEDGE BASE — MAINTENANCE STANDARDS & SOURCES",
+            "Layers: Statutory (law) · OEM schedules · ISO 55000/55001 · SMRP · FMEA · Climate",
+            "=" * 64,
+        ]
         for doc in self._docs:
+            src = doc.get("source")
             lines.append(f"\n[{doc['section']}]")
+            if src:
+                lines.append(f"(Source: {src})")
             lines.append(doc["text"])
         return "\n".join(lines)
 
