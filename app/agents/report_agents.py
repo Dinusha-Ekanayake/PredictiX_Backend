@@ -278,19 +278,28 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
     currency             = cost_currency[0] if cost_currency else "LKR"
 
     # ── MAINTENANCE EVENTS ────────────────────────────────
-    # Reporting window = the THREE CALENDAR MONTHS ending with the current month.
+    # Reporting window = the THREE CALENDAR MONTHS ending with the most RECENT activity
+    # (latest maintenance event / ticket), falling back to "now" when there is none.
+    # Anchoring to the data — not the wall clock — keeps the report populated even when
+    # the dataset is seed/demo data timestamped in the past: a fixed "last 3 months from
+    # today" window slides off old data and shows all zeros. In production the latest
+    # activity ≈ today, so this behaves exactly like "last 3 months".
     # The monthly trend buckets AND the 3-month headline totals are derived from this
-    # SAME window (totals = sum of the buckets), so they can never disagree. Previously
-    # the headline used a rolling 90-day filter while the buckets used (fragile, 30-day
-    # stepped) calendar months — which let a single month (e.g. 369) exceed the
-    # "3-month total" (365) and could skip a month entirely (28-day February).
+    # SAME window (totals = sum of the buckets), so they can never disagree.
     def _month_floor(d: datetime) -> datetime:
         return d.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     def _next_month(d: datetime) -> datetime:
         return _month_floor(_month_floor(d) + timedelta(days=32))
 
+    _latest_evt = db.query(func.max(MaintenanceEvent.performed_at)).scalar()
+    _latest_tkt = db.query(func.max(Ticket.created_at)).scalar()
+    _anchors = [d for d in (_latest_evt, _latest_tkt) if d is not None]
+    # Strip tzinfo so the anchor matches the naive `now` used elsewhere.
+    anchor = max(_anchors).replace(tzinfo=None) if _anchors else now
+    window_is_current = (_month_floor(anchor) == _month_floor(now))
+
     month_starts: list[datetime] = []
-    _m = _month_floor(now)
+    _m = _month_floor(anchor)
     for _ in range(3):
         month_starts.append(_m)
         _m = _month_floor(_m - timedelta(days=1))   # robust step to previous month
@@ -546,6 +555,7 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
         "department_count": dept_count,
         "report_date": now.strftime("%B %d, %Y"),
         "period": f"{month_starts[0].strftime('%b')}–{month_starts[-1].strftime('%b %Y')}",
+        "reporting_window_current": window_is_current,
 
         # Assets
         "total_assets": total_assets,
