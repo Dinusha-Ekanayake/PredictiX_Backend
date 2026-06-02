@@ -56,6 +56,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # ─── Routers ──────────────────────────────────────────────────────────────────
 from .routers.admin_dashboard import admin_dashboard_router
+from .routers.chatbot import router as chatbot_router
+from .routers.faqs import router as faqs_router
 from .routers.asset_assignments import router as asset_assignments_router
 from .routers.asset_documents import router as asset_documents_router
 from .routers.asset_status_history import router as asset_status_history_router
@@ -86,6 +88,7 @@ from .routers.warehouses import router as warehouses_router
 # ─── ML warmup ────────────────────────────────────────────────────────────────
 from app.ai.services.asset_summary_service import warmup_asset_summary_model
 from app.ai.services.ticket_categorization_service import warmup_ticket_categorizer
+from app.ai.services.ticket_priority_service import warmup_priority_model
 
 log = logging.getLogger("predictix")
 
@@ -148,6 +151,12 @@ async def lifespan(_: FastAPI):
     else:
         log.info("HuggingFace models disabled (DISABLE_HF_MODELS=true). Skipping warmup.")
 
+    try:
+        warmup_priority_model()
+        print("Ticket priority model loaded successfully from Hugging Face.")
+    except Exception as e:
+        print(f"WARNING: Ticket priority model loading failed (endpoint will return 503): {e}")
+
     yield
     log.info("Shutting down PredictiX API.")
 
@@ -209,6 +218,12 @@ app.include_router(notifications_router)
 app.include_router(notification_preferences_router)
 app.include_router(reports_router)
 app.include_router(report_sources_router)
+
+# Chatbot
+app.include_router(chatbot_router)
+
+# FAQs
+app.include_router(faqs_router)
 
 # Diagnostics
 app.include_router(db_debug_router)
