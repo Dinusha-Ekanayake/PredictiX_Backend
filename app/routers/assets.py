@@ -10,6 +10,35 @@ from app.schemas.asset import AssetCreate, AssetOut, AssetUpdate
 router = APIRouter(prefix="/assets", tags=["Assets"])
 
 
+@router.get("/dropdown", summary="Lightweight asset list for dropdowns")
+def list_assets_dropdown(
+    search: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    """Returns only id, asset_code, asset_name, asset_type, warehouse_id — fast for populating dropdowns."""
+    q = db.query(Asset.id, Asset.asset_code, Asset.asset_name, Asset.asset_type, Asset.warehouse_id)
+    if search:
+        like_term = f"%{search.strip()}%"
+        q = q.filter(or_(
+            Asset.asset_name.ilike(like_term),
+            Asset.asset_code.ilike(like_term),
+        ))
+    if status:
+        q = q.filter(Asset.status == status)
+    rows = q.order_by(Asset.asset_name.asc()).all()
+    return [
+        {
+            "id": str(r.id),
+            "asset_code": r.asset_code,
+            "asset_name": r.asset_name,
+            "asset_type": r.asset_type,
+            "warehouse_id": str(r.warehouse_id),
+        }
+        for r in rows
+    ]
+
+
 @router.post("/", response_model=AssetOut)
 def create_asset(payload: AssetCreate, db: Session = Depends(get_db)):
     existing_code = db.query(Asset).filter(Asset.asset_code == payload.asset_code).first()

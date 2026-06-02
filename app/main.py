@@ -86,6 +86,7 @@ from .routers.warehouses import router as warehouses_router
 # ─── ML warmup ────────────────────────────────────────────────────────────────
 from app.ai.services.asset_summary_service import warmup_asset_summary_model
 from app.ai.services.ticket_categorization_service import warmup_ticket_categorizer
+from app.ai.services.ticket_priority_service import warmup_priority_model
 
 log = logging.getLogger("predictix")
 
@@ -147,6 +148,12 @@ async def lifespan(_: FastAPI):
             raise RuntimeError(f"Failed to load asset summary model: {exc}") from exc
     else:
         log.info("HuggingFace models disabled (DISABLE_HF_MODELS=true). Skipping warmup.")
+
+    try:
+        warmup_priority_model()
+        print("Ticket priority model loaded successfully from Hugging Face.")
+    except Exception as e:
+        print(f"WARNING: Ticket priority model loading failed (endpoint will return 503): {e}")
 
     yield
     log.info("Shutting down PredictiX API.")
