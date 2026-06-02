@@ -46,29 +46,10 @@ def list_profiles(
     return q.order_by(Profile.full_name).all()
 
 
-@router.get("/{profile_id}", response_model=ProfileOut)
-def get_profile(profile_id: str, db: Session = Depends(get_db)):
-    obj = db.query(Profile).filter(Profile.id == profile_id).first()
-    if not obj:
-        raise HTTPException(status_code=404, detail="Profile not found")
-    return obj
-
-
-@router.put("/{profile_id}", response_model=ProfileOut)
-def update_profile(profile_id: str, payload: ProfileUpdate, db: Session = Depends(get_db)):
-    obj = db.query(Profile).filter(Profile.id == profile_id).first()
-    if not obj:
-        raise HTTPException(status_code=404, detail="Profile not found")
-
-    for key, value in payload.model_dump(exclude_unset=True).items():
-        setattr(obj, key, value)
-
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-
 # ─── Self-service endpoints (/profiles/me) ────────────────────────────────────
+# NOTE: these literal "/me" routes are defined BEFORE the parametrized
+# "/{profile_id}" routes (at the bottom of this file) so that a request to
+# /profiles/me is not captured by /{profile_id} with profile_id="me".
 
 def _split_name(full: str | None) -> tuple[str, str]:
     parts = (full or "").split(" ")

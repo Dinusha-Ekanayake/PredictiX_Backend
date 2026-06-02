@@ -18,6 +18,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+import os
+
+from app.core.security import hash_password
 from app.deps import get_db
 from app.models import Asset, Department, Profile, Warehouse
 from app.schemas.user_profile import (
@@ -30,6 +33,13 @@ from app.services.notification_service import NotificationService
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/users", tags=["Users"])
+
+
+def _default_password() -> str:
+    """Read DEFAULT_PASSWORD from env, stripping surrounding spaces/quotes."""
+    raw = os.getenv("DEFAULT_PASSWORD", "Predictix@123")
+    cleaned = raw.strip().strip('"').strip("'").strip()
+    return cleaned or "Predictix@123"
 
 
 def _build_item(
@@ -108,6 +118,10 @@ def create_user(data: UserCreate, db: Session = Depends(get_db)):
     dept = db.query(Department).filter(Department.name == data.department).first()
     wh = db.query(Warehouse).filter(Warehouse.name == data.warehouse).first()
 
+    # Hash the supplied password, or fall back to the configured default
+    # so users created by the frontend (which sends no password yet) can log in.
+    raw_password = (data.password or "").strip() or _default_password()
+
     new_id = uuid.uuid4()
     profile = Profile(
         id=new_id,
@@ -119,7 +133,10 @@ def create_user(data: UserCreate, db: Session = Depends(get_db)):
         status=data.status,
         department_id=dept.id if dept else None,
         warehouse_id=wh.id if wh else None,
-        meta={"address": data.address},
+        meta={
+            "address": data.address,
+            "password_hash": hash_password(raw_password),
+        },
     )
 
     try:
