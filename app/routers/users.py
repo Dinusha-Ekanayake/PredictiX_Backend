@@ -16,6 +16,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 import os
@@ -40,6 +41,23 @@ def _default_password() -> str:
     raw = os.getenv("DEFAULT_PASSWORD", "Predictix@123")
     cleaned = raw.strip().strip('"').strip("'").strip()
     return cleaned or "Predictix@123"
+
+
+def _supabase_admin_client():
+    """Build a Supabase Admin client using the service-role key.
+
+    Raises HTTPException(502) if the auth provider isn't configured.
+    """
+    service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    supabase_url = os.getenv("SUPABASE_URL")
+    if not service_key or not supabase_url:
+        raise HTTPException(
+            status_code=502,
+            detail="Auth provider is not configured (missing service-role key).",
+        )
+    from supabase import create_client
+
+    return create_client(supabase_url, service_key)
 
 
 def _create_supabase_auth_user(email: str, password: str) -> str:
@@ -174,25 +192,33 @@ def create_user(data: UserCreate, db: Session = Depends(get_db)):
     # profiles.id has an FK to Supabase auth.users.id (profiles_id_fkey), so the
     # auth user must be created FIRST and its id reused as the profile id.
     new_id = uuid.UUID(_create_supabase_auth_user(data.email, raw_password))
-    profile = Profile(
-        id=new_id,
-        employee_id=data.id,
-        full_name=data.name,
-        email=data.email,
-        phone=data.contactNumber,
-        role=data.role,
-        status=data.status,
-        department_id=dept.id if dept else None,
-        warehouse_id=wh.id if wh else None,
-        meta={
-            "address": data.address,
-            "password_hash": hash_password(raw_password),
-        },
-    )
+
+    meta = {
+        "address": data.address,
+        "password_hash": hash_password(raw_password),
+    }
 
     try:
-        db.add(profile)
+        # Supabase has an on-auth-user-created trigger that auto-inserts a bare
+        # profiles row (email only). So UPSERT: update that row if present,
+        # otherwise insert a fresh one.
+        profile = db.query(Profile).filter(Profile.id == new_id).first()
+        if profile is None:
+            profile = Profile(id=new_id)
+            db.add(profile)
+
+        profile.employee_id = data.id
+        profile.full_name = data.name
+        profile.email = data.email
+        profile.phone = data.contactNumber
+        profile.role = data.role
+        profile.status = data.status
+        profile.department_id = dept.id if dept else None
+        profile.warehouse_id = wh.id if wh else None
+        profile.meta = meta
+
         db.commit()
+        db.refresh(profile)
     except Exception:
         db.rollback()
         log.exception("User creation failed")
@@ -242,6 +268,64 @@ def update_user(user_id: str, data: UserUpdate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail="User update failed")
 
     return _user_to_item(user, db)
+
+
+@router.delete("/{user_id}")
+def delete_user(user_id: str, db: Session = Depends(get_db)):
+    """Delete a user: removes both the profile row and the Supabase auth user.
+
+    Blocks (409) if the user still has assets assigned, to avoid orphaning
+    dependent data. On FK/integrity errors the transaction is rolled back and
+    a 409 with the DB message is returned; on Supabase failure a 502 is raised.
+    """
+    profile = db.query(Profile).filter(Profile.id == user_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Guard: don't orphan assets that are still assigned to this user.
+    assigned_count = (
+        db.query(func.count(Asset.id))
+        .filter(Asset.assigned_to == user_id)
+        .scalar()
+        or 0
+    )
+    if assigned_count > 0:
+        raise HTTPException(
+            status_code=409,
+            detail=f"User has {assigned_count} assigned asset(s); "
+                   "reassign them before deleting.",
+        )
+
+    # Delete the profile row first so the auth.users FK isn't violated, then
+    # remove the Supabase auth user.
+    try:
+        db.delete(profile)
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        msg = getattr(getattr(exc, "orig", None), "args", [str(exc)])
+        detail = msg[0] if msg else str(exc)
+        log.warning("User delete blocked by FK/integrity error for %s: %s", user_id, detail)
+        raise HTTPException(status_code=409, detail=f"Cannot delete user: {detail}")
+    except Exception:
+        db.rollback()
+        log.exception("User delete failed")
+        raise HTTPException(status_code=500, detail="User deletion failed")
+
+    try:
+        admin = _supabase_admin_client()
+        admin.auth.admin.delete_user(user_id)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc)
+        log.warning("Supabase admin delete_user failed for %s: %s", user_id, msg)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Profile removed but failed to delete auth user: {msg}",
+        )
+
+    return {"message": "User deleted", "id": user_id}
 
 
 @router.get("/{user_id}/assets", response_model=list[UserAssignedAssetOut])
