@@ -65,6 +65,7 @@ class UserCreate(BaseModel):
     role: str
     department: str
     status: str
+    password: Optional[str] = None  # if omitted, the DEFAULT_PASSWORD is hashed
 
 class UserUpdate(BaseModel):
     firstName: Optional[str] = None
