@@ -1,11 +1,16 @@
+from functools import lru_cache
 from sentence_transformers import SentenceTransformer
 from app.db.supabase_client import supabase
 
-model = SentenceTransformer('all-MiniLM-L6-v2')
+
+@lru_cache(maxsize=1)
+def _get_model() -> SentenceTransformer:
+    return SentenceTransformer('all-MiniLM-L6-v2')
+
 
 def search_knowledge(query: str, match_count: int = 3) -> list:
     try:
-        embedding = model.encode(query).tolist()
+        embedding = _get_model().encode(query).tolist()
         response = supabase.rpc("match_knowledge", {
             "query_embedding": embedding,
             "match_count": match_count
