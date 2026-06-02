@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from uuid import UUID
-from typing import Optional
+from typing import Optional, Any
 from decimal import Decimal
 from datetime import date
 
@@ -97,6 +97,12 @@ class AssetOut(BaseModel):
     vehicle_age_years: Optional[int] = None
     lifetime_service_count: Optional[int] = None
     lifetime_breakdown_count: Optional[int] = None
+    fuel_type: Optional[str] = None
+    transmission: Optional[str] = None
+    make_model: Optional[str] = None
+    maintenance_priority: Optional[str] = None
+    service_provider_type: Optional[str] = None
+    meta: Optional[Any] = None
 
     class Config:
         from_attributes = True

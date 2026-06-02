@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.deps import get_db
 from app.models import SensorReading, Asset
-from app.schemas.sensor import SensorReadingCreate
+from app.schemas.sensor import SensorReadingCreate, SensorReadingOut
 
 router = APIRouter(prefix="/sensor-readings", tags=["Sensor Readings"])
 
@@ -18,7 +18,7 @@ def create_sensor_reading(payload: SensorReadingCreate, db: Session = Depends(ge
     db.refresh(obj)
     return {"message": "Sensor reading created", "id": obj.id}
 
-@router.get("/asset/{asset_id}")
+@router.get("/asset/{asset_id}", response_model=list[SensorReadingOut])
 def get_asset_sensor_readings(asset_id: str, db: Session = Depends(get_db)):
     rows = (
         db.query(SensorReading)
