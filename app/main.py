@@ -11,6 +11,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # ─── Routers ──────────────────────────────────────────────────────────────────
+from .routers.admin_dashboard import admin_dashboard_router
+from .routers.chatbot import router as chatbot_router
+from .routers.faqs import router as faqs_router
 from .routers.asset_assignments import router as asset_assignments_router
 from .routers.asset_documents import router as asset_documents_router
 from .routers.asset_status_history import router as asset_status_history_router
@@ -48,6 +51,7 @@ from .routers.survival_predictions import router as survival_predictions_router
 # ─── ML warmup ────────────────────────────────────────────────────────────────
 from app.ai.services.asset_summary_service import warmup_asset_summary_model
 from app.ai.services.ticket_categorization_service import warmup_ticket_categorizer
+from app.ai.services.ticket_priority_service import warmup_priority_model
 
 log = logging.getLogger("predictix")
 
@@ -164,12 +168,19 @@ app.include_router(prediction_explanations_router)
 app.include_router(model_registry_router)
 app.include_router(warehouse_dashboard_router)
 app.include_router(survival_predictions_router)  # Sharada — FRSO survival predictions
+app.include_router(admin_dashboard_router)
 
 # Notifications & reports
 app.include_router(notifications_router)
 app.include_router(notification_preferences_router)
 app.include_router(reports_router)
 app.include_router(report_sources_router)
+
+# Chatbot
+app.include_router(chatbot_router)
+
+# FAQs
+app.include_router(faqs_router)
 
 # Diagnostics
 app.include_router(db_debug_router)
