@@ -84,6 +84,17 @@ def list_my_tickets(
     )
 
 
+@router.get("/stats")
+def my_ticket_stats(
+    current_user: Profile = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Authoritative status counts for the current user's OWN tickets (unfiltered).
+    Drives the KPI cards so they always reflect true Supabase data regardless of
+    the active search/status/priority filter or pagination."""
+    return svc.get_user_ticket_status_counts(db, current_user.id)
+
+
 @router.get("/{ticket_id}", response_model=UserTicketDetail)
 def get_my_ticket(
     ticket_id: UUID = Path(...),
