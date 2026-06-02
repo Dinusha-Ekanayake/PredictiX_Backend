@@ -51,7 +51,7 @@ from .routers.survival_predictions import router as survival_predictions_router
 # ─── ML warmup ────────────────────────────────────────────────────────────────
 from app.ai.services.asset_summary_service import warmup_asset_summary_model
 from app.ai.services.ticket_categorization_service import warmup_ticket_categorizer
-from app.ai.services.ticket_priority_service import warmup_priority_model
+from app.ai.services.ticket_priority_service import warmup_ticket_priority
 
 log = logging.getLogger("predictix")
 
