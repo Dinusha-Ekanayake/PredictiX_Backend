@@ -56,6 +56,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # ─── Routers ──────────────────────────────────────────────────────────────────
 from .routers.admin_dashboard import admin_dashboard_router
+from .routers.chatbot import router as chatbot_router
+from .routers.faqs import router as faqs_router
 from .routers.asset_assignments import router as asset_assignments_router
 from .routers.asset_documents import router as asset_documents_router
 from .routers.asset_status_history import router as asset_status_history_router
@@ -216,6 +218,12 @@ app.include_router(notifications_router)
 app.include_router(notification_preferences_router)
 app.include_router(reports_router)
 app.include_router(report_sources_router)
+
+# Chatbot
+app.include_router(chatbot_router)
+
+# FAQs
+app.include_router(faqs_router)
 
 # Diagnostics
 app.include_router(db_debug_router)
