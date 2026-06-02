@@ -12,16 +12,7 @@ from fastapi import HTTPException
 from nltk.corpus import stopwords
 from nltk.stem import PorterStemmer
 
-load_dotenv()
-
-HF_PRIORITY_TOKEN = os.getenv("HF_PRIORITY_TOKEN")
-MODEL_REPO = os.getenv("HF_TICKET_PRIORITY_REPO")
-
-if not HF_PRIORITY_TOKEN:
-    raise RuntimeError("HF_PRIORITY_TOKEN is not set in .env")
-
-if not MODEL_REPO:
-    raise RuntimeError("HF_TICKET_PRIORITY_REPO is not set in .env")
+load_dotenv(override=True)
 
 _MODEL_FILENAME = "xgboost_vehicle_priority_model_3class.pkl"
 _ENCODER_FILENAME = "priority_label_encoder.pkl"
@@ -49,27 +40,35 @@ def _clean_text(text: str) -> str:
     return " ".join(out)
 
 
-def _download_file(filename: str) -> bytes:
-    url = f"https://huggingface.co/{MODEL_REPO}/resolve/main/{filename}"
-    resp = requests.get(
-        url,
-        headers={"Authorization": f"Bearer {HF_PRIORITY_TOKEN}"},
-        timeout=60,
-    )
-    resp.raise_for_status()
-    return resp.content
+
+def _get_hf_config() -> tuple[str, str]:
+    token = os.getenv("HF_TOKEN")
+    repo = os.getenv("HF_TICKET_PRIORITIZATION_REPO")
+    if not token:
+        raise RuntimeError("HF_TOKEN is not set in .env")
+    if not repo:
+        raise RuntimeError("HF_TICKET_PRIORITIZATION_REPO is not set in .env")
+    return token, repo
 
 
 @lru_cache(maxsize=1)
 def _load_model_and_encoder():
+    token, repo = _get_hf_config()
+
+    def _download(filename: str) -> bytes:
+        url = f"https://huggingface.co/{repo}/resolve/main/{filename}"
+        resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=60)
+        resp.raise_for_status()
+        return resp.content
+
     try:
-        model = joblib.load(io.BytesIO(_download_file(_MODEL_FILENAME)))
+        model = joblib.load(io.BytesIO(_download(_MODEL_FILENAME)))
         print(f"[PriorityService] Loaded model: {_MODEL_FILENAME}")
     except Exception as e:
         raise RuntimeError(f"Failed to load priority model: {e}") from e
 
     try:
-        encoder = joblib.load(io.BytesIO(_download_file(_ENCODER_FILENAME)))
+        encoder = joblib.load(io.BytesIO(_download(_ENCODER_FILENAME)))
         print(f"[PriorityService] Loaded label encoder: {_ENCODER_FILENAME}")
     except Exception as e:
         raise RuntimeError(f"Failed to load label encoder: {e}") from e
