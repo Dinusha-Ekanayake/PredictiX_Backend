@@ -1,8 +1,18 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.deps import get_db
-from app.models import Ticket
+from app.models import (
+    Notification,
+    PredictionRun,
+    Report,
+    Ticket,
+    TicketAttachment,
+    TicketComment,
+    TicketPrediction,
+    TicketStatusHistory,
+)
 from app.schemas.tickets import TicketCreate, TicketUpdate, TicketOut
 
 from fastapi import HTTPException
