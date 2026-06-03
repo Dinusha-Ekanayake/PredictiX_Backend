@@ -12,16 +12,7 @@ from fastapi import HTTPException
 from nltk.corpus import stopwords
 from nltk.stem import PorterStemmer
 
-load_dotenv()
-
-HF_PRIORITY_TOKEN = os.getenv("HF_PRIORITY_TOKEN")
-MODEL_REPO = os.getenv("HF_TICKET_PRIORITY_REPO")
-
-if not HF_PRIORITY_TOKEN:
-    raise RuntimeError("HF_PRIORITY_TOKEN is not set in .env")
-
-if not MODEL_REPO:
-    raise RuntimeError("HF_TICKET_PRIORITY_REPO is not set in .env")
+load_dotenv(override=True)
 
 _MODEL_FILENAME = "xgboost_vehicle_priority_model_3class.pkl"
 _ENCODER_FILENAME = "priority_label_encoder.pkl"
@@ -49,27 +40,42 @@ def _clean_text(text: str) -> str:
     return " ".join(out)
 
 
-def _download_file(filename: str) -> bytes:
-    url = f"https://huggingface.co/{MODEL_REPO}/resolve/main/{filename}"
-    resp = requests.get(
-        url,
-        headers={"Authorization": f"Bearer {HF_PRIORITY_TOKEN}"},
-        timeout=60,
-    )
-    resp.raise_for_status()
-    return resp.content
+
+def _get_hf_config() -> tuple[str, str]:
+    token = os.getenv("HF_TOKEN")
+    repo = os.getenv("HF_TICKET_PRIORITIZATION_REPO")
+    if not token:
+        raise RuntimeError("HF_TOKEN is not set in .env")
+    if not repo:
+        raise RuntimeError("HF_TICKET_PRIORITIZATION_REPO is not set in .env")
+    return token, repo
+
+
+@lru_cache(maxsize=1)
+def get_ticket_priority_repo() -> str:
+    """Back-compat shim — returns the HF repo id for the priority model."""
+    _, repo = _get_hf_config()
+    return repo
 
 
 @lru_cache(maxsize=1)
 def _load_model_and_encoder():
+    token, repo = _get_hf_config()
+
+    def _download(filename: str) -> bytes:
+        url = f"https://huggingface.co/{repo}/resolve/main/{filename}"
+        resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=60)
+        resp.raise_for_status()
+        return resp.content
+
     try:
-        model = joblib.load(io.BytesIO(_download_file(_MODEL_FILENAME)))
+        model = joblib.load(io.BytesIO(_download(_MODEL_FILENAME)))
         print(f"[PriorityService] Loaded model: {_MODEL_FILENAME}")
     except Exception as e:
         raise RuntimeError(f"Failed to load priority model: {e}") from e
 
     try:
-        encoder = joblib.load(io.BytesIO(_download_file(_ENCODER_FILENAME)))
+        encoder = joblib.load(io.BytesIO(_download(_ENCODER_FILENAME)))
         print(f"[PriorityService] Loaded label encoder: {_ENCODER_FILENAME}")
     except Exception as e:
         raise RuntimeError(f"Failed to load label encoder: {e}") from e
@@ -140,5 +146,58 @@ def classify_ticket_priority(
         raise HTTPException(status_code=500, detail=f"Priority classification failed: {e}")
 
 
-def warmup_priority_model() -> None:
-    _load_model_and_encoder()
+def warmup_ticket_priority() -> None:
+    """Pre-load the model on application startup."""
+    try:
+        _load_model_and_encoder()
+        print("Ticket priority model warmed up successfully")
+    except Exception as e:
+        print(f"Ticket priority model warmup failed: {e}")
+        raise
+
+
+def predict_ticket_priority(
+    title: str = "",
+    description: str = "",
+    vehicle_type: str = "Truck",
+    issue_category: str = "Engine",
+    sensor_alert: str = "Check engine light",
+    operating_environment: str = "Urban",
+    weather_condition: str = "Normal",
+    vehicle_age: int = 5,
+    mileage_km: int = 100000,
+    downtime_hours: float = 0.0,
+    maintenance_overdue_days: int = 0,
+    previous_failures: int = 0,
+) -> str:
+    """Predict ticket priority from title and description.
+    
+    Combines title and description into a single text for classification.
+    Uses rule-based override first, then ML model if no keywords match.
+    
+    Args:
+        title: Ticket title.
+        description: Ticket description.
+        **kwargs: Additional parameters passed to classify_ticket_priority.
+        
+    Returns:
+        Priority level: "Low", "Medium", or "High".
+    """
+    combined_text = f"{title} {description}".strip()
+    if not combined_text:
+        combined_text = "No issue description"
+    
+    return classify_ticket_priority(
+        text=combined_text,
+        vehicle_type=vehicle_type,
+        issue_category=issue_category,
+        sensor_alert=sensor_alert,
+        operating_environment=operating_environment,
+        weather_condition=weather_condition,
+        vehicle_age=vehicle_age,
+        mileage_km=mileage_km,
+        downtime_hours=downtime_hours,
+        maintenance_overdue_days=maintenance_overdue_days,
+        previous_failures=previous_failures,
+    )
+
