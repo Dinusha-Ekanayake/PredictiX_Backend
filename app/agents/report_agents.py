@@ -44,6 +44,10 @@ from app.kb.kb_annotator import (
     get_ticket_category_kb,
     generate_recommendations,
     get_service_interval_kb_text,
+    get_oem_interval_reference,
+    get_statutory_compliance_reference,
+    rank_fmea_criticality,
+    get_climate_risk_flags,
 )
 
 
@@ -122,34 +126,75 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
     avg_vehicle_age = db.query(func.avg(Asset.vehicle_age_years)).scalar() or 0
 
     # ── HEALTH & FAILURE PREDICTIONS ─────────────────────
-    avg_health = db.query(func.avg(AssetFailurePrediction.health_score)).scalar() or 0
+    # Deduplicate to the LATEST prediction per asset (one row per asset_id) so every
+    # health metric is derived from ONE consistent set. Assets accrue multiple
+    # prediction runs over time; counting all rows previously over-counted the fleet
+    # (health bands summed to more than the asset total).
+    latest_preds = db.execute(text("""
+        SELECT DISTINCT ON (asset_id)
+            asset_id, health_score, failure_probability, risk_level, days_until_maintenance
+        FROM asset_failure_predictions
+        ORDER BY asset_id, created_at DESC
+    """)).fetchall()
+
+    health_vals = [float(r[1]) for r in latest_preds if r[1] is not None]
+    scored_assets = len(health_vals)
+
+    avg_health = (sum(health_vals) / scored_assets) if scored_assets else 0
     avg_health_pct = int(avg_health)
 
-    healthy_count  = db.query(func.count(AssetFailurePrediction.id)).filter(AssetFailurePrediction.health_score >= 80).scalar() or 0
-    moderate_count = db.query(func.count(AssetFailurePrediction.id)).filter(AssetFailurePrediction.health_score.between(60, 79)).scalar() or 0
-    at_risk_count  = db.query(func.count(AssetFailurePrediction.id)).filter(AssetFailurePrediction.health_score < 60).scalar() or 0
-    critical_count = db.query(func.count(AssetFailurePrediction.id)).filter(AssetFailurePrediction.health_score < 50).scalar() or 0
+    # Canonical health-band counts (single source of truth; see health_buckets below).
+    # "Critical" = health < 50 across the ENTIRE report (matches the §1/§7 KPI card).
+    # at_risk_count (<60) is retained only to describe the wider danger zone in prose.
+    healthy_count  = sum(1 for h in health_vals if h >= 80)
+    moderate_count = sum(1 for h in health_vals if 60 <= h < 80)
+    at_risk_count  = sum(1 for h in health_vals if h < 60)
+    critical_count = sum(1 for h in health_vals if h < 50)
 
-    risk_level_dist = db.query(
-        AssetFailurePrediction.risk_level, func.count(AssetFailurePrediction.id)
-    ).group_by(AssetFailurePrediction.risk_level).all()
-    risk_breakdown = {str(r).title() if r else "Unknown": c for r, c in risk_level_dist}
+    # Count of assets with no prediction yet (model-coverage gap, surfaced in report).
+    unscored_assets = max(int(total_assets) - scored_assets, 0)
 
-    avg_failure_prob = db.query(func.avg(AssetFailurePrediction.failure_probability)).scalar() or 0
-    avg_failure_prob_pct = round(float(avg_failure_prob) * 100, 1)
+    # ── Health-aware status distribution (report display) ──────────────────
+    # The raw assets.status column carries its own 'critical' value that differs
+    # from the predictive health band (<50%). To keep "Critical" identical to the
+    # KPI cards on EVERY page, the report's status distribution uses the health-band
+    # Critical (<50%); every non-critical, in-service asset counts as Active. This
+    # makes the §2.2 chart, the "Active" counts, and the LLM prompt all consistent
+    # with the Critical Assets KPI. (Trade-off: "Active" becomes the in-service,
+    # health≥50 remainder rather than the raw status='active' count.)
+    display_active = max(
+        total_assets - critical_count - under_maintenance - retired_assets - inactive_assets,
+        0,
+    )
+    status_display_breakdown: dict[str, int] = {"Active": display_active, "Critical": critical_count}
+    if under_maintenance:
+        status_display_breakdown["Under Maintenance"] = under_maintenance
+    if retired_assets:
+        status_display_breakdown["Retired"] = retired_assets
+    if inactive_assets:
+        status_display_breakdown["Inactive"] = inactive_assets
 
-    urgent_maintenance = db.query(func.count(AssetFailurePrediction.id)).filter(
-        AssetFailurePrediction.days_until_maintenance <= 7,
-        AssetFailurePrediction.days_until_maintenance.isnot(None),
-    ).scalar() or 0
+    # ML categorical risk_level distribution. Rows with no risk_level are "Unknown",
+    # and assets with NO prediction at all are folded into "Unknown" too, so the
+    # distribution covers the ENTIRE fleet — every asset lands in exactly one bucket
+    # and the "% Fleet" column sums to 100% (denominator = total_assets).
+    risk_breakdown: dict[str, int] = {}
+    for r in latest_preds:
+        label = str(r[3]).title() if r[3] else "Unknown"
+        risk_breakdown[label] = risk_breakdown.get(label, 0) + 1
+    if unscored_assets:
+        risk_breakdown["Unknown"] = risk_breakdown.get("Unknown", 0) + unscored_assets
 
-    soon_maintenance = db.query(func.count(AssetFailurePrediction.id)).filter(
-        AssetFailurePrediction.days_until_maintenance <= 30,
-        AssetFailurePrediction.days_until_maintenance.isnot(None),
-    ).scalar() or 0
+    fail_probs = [float(r[2]) for r in latest_preds if r[2] is not None]
+    raw_prob = (sum(fail_probs) / len(fail_probs)) if fail_probs else 0.0
+    # Normalize: if DB stores decimals (0-1), multiply by 100; if already percentage (0-100), use directly
+    avg_failure_prob_pct = round(raw_prob * 100 if raw_prob <= 1.0 else raw_prob, 1)
+    avg_failure_prob_pct = min(avg_failure_prob_pct, 100.0)  # cap at 100% for display safety
 
-    avg_days_to_maintenance = db.query(func.avg(AssetFailurePrediction.days_until_maintenance)).scalar()
-    avg_days_to_maintenance = int(avg_days_to_maintenance) if avg_days_to_maintenance else None
+    days_vals = [int(r[4]) for r in latest_preds if r[4] is not None]
+    urgent_maintenance = sum(1 for d in days_vals if d <= 7)
+    soon_maintenance   = sum(1 for d in days_vals if d <= 30)
+    avg_days_to_maintenance = int(sum(days_vals) / len(days_vals)) if days_vals else None
 
     # SHAP top features from prediction explanations table
     top_explanations_raw = (
@@ -176,42 +221,52 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
                 feat_counts[name] = feat_counts.get(name, 0) + 1
         top_shap_features = sorted(feat_counts.items(), key=lambda x: -x[1])[:8]
 
-    # Health score distribution buckets
-    health_scores = db.query(AssetFailurePrediction.health_score).filter(
-        AssetFailurePrediction.health_score.isnot(None)
-    ).all()
-    health_buckets = {"90-100%": 0, "80-89%": 0, "70-79%": 0, "60-69%": 0, "Below 60%": 0}
-    for (score,) in health_scores:
+    # Health score distribution buckets — derived from the SAME deduped per-asset set,
+    # so the bands always sum to scored_assets. "Below 60%" is split into "50–59%"
+    # (high-risk) and "Below 50%" (canonical Critical = the §1/§7 KPI count).
+    health_buckets = {"90-100%": 0, "80-89%": 0, "70-79%": 0, "60-69%": 0, "50-59%": 0, "Below 50%": 0}
+    for score in health_vals:
         if score >= 90:   health_buckets["90-100%"] += 1
         elif score >= 80: health_buckets["80-89%"] += 1
         elif score >= 70: health_buckets["70-79%"] += 1
         elif score >= 60: health_buckets["60-69%"] += 1
-        else:             health_buckets["Below 60%"] += 1
+        elif score >= 50: health_buckets["50-59%"] += 1
+        else:             health_buckets["Below 50%"] += 1
 
-    # Critical asset list (worst 8)
-    critical_assets_q = (
-        db.query(Asset, AssetFailurePrediction)
-        .join(AssetFailurePrediction, Asset.id == AssetFailurePrediction.asset_id)
-        .filter(AssetFailurePrediction.health_score < 60)
-        .order_by(AssetFailurePrediction.health_score.asc())
-        .limit(8)
-        .all()
-    )
+    # Worst assets by LATEST health score (deduped per asset). A watch list of the
+    # lowest-health units (<60), not the Critical count — so an asset cannot appear
+    # twice from multiple prediction runs.
+    critical_rows = db.execute(text("""
+        SELECT * FROM (
+            SELECT DISTINCT ON (p.asset_id)
+                a.asset_code, a.asset_name, a.model, a.make, a.vehicle_type, a.status,
+                p.health_score, p.failure_probability, p.risk_level, p.days_until_maintenance
+            FROM asset_failure_predictions p
+            JOIN assets a ON a.id = p.asset_id
+            ORDER BY p.asset_id, p.created_at DESC
+        ) latest
+        WHERE latest.health_score < 60
+        ORDER BY latest.health_score ASC
+        LIMIT 8
+    """)).fetchall()
+    def _fp_pct(v) -> str:
+        fp = float(v or 0)
+        return f"{min(round(fp * 100 if fp <= 1.0 else fp, 1), 100.0)}%"
     critical_assets_list = [
         {
-            "code": a.asset_code,
-            "name": a.asset_name or a.model or "Vehicle",
-            "type": str(a.vehicle_type).replace("_", " ").title() if a.vehicle_type else "Unknown",
-            "make": a.make or "N/A",
-            "model": a.model or "N/A",
-            "health_score": int(p.health_score),
-            "health": f"{int(p.health_score)}%",
-            "failure_prob": f"{round(float(p.failure_probability or 0) * 100, 1)}%",
-            "risk": p.risk_level or "High",
-            "days_to_service": p.days_until_maintenance,
-            "status": a.status or "unknown",
+            "code": r[0],
+            "name": r[1] or r[2] or "Vehicle",
+            "type": str(r[4]).replace("_", " ").title() if r[4] else "Unknown",
+            "make": r[3] or "N/A",
+            "model": r[2] or "N/A",
+            "health_score": int(r[6]),
+            "health": f"{int(r[6])}%",
+            "failure_prob": _fp_pct(r[7]),
+            "risk": r[8] or "High",
+            "days_to_service": r[9],
+            "status": r[5] or "unknown",
         }
-        for a, p in critical_assets_q
+        for r in critical_rows
     ]
 
     # ── COST PREDICTIONS ──────────────────────────────────
@@ -223,45 +278,93 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
     currency             = cost_currency[0] if cost_currency else "LKR"
 
     # ── MAINTENANCE EVENTS ────────────────────────────────
-    total_maintenance_3m = db.query(func.count(MaintenanceEvent.id)).filter(
-        MaintenanceEvent.performed_at >= three_months_ago
-    ).scalar() or 0
+    # Reporting window = the THREE CALENDAR MONTHS ending with the most RECENT activity
+    # (latest maintenance event / ticket), falling back to "now" when there is none.
+    # Anchoring to the data — not the wall clock — keeps the report populated even when
+    # the dataset is seed/demo data timestamped in the past: a fixed "last 3 months from
+    # today" window slides off old data and shows all zeros. In production the latest
+    # activity ≈ today, so this behaves exactly like "last 3 months".
+    # The monthly trend buckets AND the 3-month headline totals are derived from this
+    # SAME window (totals = sum of the buckets), so they can never disagree.
+    def _month_floor(d: datetime) -> datetime:
+        return d.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    def _next_month(d: datetime) -> datetime:
+        return _month_floor(_month_floor(d) + timedelta(days=32))
 
-    actual_cost_3m = db.query(func.sum(MaintenanceEvent.cost_amount)).filter(
-        MaintenanceEvent.performed_at >= three_months_ago
-    ).scalar() or 0
+    _latest_evt = db.query(func.max(MaintenanceEvent.performed_at)).scalar()
+    _latest_tkt = db.query(func.max(Ticket.created_at)).scalar()
+    _anchors = [d for d in (_latest_evt, _latest_tkt) if d is not None]
+    # Strip tzinfo so the anchor matches the naive `now` used elsewhere.
+    anchor = max(_anchors).replace(tzinfo=None) if _anchors else now
+    window_is_current = (_month_floor(anchor) == _month_floor(now))
+
+    month_starts: list[datetime] = []
+    _m = _month_floor(anchor)
+    for _ in range(3):
+        month_starts.append(_m)
+        _m = _month_floor(_m - timedelta(days=1))   # robust step to previous month
+    month_starts.reverse()                           # oldest → newest
+    period_start = month_starts[0]
+    period_end   = _next_month(month_starts[-1])
+
+    # Monthly maintenance volume + cost over the 3 calendar months
+    monthly_maintenance = []
+    for ms in month_starts:
+        me = _next_month(ms)
+        m_cost = db.query(func.sum(MaintenanceEvent.cost_amount)).filter(
+            MaintenanceEvent.performed_at >= ms,
+            MaintenanceEvent.performed_at <  me,
+        ).scalar() or 0
+        m_count = db.query(func.count(MaintenanceEvent.id)).filter(
+            MaintenanceEvent.performed_at >= ms,
+            MaintenanceEvent.performed_at <  me,
+        ).scalar() or 0
+        monthly_maintenance.append({
+            "month": ms.strftime("%B %Y"),
+            "cost": int(m_cost),
+            "events": m_count,
+        })
+
+    # Headline totals are the SUM of the displayed months → trend & headline reconcile.
+    total_maintenance_3m = sum(m["events"] for m in monthly_maintenance)
+    actual_cost_3m       = sum(m["cost"]   for m in monthly_maintenance)
 
     avg_downtime = db.query(func.avg(MaintenanceEvent.downtime_hours)).filter(
-        MaintenanceEvent.performed_at >= three_months_ago
+        MaintenanceEvent.performed_at >= period_start,
+        MaintenanceEvent.performed_at <  period_end,
     ).scalar() or 0
 
     maintenance_type_rows = db.query(
         MaintenanceEvent.event_type, func.count(MaintenanceEvent.id)
-    ).filter(MaintenanceEvent.performed_at >= three_months_ago).group_by(
-        MaintenanceEvent.event_type
-    ).all()
+    ).filter(
+        MaintenanceEvent.performed_at >= period_start,
+        MaintenanceEvent.performed_at <  period_end,
+    ).group_by(MaintenanceEvent.event_type).all()
     maintenance_type_breakdown = {
         str(t).replace("_", " ").title() if t else "General": c for t, c in maintenance_type_rows
     }
 
-    # Monthly maintenance costs over last 3 months
-    monthly_maintenance = []
-    for i in range(2, -1, -1):
-        m_start = (now.replace(day=1) - timedelta(days=30 * i)).replace(day=1)
-        m_end   = (m_start + timedelta(days=32)).replace(day=1)
-        m_cost  = db.query(func.sum(MaintenanceEvent.cost_amount)).filter(
-            MaintenanceEvent.performed_at >= m_start,
-            MaintenanceEvent.performed_at < m_end,
-        ).scalar() or 0
-        m_count = db.query(func.count(MaintenanceEvent.id)).filter(
-            MaintenanceEvent.performed_at >= m_start,
-            MaintenanceEvent.performed_at < m_end,
-        ).scalar() or 0
-        monthly_maintenance.append({
-            "month": m_start.strftime("%B %Y"),
-            "cost": int(m_cost),
-            "events": m_count,
-        })
+    # Canonical PM ratio = preventive events / all events (clamped ≤100%). Single
+    # source so prose, KPI cards and benchmark box never disagree on the figure.
+    _mtb_lower = {str(k).lower(): v for k, v in maintenance_type_breakdown.items()}
+    _preventive_events = _mtb_lower.get("preventive", 0) + _mtb_lower.get("scheduled", 0)
+    _total_events_typed = sum(maintenance_type_breakdown.values())
+    pm_ratio_pct = round(min(_preventive_events / _total_events_typed * 100, 100.0), 1) if _total_events_typed else 0.0
+
+    # Seed/demo-data signature: is the history concentrated in a single month? If one
+    # month holds ≥80% of events, the "trend" is a data-loading artifact, not an
+    # operational decline — flagged honestly in the report so it isn't read as insight.
+    _evts  = [m["events"] for m in monthly_maintenance]
+    _costs = [m["cost"]   for m in monthly_maintenance]
+    maintenance_data_concentrated = bool(
+        total_maintenance_3m > 0 and max(_evts) / total_maintenance_3m >= 0.8
+    )
+    maintenance_trend_direction = (
+        "increasing" if _evts[-1] > _evts[0] else "decreasing" if _evts[-1] < _evts[0] else "stable"
+    )
+    cost_trend_direction = (
+        "increasing" if _costs[-1] > _costs[0] else "decreasing" if _costs[-1] < _costs[0] else "stable"
+    )
 
     # ── TICKETS ───────────────────────────────────────────
     total_tickets    = db.query(func.count(Ticket.id)).scalar() or 0
@@ -280,16 +383,15 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
     category_rows = db.query(Ticket.final_category, func.count(Ticket.id)).group_by(Ticket.final_category).all()
     category_breakdown = {str(c).title() if c else "General": cnt for c, cnt in category_rows}
 
-    # Monthly ticket volumes over last 3 months
+    # Monthly ticket volumes over the SAME 3 calendar months as the maintenance trend.
     ticket_trend = []
-    for i in range(2, -1, -1):
-        m_start = (now.replace(day=1) - timedelta(days=30 * i)).replace(day=1)
-        m_end   = (m_start + timedelta(days=32)).replace(day=1)
-        count   = db.query(func.count(Ticket.id)).filter(
-            Ticket.created_at >= m_start,
-            Ticket.created_at < m_end,
+    for ms in month_starts:
+        me = _next_month(ms)
+        count = db.query(func.count(Ticket.id)).filter(
+            Ticket.created_at >= ms,
+            Ticket.created_at < me,
         ).scalar() or 0
-        ticket_trend.append({"month": m_start.strftime("%B %Y"), "tickets": count})
+        ticket_trend.append({"month": ms.strftime("%B %Y"), "tickets": count})
 
     # High priority active tickets
     high_priority_active = db.execute(
@@ -311,6 +413,139 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
         "decreasing" if current_month_tickets < oldest_month_tickets else "stable"
     )
 
+    # ── PHASE B: EXTENDED DB QUERIES ─────────────────────
+
+    # B1. Fleet Age Distribution (from assets.manufacture_year)
+    current_year = now.year
+    fleet_age_distribution = {"0-3 yrs": 0, "4-6 yrs": 0, "7-10 yrs": 0, "10+ yrs": 0}
+    try:
+        age_rows = db.query(Asset.manufacture_year, func.count(Asset.id))\
+            .filter(Asset.manufacture_year.isnot(None)).group_by(Asset.manufacture_year).all()
+        for yr, cnt in age_rows:
+            age = current_year - int(yr)
+            band = "0-3 yrs" if age <= 3 else "4-6 yrs" if age <= 6 else "7-10 yrs" if age <= 10 else "10+ yrs"
+            fleet_age_distribution[band] += cnt
+    except Exception:
+        pass
+
+    # Surface assets with no manufacture_year as an explicit "Unknown" band so the
+    # age bands reconcile to the full fleet (total_assets). Without this they
+    # silently sum to fewer than total_assets and the per-band percentages are
+    # computed on the wrong base.
+    known_age_count = sum(fleet_age_distribution.values())
+    unknown_age_count = max(total_assets - known_age_count, 0)
+    if unknown_age_count:
+        fleet_age_distribution["Unknown"] = unknown_age_count
+
+    # B2. Warranty Expiry Alert (assets expiring within 90 days)
+    warranty_expiring_90d = 0
+    try:
+        expiry_cutoff = (now + timedelta(days=90)).date()
+        today_date = now.date()
+        warranty_expiring_90d = db.execute(text("""
+            SELECT COUNT(*) FROM assets
+            WHERE warranty_expiry_date IS NOT NULL
+              AND warranty_expiry_date >= :today
+              AND warranty_expiry_date <= :cutoff
+        """), {"today": today_date, "cutoff": expiry_cutoff}).scalar() or 0
+    except Exception:
+        pass
+
+    # B3. Component Health Averages (sensor_readings — latest per asset)
+    component_health: dict[str, float] = {
+        "avg_tire": 0.0, "avg_brake": 0.0, "avg_battery": 0.0,
+        "avg_oil": 0.0, "avg_hydraulic": 0.0,
+    }
+    total_fault_codes = 0
+    avg_fault_codes_per_asset = 0.0
+    monitored_assets = 0
+    try:
+        comp_row = db.execute(text("""
+            SELECT
+                ROUND(AVG(tire_health_pct)::numeric, 1)        AS avg_tire,
+                ROUND(AVG(brake_health_pct)::numeric, 1)       AS avg_brake,
+                ROUND(AVG(battery_health_pct)::numeric, 1)     AS avg_battery,
+                ROUND(AVG(oil_life_pct)::numeric, 1)           AS avg_oil,
+                ROUND(AVG(hydraulic_health_pct)::numeric, 1)   AS avg_hydraulic,
+                COALESCE(SUM(active_fault_code_count), 0)::int  AS total_faults,
+                ROUND(AVG(active_fault_code_count)::numeric, 2) AS avg_faults,
+                COUNT(*)::int                                  AS monitored_assets
+            FROM (
+                SELECT DISTINCT ON (asset_id)
+                    asset_id, tire_health_pct, brake_health_pct,
+                    battery_health_pct, oil_life_pct, hydraulic_health_pct,
+                    active_fault_code_count
+                FROM sensor_readings
+                WHERE recorded_at IS NOT NULL
+                ORDER BY asset_id, recorded_at DESC
+            ) latest
+        """)).fetchone()
+        if comp_row:
+            component_health = {
+                "avg_tire":     float(comp_row[0] or 0),
+                "avg_brake":    float(comp_row[1] or 0),
+                "avg_battery":  float(comp_row[2] or 0),
+                "avg_oil":      float(comp_row[3] or 0),
+                "avg_hydraulic":float(comp_row[4] or 0),
+            }
+            total_fault_codes          = int(comp_row[5] or 0)
+            avg_fault_codes_per_asset  = float(comp_row[6] or 0)
+            monitored_assets           = int(comp_row[7] or 0)
+    except Exception:
+        pass
+
+    # B4. Vendor & Service Provider Breakdown (maintenance_events)
+    vendor_breakdown: list[dict] = []
+    try:
+        vendor_rows = db.execute(text("""
+            SELECT vendor_name,
+                   COUNT(*)::int                            AS event_count,
+                   COALESCE(SUM(cost_amount), 0)::numeric  AS total_cost
+            FROM maintenance_events
+            WHERE vendor_name IS NOT NULL AND vendor_name <> ''
+              AND performed_at >= :cutoff
+            GROUP BY vendor_name
+            ORDER BY event_count DESC
+            LIMIT 6
+        """), {"cutoff": three_months_ago}).fetchall()
+        vendor_breakdown = [
+            {"vendor": r[0], "events": int(r[1]), "cost": float(r[2])}
+            for r in vendor_rows
+        ]
+    except Exception:
+        pass
+
+    # B5. Ticket MTTR — Mean Time to Resolve
+    avg_resolution_hours = 0.0
+    avg_resolution_days  = 0.0
+    mttr_by_priority: list[dict] = []
+    try:
+        mttr_row = db.execute(text("""
+            SELECT
+                ROUND(AVG(EXTRACT(EPOCH FROM (resolved_at - opened_at)) / 3600)::numeric,  1) AS avg_hours,
+                ROUND(AVG(EXTRACT(EPOCH FROM (resolved_at - opened_at)) / 86400)::numeric, 1) AS avg_days
+            FROM tickets
+            WHERE resolved_at IS NOT NULL AND opened_at IS NOT NULL
+        """)).fetchone()
+        if mttr_row:
+            avg_resolution_hours = float(mttr_row[0] or 0)
+            avg_resolution_days  = float(mttr_row[1] or 0)
+
+        prio_rows = db.execute(text("""
+            SELECT COALESCE(final_priority, priority, 'Unknown') AS priority,
+                   ROUND(AVG(EXTRACT(EPOCH FROM (resolved_at - opened_at)) / 3600)::numeric, 1) AS avg_hours
+            FROM tickets
+            WHERE resolved_at IS NOT NULL AND opened_at IS NOT NULL
+            GROUP BY COALESCE(final_priority, priority, 'Unknown')
+            ORDER BY avg_hours DESC
+        """)).fetchall()
+        mttr_by_priority = [
+            {"priority": str(r[0]).title(), "avg_hours": float(r[1] or 0)}
+            for r in prio_rows
+        ]
+    except Exception:
+        pass
+
     return {
         # Warehouse
         "warehouse_name": warehouse_name,
@@ -319,16 +554,17 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
         "warehouse_active": warehouse_active,
         "department_count": dept_count,
         "report_date": now.strftime("%B %d, %Y"),
-        "period": "Last 3 Months",
+        "period": f"{month_starts[0].strftime('%b')}–{month_starts[-1].strftime('%b %Y')}",
+        "reporting_window_current": window_is_current,
 
         # Assets
         "total_assets": total_assets,
-        "active_assets": active_assets,
+        "active_assets": display_active,            # in-service, health≥50 remainder (see health-aware status above)
         "inactive_assets": inactive_assets,
         "under_maintenance_assets": under_maintenance,
         "retired_assets": retired_assets,
         "asset_type_breakdown": asset_type_breakdown,
-        "asset_status_breakdown": asset_status_breakdown,
+        "asset_status_breakdown": status_display_breakdown,  # health-band Critical (<50%) for cross-page consistency
         "asset_category_breakdown": asset_category_breakdown,
         "avg_vehicle_age_years": round(float(avg_vehicle_age), 1),
 
@@ -338,6 +574,11 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
         "moderate_count": moderate_count,
         "at_risk_count": at_risk_count,
         "critical_count": critical_count,
+        # Canonical, pre-computed rates so prose never re-derives (or mis-derives) them.
+        "critical_rate_pct": round(critical_count / max(total_assets, 1) * 100, 1),
+        "at_risk_rate_pct": round(at_risk_count / max(total_assets, 1) * 100, 1),
+        "scored_assets": scored_assets,
+        "unscored_assets": unscored_assets,
         "avg_failure_prob_pct": avg_failure_prob_pct,
         "risk_breakdown": risk_breakdown,
         "health_score_distribution": health_buckets,
@@ -359,7 +600,11 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
         "actual_cost_3m": int(actual_cost_3m),
         "avg_downtime_hours": round(float(avg_downtime), 1),
         "maintenance_type_breakdown": maintenance_type_breakdown,
+        "pm_ratio_pct": pm_ratio_pct,
         "monthly_maintenance_trend": monthly_maintenance,
+        "maintenance_trend_direction": maintenance_trend_direction,
+        "cost_trend_direction": cost_trend_direction,
+        "maintenance_data_concentrated": maintenance_data_concentrated,
 
         # Tickets
         "total_tickets": total_tickets,
@@ -381,6 +626,18 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
         "inactive_users": inactive_users,
         "admin_users": admin_users,
         "standard_users": standard_users,
+
+        # Phase B — Extended DB fields
+        "fleet_age_distribution": fleet_age_distribution,
+        "warranty_expiring_90d": int(warranty_expiring_90d),
+        "component_health": component_health,
+        "total_fault_codes": total_fault_codes,
+        "avg_fault_codes_per_asset": avg_fault_codes_per_asset,
+        "monitored_assets": monitored_assets,   # assets with sensor readings (base for component/fault averages)
+        "vendor_breakdown": vendor_breakdown,
+        "avg_resolution_hours": avg_resolution_hours,
+        "avg_resolution_days": avg_resolution_days,
+        "mttr_by_priority": mttr_by_priority,
     }
 
 
@@ -432,6 +689,8 @@ def _context_to_prompt_text(ctx: dict) -> str:
   Average Fleet Health Score: {ctx['avg_health_pct']}%
   Average Failure Probability: {ctx['avg_failure_prob_pct']}%
   Health Distribution: Healthy (≥80%): {ctx['healthy_count']} | Moderate (60-79%): {ctx['moderate_count']} | At-Risk (<60%): {ctx['at_risk_count']} | Critical (<50%): {ctx['critical_count']}
+  Critical Rate: {ctx['critical_rate_pct']}% ({ctx['critical_count']} of {ctx['total_assets']} assets, <50% health) | At-Risk Rate: {ctx['at_risk_rate_pct']}% (<60% health)
+  (Use these EXACT pre-computed rates when stating critical/at-risk percentages — do not recompute.)
   Risk Level Distribution: {kv(ctx['risk_breakdown'])}
   Assets Needing Urgent Service (≤7 days): {ctx['urgent_maintenance_count']}
   Assets Needing Service Soon (≤30 days): {ctx['soon_maintenance_count']}
@@ -449,18 +708,21 @@ def _context_to_prompt_text(ctx: dict) -> str:
   Cost Range: {ctx['currency']} {ctx['min_cost_estimate']:,} – {ctx['currency']} {ctx['max_cost_estimate']:,}
   Actual Maintenance Spend (Last 3 Months): {ctx['currency']} {ctx['actual_cost_3m']:,}
 
-▶ MAINTENANCE EVENTS (Last 3 Months)
-  Total Events: {ctx['total_maintenance_events_3m']}
+▶ MAINTENANCE EVENTS ({ctx['period']})
+  Total Events: {ctx['total_maintenance_events_3m']} (this EQUALS the sum of the Monthly Trend below)
   Average Downtime per Event: {ctx['avg_downtime_hours']} hours
   By Type: {kv(ctx['maintenance_type_breakdown'])}
-  Monthly Trend: {m_trend}
+  PM Ratio: {ctx['pm_ratio_pct']}% (preventive share of all events — use this EXACT value; do not recompute)
+  Monthly MAINTENANCE-EVENT Trend (events & {ctx['currency']} cost): {m_trend}
+  Maintenance event-volume direction: {ctx.get('maintenance_trend_direction', 'n/a')}; maintenance-cost direction: {ctx.get('cost_trend_direction', 'n/a')}
+  {"DATA NOTE: maintenance history is concentrated in a single month (demonstration/seed data). Treat the month-over-month change as a DATA-LOADING ARTIFACT, NOT an operational improvement; do not attribute the decline to efficiency." if ctx.get('maintenance_data_concentrated') else ""}
 
 ▶ TICKETS
   Total: {ctx['total_tickets']} | Active (Open+InProgress): {ctx['active_tickets']} | Open: {ctx['open_tickets']} | In Progress: {ctx['in_progress_tickets']} | Resolved: {ctx['resolved_tickets']} | Closed: {ctx['closed_tickets']}
   High-Priority Active Tickets: {ctx['high_priority_active_tickets']}
   Priority Breakdown: {kv(ctx['ticket_priority_breakdown'])}
   Category Breakdown: {kv(ctx['ticket_category_breakdown'])}
-  Monthly Trend ({ctx['ticket_trend_direction']}): {t_trend}
+  Monthly TICKET Trend (count of NEW tickets — a SEPARATE series from maintenance events above; never merge the two): {t_trend} [direction: {ctx['ticket_trend_direction']}]
 
 ▶ WORKFORCE / USERS
   Total Users: {ctx['total_users']} | Active: {ctx['active_users']} | Inactive: {ctx['inactive_users']}
@@ -476,7 +738,10 @@ WAREHOUSE_SYSTEM_PROMPT = """
 You are a senior AI warehouse operations analyst for PredictiX, a KB-Enhanced AI-powered fleet management system.
 You will receive:
   (A) LIVE PostgreSQL data — all metrics computed from the actual database
-  (B) KNOWLEDGE BASE context — ISO 55000 and SMRP maintenance standards relevant to the warehouse
+  (B) KNOWLEDGE BASE context — maintenance knowledge spanning ISO 55000/55001 and SMRP standards,
+      the Sri Lanka Factories Ordinance No. 45 of 1942 (statutory lifting-equipment inspection intervals),
+      OEM service schedules (Toyota forklifts, Tata heavy trucks), FMEA/FMECA criticality methodology,
+      and the Colombo climate-vulnerability profile relevant to the warehouse.
 
 Generate a professional warehouse intelligence report grounded in BOTH the data AND the KB standards.
 
@@ -494,39 +759,123 @@ Section instructions (each must be 4-6 sentences, professional analytical tone):
 1. insight_summary:
    Write an executive overview covering: total fleet size and composition (mention specific asset types),
    average health score, active vs critical assets, estimated maintenance cost, active tickets,
-   active users, and general warehouse status. Reference the KB benchmark (ISO 55000 5% critical target)
-   if the critical rate exceeds it. Mention specific numbers from the data.
+   active users, and general warehouse status. When stating the critical rate, use the provided
+   "Critical Rate" value verbatim and compare it to the KB benchmark (ISO 55000 5% critical target)
+   if it exceeds it. Mention specific numbers from the data.
 
 2. risk_analysis:
-   Analyse the risk landscape using the KB context. State the count and percentage of critical/at-risk assets
-   and compare to the ISO 55000 / SMRP 5% benchmark. Name the top AI-identified SHAP failure drivers
-   and their KB-defined thresholds. Identify which asset types are most critical. Comment on failure probability
+   Analyse the risk landscape using the KB context. State the critical/at-risk counts and use the provided
+   "Critical Rate" / "At-Risk Rate" values verbatim (do not recompute), comparing to the ISO 55000 / SMRP 5% benchmark. Name the top AI-identified SHAP failure drivers
+   and their KB-defined thresholds. Apply FMEA/FMECA criticality reasoning where the data warrants — a
+   high-occurrence SHAP driver on a high-severity component (brakes, hydraulics, cooling) is a top-criticality
+   item to ground first. Identify which asset types are most critical. Where the Colombo climate profile is
+   relevant (heat/humidity raising coolant, battery or corrosion risk), note it. Comment on failure probability
    and urgency — reference assets needing service within 7 days.
 
 3. maintenance_intelligence:
    Outline the maintenance workload using KB standards. How many assets need urgent attention (≤7 days)?
-   Compare the PM ratio against the SMRP 90% gold standard. Compare predicted cost vs actual 3M spend.
+   Compare the provided "PM Ratio" value (use it verbatim; do not recompute) against the SMRP 90% gold standard.
+   When comparing predicted cost vs actual 3M spend, describe the gap factually (forecast conservatism or
+   deferred maintenance are possible causes) — do not assert it as "savings" or "underspend" without basis.
    Describe maintenance event breakdown and note average downtime. Reference KB service interval standards
-   for the most common asset types (forklifts every 500 engine hours, vans every 60 days).
+   for the most common asset types, citing OEM schedules where relevant (Toyota forklifts every 500 engine
+   hours with 8h/40h/170h tiers; Tata heavy trucks ~1000 hours or annually; vans every 60 days). Where lifting
+   equipment is involved, note the statutory Factories Ordinance obligation (hoists/lifts examined every 12
+   months, lifting tackle every 6 months) as a binding floor independent of OEM intervals.
 
 4. pattern_and_trend:
-   Describe observable trends over the last 3 months. Is ticket volume increasing, decreasing, or stable?
-   How are maintenance costs trending? Note patterns in ticket categories (electrical/mechanical/general)
-   and their link to SHAP failure drivers. Comment on operational efficiency and KB-defined improvement opportunities.
+   Describe observable trends over the reporting period. Treat MAINTENANCE EVENTS and TICKETS as TWO SEPARATE
+   series — never state a ticket count as an event count or vice-versa, and never merge their trends.
+   State the ticket-volume direction and the maintenance event-volume and maintenance-cost directions using the
+   EXACT direction labels provided in the data (do not infer the opposite of what the data says).
+   CRITICAL: if the data carries a "DATA NOTE" that the maintenance history is concentrated in one month, you MUST
+   describe the month-over-month change as a data-loading artifact of demonstration data and explicitly NOT
+   attribute it to operational efficiency or genuine workload reduction. Note patterns in ticket categories
+   (electrical/mechanical/general) and their link to SHAP failure drivers.
 
 5. conclusion:
-   Write a comprehensive 3-month warehouse summary. Note the PM ratio strength and fleet health trajectory.
+   Write a comprehensive 3-month warehouse summary. Note the PM ratio strength (use the provided "PM Ratio"
+   value verbatim) and fleet health trajectory. When referring to "critical" assets, use the provided
+   Critical (<50% health) count and Critical Rate verbatim — do not introduce a different figure.
    Reference the split operational profile (strong PM culture vs high critical asset rate).
-   Provide the top 3 recommended actions for management grounded in KB thresholds, with specific numbers.
-   Close with the financial position and ticket resolution performance.
+   If you mention the estimated-vs-actual cost difference, describe it neutrally as a forecast-vs-actual
+   variance (possible causes: cost-model conservatism OR deferred maintenance) — do NOT label it "underspend"
+   or "savings", and do not recommend budget cuts on the basis of the gap alone.
+   Frame management actions within the three-layer compliance model (statutory Factories Ordinance →
+   OEM intervals → ISO 55000/55001 + SMRP predictive standards), noting that the strictest applicable trigger
+   binds. Provide the top 3 recommended actions grounded in KB thresholds, with specific numbers, and reflect
+   ISO 55001 whole-lifecycle-cost thinking in the financial position and ticket resolution performance.
 
 STRICT RULES:
 - Use ONLY numbers from the provided data context. Never invent or estimate.
+- Do NOT compute, derive, or estimate any percentage, ratio, or delta yourself. Only state a
+  percentage/ratio if it is explicitly present in the data context. If one is not provided, describe
+  the underlying counts instead (e.g. "318 of 1,156 assets" rather than an invented percentage).
+- "Critical" assets means the Critical band (<50% health) count ONLY. Do NOT merge it with the
+  At-Risk (<60% health) count or report a blended figure — they are distinct numbers.
+- A ratio of a part to a whole can never exceed 100%. Never state a coverage/ratio above 100%.
 - Reference KB standards (ISO 55000, SMRP) naturally when the data warrants it.
 - Do NOT include markdown, backticks, bullet points, or extra text outside the JSON.
 - Each section must be a single flowing paragraph (no sub-headings inside values).
 - KB context is grounding information — cite it when making threshold-based observations.
 """
+
+
+_TREND_UP   = r"(rising|increas|upward|climb|grew|grow|higher|trend\w*\s+up)"
+_TREND_DOWN = r"(falling|decreas|declin|downward|drop|lower|reduc|trend\w*\s+down)"
+
+
+def _guard_narrative(ai_sections: dict, ctx: dict) -> dict:
+    """
+    Deterministic faithfulness guard over the generated narrative.
+
+    1. Appends an AUTHORITATIVE, data-grounded trend sentence (true directions for
+       maintenance events, maintenance cost and tickets) so the reader always has
+       ground truth even if the prose drifts.
+    2. Detects a cost-direction contradiction in the prose (claims cost up while the
+       data falls, or vice-versa) and prefixes the note with "Correction —".
+    3. If the maintenance history is concentrated in one month (demo/seed data),
+       states that the month-over-month change is an artifact and must NOT be read
+       as efficiency.
+    """
+    evt_dir  = ctx.get("maintenance_trend_direction", "n/a")
+    cost_dir = ctx.get("cost_trend_direction", "n/a")
+    tkt_dir  = ctx.get("ticket_trend_direction", "n/a")
+    concentrated = bool(ctx.get("maintenance_data_concentrated"))
+    period = ctx.get("period", "the period")
+
+    pat = (ai_sections.get("pattern_and_trend") or "").strip()
+    scan = (pat + " " + (ai_sections.get("conclusion") or "")).lower()
+
+    # Bind the direction word to "cost" (within a short window) so an unrelated
+    # "decreasing ticket volume" elsewhere doesn't mask a wrong cost claim.
+    contradiction = False
+    if "cost" in scan and cost_dir in ("increasing", "decreasing"):
+        cost_up = (re.search(r"cost\w*[^.]{0,40}" + _TREND_UP, scan) is not None
+                   or re.search(_TREND_UP + r"[^.]{0,25}cost", scan) is not None)
+        cost_down = (re.search(r"cost\w*[^.]{0,40}" + _TREND_DOWN, scan) is not None
+                     or re.search(_TREND_DOWN + r"[^.]{0,25}cost", scan) is not None)
+        if cost_dir == "decreasing" and cost_up and not cost_down:
+            contradiction = True
+        elif cost_dir == "increasing" and cost_down and not cost_up:
+            contradiction = True
+
+    note = (
+        f"Data-grounded trend ({period}): maintenance event volume is {evt_dir}, maintenance cost is "
+        f"{cost_dir}, and support-ticket volume is {tkt_dir}. Maintenance events and tickets are separate "
+        f"series and must not be used interchangeably."
+    )
+    if concentrated:
+        note += (
+            " The maintenance history is concentrated in a single month (demonstration data), so these "
+            "month-over-month changes are a data-loading artifact and do not indicate improved operational efficiency."
+        )
+    if contradiction:
+        note = "Correction — " + note
+
+    sep = "" if (not pat or pat.endswith((" ", "\n"))) else " "
+    ai_sections["pattern_and_trend"] = (pat + sep + note).strip()
+    return ai_sections
 
 
 def run_warehouse_agent(db: Session) -> dict:
@@ -544,18 +893,11 @@ def run_warehouse_agent(db: Session) -> dict:
 
     # ── Step 2: KB Vector Store retrieval ─────────────────────
     kb_store = get_kb_store()
-    # Retrieve KB chunks relevant to the 5 report sections
-    kb_chunks = {
-        "fleet":       kb_store.get_all_text_for_section("fleet asset health overview critical rate benchmark"),
-        "risk":        kb_store.get_all_text_for_section("shap failure drivers brake hydraulic engine hours coolant threshold"),
-        "maintenance": kb_store.get_all_text_for_section("preventive maintenance pm ratio service interval cost downtime"),
-        "tickets":     kb_store.get_all_text_for_section("ticket priority electrical mechanical fault code escalation"),
-        "conclusion":  kb_store.get_all_text_for_section("recommendations action urgency critical high priority"),
-    }
-    kb_full_context = "\n\n".join([
-        f"=== KB Context for {section.title()} ===\n{text}"
-        for section, text in kb_chunks.items() if text
-    ])
+    # Inject the FULL source-grouped KB. The curated corpus (26 chunks spanning
+    # statutory law, OEM schedules, ISO 55000/55001, SMRP, FMEA and Colombo climate)
+    # is small enough to inject completely, guaranteeing no standard is dropped by
+    # top-k retrieval — the strongest lever for grounded, high-quality report prose.
+    kb_full_context = kb_store.build_full_kb_context()
 
     # ── Step 3: KB Annotations (deterministic — no LLM) ───────
     shap_enriched     = annotate_shap_features(ctx.get("top_shap_features", []))
@@ -564,14 +906,23 @@ def run_warehouse_agent(db: Session) -> dict:
     ticket_cat_kb     = get_ticket_category_kb(ctx.get("ticket_category_breakdown", {}))
     recommendations   = generate_recommendations(ctx)
     service_interval  = get_service_interval_kb_text()
+    oem_intervals     = get_oem_interval_reference()
+    statutory_compliance = get_statutory_compliance_reference()
+    fmea_criticality  = rank_fmea_criticality(ctx.get("critical_assets", []))
+    climate_risk      = get_climate_risk_flags(ctx)
 
     kb_annotations = {
-        "shap_enriched":        shap_enriched,
-        "health_bands_kb":      health_bands_kb,
-        "benchmark_alerts":     benchmark_alerts,
-        "ticket_category_kb":   ticket_cat_kb,
-        "recommendations":      recommendations,
+        "shap_enriched":         shap_enriched,
+        "health_bands_kb":       health_bands_kb,
+        "benchmark_alerts":      benchmark_alerts,
+        "ticket_category_kb":    ticket_cat_kb,
+        "recommendations":       recommendations,
         "service_interval_text": service_interval,
+        # ── Enhanced deterministic, PDF-ready tables (grounded, no LLM) ──
+        "oem_intervals":         oem_intervals,          # Toyota/Tata OEM tier tables
+        "statutory_compliance":  statutory_compliance,   # Factories Ordinance 1942 intervals
+        "fmea_criticality":      fmea_criticality,       # severity × occurrence ranking of critical assets
+        "climate_risk":          climate_risk,           # Colombo climate-driven flags
     }
 
     # ── Step 4: LLM call with KB-grounded prompt ───────────────
@@ -609,6 +960,12 @@ def run_warehouse_agent(db: Session) -> dict:
         else:
             ai_sections = {"insight_summary": content, "risk_analysis": "",
                            "maintenance_intelligence": "", "pattern_and_trend": "", "conclusion": ""}
+
+    # Faithfulness guard: append authoritative, data-grounded trend facts to the
+    # narrative and flag any LLM trend claim that contradicts the computed directions
+    # (e.g. "costs trending upwards" while cost data falls, or attributing an
+    # artifactual decline to "efficiency"). Prevents those errors standing in the PDF.
+    ai_sections = _guard_narrative(ai_sections, ctx)
 
     return {
         "ai_sections":    ai_sections,
