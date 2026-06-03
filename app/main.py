@@ -1,48 +1,4 @@
-"""PredictiX API — FastAPI application entry point.
-
-API surface (grouped by domain):
-
-    Auth, Users & Profiles
-        /auth                                 — login, token test
-        /profiles                             — admin profile CRUD + /profiles/me self-service
-        /users                                — admin user-management CRUD (UserItemOut shape)
-
-    Organisation
-        /warehouses
-        /departments
-
-    Assets & Maintenance
-        /assets                               — asset CRUD, search, assignment, status
-        /asset-assignments
-        /asset-status-history
-        /asset-documents
-        /asset-summaries                      — AI-generated summaries
-        /maintenance                          — maintenance events CRUD
-        /sensor-readings
-
-    Tickets
-        /tickets
-        /ticket-comments
-        /ticket-attachments
-        /ticket-status-history
-
-    Predictions & ML
-        /predictions                          — classification, regression, health, full pipeline
-        /vehicle-predictions
-        /prediction-explanations
-        /model-registry
-        /warehouse-dashboard
-
-    Notifications & Reports
-        /notifications                        — per-user notification feed
-        /notification-preferences
-        /reports                              — generated reports
-        /report-sources
-
-    Diagnostics
-        /                                     — health/root
-        /debug                                — DB inspection helpers
-"""
+"""PredictiX API — FastAPI application entry point."""
 from __future__ import annotations
 
 import logging
@@ -85,10 +41,17 @@ from .routers.vehicle_predictions import router as vehicle_predictions_router
 from .routers.warehouse_dashboard import warehouse_dashboard_router
 from .routers.warehouses import router as warehouses_router
 
+# Sharada — user-role self-service profile (/user-profile)
+from .routers.user_profile import router as user_profile_router
+# Sharada — user-role ticket section (/user/tickets)
+from .routers.user_tickets import router as user_tickets_router
+# Sharada — FRSO warehouse-level survival predictions (/survival/*)
+from .routers.survival_predictions import router as survival_predictions_router
+
 # ─── ML warmup ────────────────────────────────────────────────────────────────
 from app.ai.services.asset_summary_service import warmup_asset_summary_model
 from app.ai.services.ticket_categorization_service import warmup_ticket_categorizer
-from app.ai.services.ticket_priority_service import warmup_priority_model
+from app.ai.services.ticket_priority_service import warmup_ticket_priority
 
 log = logging.getLogger("predictix")
 
@@ -100,7 +63,6 @@ CLF_FEATURES_PATH = MODEL_DIR / "pdm_classifier_model" / "maintenance_classifier
 REG_MODEL_PATH    = MODEL_DIR / "pdm_regressor_model"  / "days_until_next_maintenance_regressor.pkl"
 REG_FEATURES_PATH = MODEL_DIR / "pdm_regressor_model"  / "regression_selected_features.pkl"
 
-# Module-level cache for loaded ML artefacts. Populated by lifespan.
 clf_model = None
 clf_features = None
 reg_model = None
@@ -151,12 +113,6 @@ async def lifespan(_: FastAPI):
     else:
         log.info("HuggingFace models disabled (DISABLE_HF_MODELS=true). Skipping warmup.")
 
-    try:
-        warmup_priority_model()
-        print("Ticket priority model loaded successfully from Hugging Face.")
-    except Exception as e:
-        print(f"WARNING: Ticket priority model loading failed (endpoint will return 503): {e}")
-
     yield
     log.info("Shutting down PredictiX API.")
 
@@ -179,12 +135,11 @@ app.add_middleware(
 )
 
 # ─── Router registration ──────────────────────────────────────────────────────
-# Grouped by domain to match the surface documented in the module docstring.
-
 # Auth, users & profiles
 app.include_router(auth_router)
 app.include_router(profiles_router)
 app.include_router(users_router)
+app.include_router(user_profile_router)        # Sharada — user-role profile
 
 # Organisation
 app.include_router(warehouses_router)
@@ -204,6 +159,7 @@ app.include_router(tickets_router)
 app.include_router(ticket_comments_router)
 app.include_router(ticket_attachments_router)
 app.include_router(ticket_status_history_router)
+app.include_router(user_tickets_router)        # Sharada — user-role ticket section
 
 # Predictions & ML
 app.include_router(predictions_router)
@@ -211,6 +167,7 @@ app.include_router(vehicle_predictions_router)
 app.include_router(prediction_explanations_router)
 app.include_router(model_registry_router)
 app.include_router(warehouse_dashboard_router)
+app.include_router(survival_predictions_router)  # Sharada — FRSO survival predictions
 app.include_router(admin_dashboard_router)
 
 # Notifications & reports

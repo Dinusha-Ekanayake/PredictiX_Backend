@@ -1,27 +1,53 @@
 """
 AI Services module for PredictiX API.
-Exports common AI service functions and utilities.
+
+All four services call the HuggingFace Inference API directly over HTTP
+(see ``_hf_inference.py``). No model weights are downloaded locally.
 """
 
 from app.ai.services.asset_summary_service import (
     generate_asset_summary,
     get_asset_summary_model,
+    get_asset_summary_repo,
     warmup_asset_summary_model,
 )
 
 from app.ai.services.ticket_categorization_service import (
     categorize_ticket_text,
-    get_ticket_categorizer_model,
-    get_ticket_categorizer_tokenizer,
+    get_ticket_categorizer_repo,
     warmup_ticket_categorizer,
 )
 
+from app.ai.services.ticket_priority_service import (
+    get_ticket_priority_repo,
+    predict_ticket_priority,
+    warmup_ticket_priority,
+)
+
+from app.ai.services.ticket_summary_service import (
+    build_ticket_summary_input,
+    generate_ticket_summary,
+    get_ticket_summary_repo,
+    warmup_ticket_summary_model,
+)
+
 __all__ = [
+    # Asset summary
     "generate_asset_summary",
     "get_asset_summary_model",
+    "get_asset_summary_repo",
     "warmup_asset_summary_model",
+    # Ticket categorization
     "categorize_ticket_text",
-    "get_ticket_categorizer_model",
-    "get_ticket_categorizer_tokenizer",
+    "get_ticket_categorizer_repo",
     "warmup_ticket_categorizer",
+    # Ticket priority (user-tickets section)
+    "predict_ticket_priority",
+    "get_ticket_priority_repo",
+    "warmup_ticket_priority",
+    # Ticket summary (user-tickets section)
+    "generate_ticket_summary",
+    "build_ticket_summary_input",
+    "get_ticket_summary_repo",
+    "warmup_ticket_summary_model",
 ]
