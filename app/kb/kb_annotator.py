@@ -11,6 +11,8 @@ in kb_documents.py.
 
 from __future__ import annotations
 
+import re
+
 from .kb_documents import (
     SHAP_KB_MAP,
     HEALTH_BAND_KB,
@@ -18,10 +20,32 @@ from .kb_documents import (
     TICKET_CATEGORY_KB,
     SERVICE_INTERVAL_SUMMARY,
     SERVICE_INTERVALS,
+    OEM_SERVICE_TIERS,
+    STATUTORY_INSPECTION_INTERVALS,
+    FMEA_SEVERITY_BY_TYPE,
+    DEFAULT_FMEA_SEVERITY,
 )
 
 
 # ── SHAP Annotation ────────────────────────────────────────────
+
+def _canon_feature(name: str) -> str:
+    """
+    Canonicalise a SHAP feature name so model column names (which carry unit
+    suffixes like 'Pct' or 'C', e.g. 'Brake Health Pct', 'Coolant Temp Max C')
+    match the KB map keys (e.g. 'brake health', 'coolant temp max').
+    """
+    s = (name or "").lower().strip()
+    s = s.replace("(°c)", "").replace("°c", "").replace("(%)", "").replace("%", "")
+    s = s.replace("_", " ")
+    s = re.sub(r"\b(pct|c)\b", "", s)   # drop trailing unit tokens
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+# Pre-normalised KB index so unit-suffixed feature names still resolve.
+_SHAP_KB_CANON: dict[str, dict] = {_canon_feature(k): v for k, v in SHAP_KB_MAP.items()}
+
 
 def annotate_shap_features(top_shap_features: list) -> list[dict]:
     """
@@ -39,8 +63,13 @@ def annotate_shap_features(top_shap_features: list) -> list[dict]:
     for feat, score in top_shap_features:
         # Normalise key: lowercase, strip whitespace
         lookup_key = feat.lower().strip()
-        # Try exact match first, then underscore variant
-        kb = SHAP_KB_MAP.get(lookup_key) or SHAP_KB_MAP.get(lookup_key.replace(" ", "_")) or {}
+        # Exact match → underscore variant → canonical (unit-suffix-tolerant) match
+        kb = (
+            SHAP_KB_MAP.get(lookup_key)
+            or SHAP_KB_MAP.get(lookup_key.replace(" ", "_"))
+            or _SHAP_KB_CANON.get(_canon_feature(feat))
+            or {}
+        )
 
         impact_pct = round((score / total) * 100, 1)
 
@@ -112,26 +141,48 @@ def compute_benchmark_alerts(ctx: dict) -> list[dict]:
     total_assets = max(ctx.get("total_assets", 1), 1)
 
     # 1. Critical rate benchmark (ISO 55000 / SMRP: <5%)
-    at_risk = ctx.get("at_risk_count", 0)
-    critical_pct = round((at_risk / total_assets) * 100, 1)
+    # Use the Critical band (<50% health) consistently — the same figure shown on the
+    # "Critical Assets" KPI card — so the narrative and the card never disagree.
+    # (Previously this used at_risk_count (<60%) while labelling it "critical", which
+    # produced a higher percentage than the card/prose.)
+    critical_count = ctx.get("critical_count", 0)
+    at_risk_count = ctx.get("at_risk_count", 0)
+    critical_pct = round((critical_count / total_assets) * 100, 1)
     target = BENCHMARKS["critical_rate_target_pct"]
     if critical_pct > target:
         gap = round(critical_pct - target, 1)
-        pm_count = ctx.get("total_maintenance_events_3m", 0)
+
+        # Real preventive-maintenance ratio = preventive events / all events.
+        # (Previously this divided assets-due-soon by historical event count — two
+        # unrelated quantities — which is dimensionless and can exceed 100%.)
+        mtb = {str(k).lower(): v for k, v in (ctx.get("maintenance_type_breakdown") or {}).items()}
+        preventive_events = mtb.get("preventive", 0) + mtb.get("scheduled", 0)
+        total_events = sum(mtb.values()) or ctx.get("total_maintenance_events_3m", 0)
+        pm_ratio = round(min(preventive_events / total_events * 100, 100.0), 1) if total_events else None
+        if pm_ratio is not None:
+            aligns = pm_ratio >= 90
+            pm_text = (
+                f" The fleet's preventive maintenance ratio is {pm_ratio}% "
+                f"({total_events} events), {'which aligns with' if aligns else 'which is below'} "
+                f"the best-practice target of ≥90% PM coverage."
+            )
+        else:
+            pm_text = " Preventive maintenance ratio is unavailable for the current period."
+
         alerts.append({
             "type": "BENCHMARK",
             "message": (
-                f"Industry standards (ISO 55000 / SMRP Best Practices) target fewer than 5% of a fleet "
-                f"in critical condition. At {critical_pct}%, PredictiX is currently "
+                f"Industry standards (ISO 55000 / SMRP Best Practices) target fewer than "
+                f"{target:g}% of a fleet in critical condition (<50% health). At {critical_pct}% "
+                f"({critical_count} of {total_assets} assets), PredictiX is currently "
                 f"{gap} percentage points above the benchmark, signalling an elevated collective "
-                f"failure risk. The fleet's preventive maintenance ratio is strong at "
-                f"{round((ctx.get('soon_maintenance_count', pm_count) / max(pm_count, 1)) * 100, 1) if pm_count else 'N/A'}% "
-                f"({ctx.get('total_maintenance_events_3m', 0)} events), which aligns with best-practice "
-                f"targets of ≥90% PM coverage."
+                f"failure risk; a further {at_risk_count} assets are at-risk (<60% health)."
+                f"{pm_text}"
             ),
         })
 
-    # 2. High-priority ticket threshold (KB: ≤40%)
+    # 2. High-priority ticket threshold (KB: ≤40% of ACTIVE tickets)
+    # Denominator is active tickets (open + in-progress); wording matches the math.
     active_tickets = max(ctx.get("active_tickets", 0), 1)
     hp_tickets = ctx.get("high_priority_active_tickets", 0)
     hp_pct = round((hp_tickets / active_tickets) * 100, 1) if active_tickets else 0
@@ -140,8 +191,9 @@ def compute_benchmark_alerts(ctx: dict) -> list[dict]:
         alerts.append({
             "type": "HIGH_ALERT",
             "message": (
-                f"{hp_pct}% of open tickets are High-priority — exceeds the threshold of 40% "
-                f"indicating systemic maintenance backlog or recurring failure modes."
+                f"{hp_pct}% of active tickets ({hp_tickets} of {active_tickets}) are High-priority — "
+                f"exceeds the {threshold:g}% threshold, indicating systemic maintenance backlog "
+                f"or recurring failure modes."
             ),
         })
 
@@ -188,7 +240,8 @@ def generate_recommendations(ctx: dict) -> dict:
     hp_tickets       = ctx.get("high_priority_active_tickets", 0)
     active_tickets   = ctx.get("active_tickets", 0)
     total_assets     = max(ctx.get("total_assets", 1), 1)
-    critical_pct     = round((at_risk_count / total_assets) * 100, 1)
+    # "critical %" must use the Critical band (<50%), matching the card and benchmark box.
+    critical_pct     = round((critical_count / total_assets) * 100, 1)
 
     # Count forklifts from asset_type_breakdown if available
     abt = ctx.get("asset_type_breakdown", {})
@@ -242,8 +295,9 @@ def generate_recommendations(ctx: dict) -> dict:
         ],
         "kb_alert": (
             f"With {round((ctx.get('high_priority_active_tickets', 0) / max(ctx.get('active_tickets', 1), 1)) * 100, 1)}% "
-            f"of open tickets classified High-priority, the current queue exceeds the warning "
-            f"threshold of 40%. Immediate load-balancing of the workforce is required."
+            f"of active tickets ({ctx.get('high_priority_active_tickets', 0)} of {ctx.get('active_tickets', 0)}) "
+            f"classified High-priority, the current queue exceeds the warning threshold of 40%. "
+            f"Immediate load-balancing of the workforce is required."
         ),
     }
 
@@ -259,3 +313,127 @@ def get_service_interval_for_type(asset_type: str) -> str:
     """Look up service interval for a specific asset type."""
     key = asset_type.lower().strip()
     return SERVICE_INTERVALS.get(key, "Every 90 days or manufacturer-specified mileage")
+
+
+# ── OEM Interval Reference (deterministic PDF table) ──────────────
+
+def get_oem_interval_reference() -> list[dict]:
+    """
+    Return OEM periodic-maintenance tiers grouped by asset class for direct
+    PDF rendering. Grounded in Toyota and Tata OEM schedules.
+    """
+    return [
+        {"asset_class": cls.title(), "source": spec["source"], "tiers": spec["tiers"]}
+        for cls, spec in OEM_SERVICE_TIERS.items()
+    ]
+
+
+# ── Statutory Compliance Reference (deterministic PDF table) ──────
+
+def get_statutory_compliance_reference() -> list[dict]:
+    """
+    Return the legally binding Sri Lanka Factories Ordinance inspection
+    intervals for lifting equipment, ready for PDF rendering.
+    """
+    return [dict(row) for row in STATUTORY_INSPECTION_INTERVALS]
+
+
+# ── FMEA Criticality Ranking (deterministic PDF table) ────────────
+
+def rank_fmea_criticality(critical_assets: list[dict]) -> list[dict]:
+    """
+    Rank critical assets by FMECA-style criticality = severity × occurrence.
+
+    - severity: from FMEA_SEVERITY_BY_TYPE (asset-type consequence weight, 1-10)
+    - occurrence: the asset's failure probability (0-10 scaled), with health
+      deficit (100 - health_score) as fallback when probability is unavailable.
+
+    Returns the list sorted by criticality desc, each with severity, occurrence,
+    criticality score, and a band (Ground Now / Service ≤7d / Monitor).
+    """
+    ranked: list[dict] = []
+
+    for a in critical_assets or []:
+        a_type = str(a.get("type", "")).lower().strip()
+        severity = DEFAULT_FMEA_SEVERITY
+        for key, weight in FMEA_SEVERITY_BY_TYPE.items():
+            if key in a_type:
+                severity = weight
+                break
+
+        # occurrence (0-10): prefer failure probability, else health deficit
+        prob_raw = a.get("failure_prob")
+        occ_pct = None
+        if isinstance(prob_raw, str) and prob_raw.endswith("%"):
+            try:
+                occ_pct = float(prob_raw.rstrip("%"))
+            except ValueError:
+                occ_pct = None
+        if occ_pct is None:
+            health = a.get("health_score")
+            occ_pct = (100 - float(health)) if health is not None else 50.0
+        occurrence = round(min(max(occ_pct, 0.0), 100.0) / 10.0, 1)  # → 0-10
+
+        criticality = round(severity * occurrence, 1)  # 0-100
+        if criticality >= 60:
+            band = "Ground Now"
+        elif criticality >= 35:
+            band = "Service ≤7 days"
+        else:
+            band = "Monitor / schedule"
+
+        ranked.append({
+            "code":        a.get("code"),
+            "name":        a.get("name"),
+            "type":        a.get("type"),
+            "health":      a.get("health"),
+            "severity":    severity,
+            "occurrence":  occurrence,
+            "criticality": criticality,
+            "band":        band,
+            "rationale": (
+                f"Severity {severity}/10 ({a.get('type', 'asset')}) × occurrence {occurrence}/10 "
+                f"(failure signal) = criticality {criticality}/100"
+            ),
+        })
+
+    ranked.sort(key=lambda x: -x["criticality"])
+    return ranked
+
+
+# ── Colombo Climate Risk Flags (deterministic PDF callouts) ───────
+
+def get_climate_risk_flags(ctx: dict) -> list[dict]:
+    """
+    Map the Colombo climate-vulnerability profile onto live component-health
+    data, producing flagged risks for the PDF when thresholds are breached.
+    Grounded in the Colombo WCT-1 Climate Adaptation Plan (2023).
+    """
+    comp = ctx.get("component_health", {}) or {}
+    flags: list[dict] = []
+
+    avg_battery = comp.get("avg_battery")
+    if avg_battery is not None and avg_battery < 60:
+        flags.append({
+            "driver": "Heat & humidity → battery degradation",
+            "metric": f"Fleet avg battery health {avg_battery}%",
+            "action": "Increase battery checks for electric forklifts during hot/monsoon months",
+        })
+
+    avg_oil = comp.get("avg_oil")
+    avg_hyd = comp.get("avg_hydraulic")
+    if avg_hyd is not None and avg_hyd < 60:
+        flags.append({
+            "driver": "Wet-season corrosion → hydraulic/seal integrity",
+            "metric": f"Fleet avg hydraulic health {avg_hyd}%",
+            "action": "Add monsoon hydraulic seal & fluid inspections",
+        })
+
+    # Coolant exposure is elevated by Colombo ambient heat regardless of averages
+    flags.append({
+        "driver": "Rising ambient temperature → coolant exceedance (>95°C)",
+        "metric": "Colombo projected temperature increase (WCT-1 plan)",
+        "action": "Automated coolant-temperature alerting in hot months",
+    })
+
+    return flags
