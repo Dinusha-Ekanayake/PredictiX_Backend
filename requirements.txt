@@ -18,6 +18,8 @@ catboost
 shap
 supabase
 xgboost
+lifelines
+joblib
 
 transformers
 torch
