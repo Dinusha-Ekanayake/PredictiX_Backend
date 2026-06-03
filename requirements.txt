@@ -18,8 +18,13 @@ catboost
 shap
 supabase
 xgboost
+lifelines
+joblib
 
 transformers
 torch
 huggingface_hub
 safetensors
+groq
+nltk
+sentence-transformers
