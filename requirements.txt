@@ -1,31 +1,33 @@
-sqlalchemy
-alembic
-psycopg[binary]
-python-jose
-passlib[bcrypt]
-pydantic-settings
+# ── Core API ──────────────────────────────────────────────────────────────────
+fastapi
+uvicorn[standard]
 python-multipart
+pydantic-settings
+python-jose[cryptography]
 
+# ── Auth ──────────────────────────────────────────────────────────────────────
 passlib==1.7.4
 bcrypt==4.1.2
 
-fastapi
-uvicorn
+# ── Database ──────────────────────────────────────────────────────────────────
+sqlalchemy
+alembic
+psycopg[binary]
+supabase
+
+# ── ML / PDM models ───────────────────────────────────────────────────────────
 pandas
 numpy
 scikit-learn
-catboost
-shap
-supabase
 xgboost
+catboost
 lifelines
 joblib
+shap
+
+# ── Scheduler ─────────────────────────────────────────────────────────────────
 apscheduler>=3.10
 
-transformers
-torch
-huggingface_hub
-safetensors
+# ── LLM / external APIs ───────────────────────────────────────────────────────
 groq
 nltk
-sentence-transformers
