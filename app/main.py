@@ -166,14 +166,17 @@ async def lifespan(_: FastAPI):
     scheduler.start()
     log.info("PDM batch scheduler started — interval=%dh", batch_interval_hours)
 
-    # Run immediately on startup so predictions are ready from the first page load
+    # Signal Uvicorn to bind port and start serving traffic
+    yield
+
+    # Run immediately on startup so predictions are ready from the first page load.
+    # We do this AFTER yield so Uvicorn can pass Railway healthchecks immediately
+    # before we start the CPU-heavy pandas/XGBoost operations.
     if os.getenv("BATCH_RUN_ON_STARTUP", "true").lower() == "true":
         import threading
         t = threading.Thread(target=_run_scheduled_batch, daemon=True, name="pdm_batch_startup")
         t.start()
         log.info("PDM batch startup run launched in background thread")
-
-    yield
 
     # ── Graceful shutdown ──────────────────────────────────────────────────────
     if scheduler and scheduler.running:
