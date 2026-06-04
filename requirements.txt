@@ -12,7 +12,7 @@ bcrypt==4.1.2
 # ── Database ──────────────────────────────────────────────────────────────────
 sqlalchemy
 alembic
-psycopg[binary]
+psycopg2-binary
 supabase
 
 # ── ML / PDM models ───────────────────────────────────────────────────────────
