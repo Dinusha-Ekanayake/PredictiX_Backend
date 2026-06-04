@@ -31,3 +31,6 @@ apscheduler>=3.10
 # ── LLM / external APIs ───────────────────────────────────────────────────────
 groq
 nltk
+requests
+langchain-groq
+langchain-core
