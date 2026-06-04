@@ -4,6 +4,7 @@ uvicorn[standard]
 python-multipart
 pydantic-settings
 python-jose[cryptography]
+email-validator
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 passlib==1.7.4
