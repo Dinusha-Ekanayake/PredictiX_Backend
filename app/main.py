@@ -9,6 +9,7 @@ import warnings
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -42,6 +43,7 @@ from .routers.users import router as users_router
 from .routers.vehicle_predictions import router as vehicle_predictions_router
 from .routers.warehouse_dashboard import warehouse_dashboard_router
 from .routers.warehouses import router as warehouses_router
+from .routers.batch_predictions import router as batch_predictions_router
 
 # Sharada — user-role self-service profile (/user-profile)
 from .routers.user_profile import router as user_profile_router
@@ -78,10 +80,33 @@ def _load_pickle(path: Path):
         return pickle.load(fh)
 
 
+scheduler: BackgroundScheduler | None = None
+
+
+def _run_scheduled_batch() -> None:
+    """Scheduled job — runs the full PDM batch in a fresh DB session."""
+    from app.db.session import SessionLocal
+    from app.ai.services.batch_prediction_service import run_batch_for_all_assets
+
+    db = SessionLocal()
+    try:
+        run_batch_for_all_assets(
+            db=db,
+            clf_model=clf_model,
+            clf_features=clf_features,
+            clf_threshold=clf_threshold,
+            clf_categorical_cols=clf_categorical_cols,
+            reg_model=reg_model,
+            reg_features=reg_features,
+        )
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    """Load PdM models on startup; optionally warm Hugging Face models."""
-    global clf_model, clf_features, clf_threshold, clf_categorical_cols, reg_model, reg_features
+    """Load PdM models on startup; start hourly batch scheduler; optionally warm HF models."""
+    global clf_model, clf_features, clf_threshold, clf_categorical_cols, reg_model, reg_features, scheduler
 
     try:
         # ── Classifier: v6 XGBoost bundle (pickle dict) ────────────────────────
@@ -127,7 +152,33 @@ async def lifespan(_: FastAPI):
     else:
         log.info("HuggingFace models disabled (DISABLE_HF_MODELS=true). Skipping warmup.")
 
+    # ── Hourly batch PDM scheduler ─────────────────────────────────────────────
+    batch_interval_hours = int(os.getenv("BATCH_INTERVAL_HOURS", "1"))
+    scheduler = BackgroundScheduler(daemon=True)
+    scheduler.add_job(
+        _run_scheduled_batch,
+        trigger="interval",
+        hours=batch_interval_hours,
+        id="pdm_batch",
+        name="PDM hourly batch prediction",
+        replace_existing=True,
+    )
+    scheduler.start()
+    log.info("PDM batch scheduler started — interval=%dh", batch_interval_hours)
+
+    # Run immediately on startup so predictions are ready from the first page load
+    if os.getenv("BATCH_RUN_ON_STARTUP", "true").lower() == "true":
+        import threading
+        t = threading.Thread(target=_run_scheduled_batch, daemon=True, name="pdm_batch_startup")
+        t.start()
+        log.info("PDM batch startup run launched in background thread")
+
     yield
+
+    # ── Graceful shutdown ──────────────────────────────────────────────────────
+    if scheduler and scheduler.running:
+        scheduler.shutdown(wait=False)
+        log.info("PDM batch scheduler stopped.")
     log.info("Shutting down PredictiX API.")
 
 
@@ -178,6 +229,7 @@ app.include_router(user_tickets_router)        # Sharada — user-role ticket se
 # Predictions & ML
 app.include_router(predictions_router)
 app.include_router(vehicle_predictions_router)
+app.include_router(batch_predictions_router)       # hourly cached predictions
 app.include_router(prediction_explanations_router)
 app.include_router(model_registry_router)
 app.include_router(warehouse_dashboard_router)
