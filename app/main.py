@@ -184,16 +184,25 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="PredictiX API", version="1.0", lifespan=lifespan)
 
+# ── CORS ──────────────────────────────────────────────────────────────────────
+# ALLOWED_ORIGINS env var: comma-separated list of allowed origins.
+# Set this in Railway dashboard to your frontend URL(s).
+# Example: https://predictix.vercel.app,https://predictix.netlify.app
+_default_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+_env_origins = os.getenv("ALLOWED_ORIGINS", "")
+_extra_origins = [o.strip() for o in _env_origins.split(",") if o.strip()]
+_allowed_origins = list(set(_default_origins + _extra_origins))
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3001",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
