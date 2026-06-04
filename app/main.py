@@ -1,9 +1,11 @@
 """PredictiX API — FastAPI application entry point."""
 from __future__ import annotations
 
+import joblib
 import logging
 import os
 import pickle
+import warnings
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -58,15 +60,17 @@ log = logging.getLogger("predictix")
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_DIR = BASE_DIR / "ai" / "models"
 
-CLF_MODEL_PATH    = MODEL_DIR / "pdm_classifier_model" / "predictive_maintenance_model.pkl"
-CLF_FEATURES_PATH = MODEL_DIR / "pdm_classifier_model" / "maintenance_classifier_features.pkl"
-REG_MODEL_PATH    = MODEL_DIR / "pdm_regressor_model"  / "days_until_next_maintenance_regressor.pkl"
-REG_FEATURES_PATH = MODEL_DIR / "pdm_regressor_model"  / "regression_selected_features.pkl"
+# v6 XGBoost classifier — saved as a bundle dict {model, feature_cols, threshold, categorical_cols, ...}
+CLF_BUNDLE_PATH = MODEL_DIR / "pdm_classifier_model" / "predictix_xgboost_classifier_v6.pkl"
+# v5 regressor — saved via joblib as a bundle dict {explainer_model, feature_cols, ...}
+REG_BUNDLE_PATH = MODEL_DIR / "pdm_regressor_model" / "predictix_pm_model_v5.pkl"
 
 clf_model = None
-clf_features = None
+clf_features: list = []
+clf_threshold: float = 0.5
+clf_categorical_cols: list = []
 reg_model = None
-reg_features = None
+reg_features: list = []
 
 
 def _load_pickle(path: Path):
@@ -77,21 +81,31 @@ def _load_pickle(path: Path):
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     """Load PdM models on startup; optionally warm Hugging Face models."""
-    global clf_model, clf_features, reg_model, reg_features
+    global clf_model, clf_features, clf_threshold, clf_categorical_cols, reg_model, reg_features
 
     try:
-        clf_model = _load_pickle(CLF_MODEL_PATH)
-        clf_features = _load_pickle(CLF_FEATURES_PATH)
-        reg_model = _load_pickle(REG_MODEL_PATH)
-        reg_features = _load_pickle(REG_FEATURES_PATH)
+        # ── Classifier: v6 XGBoost bundle (pickle dict) ────────────────────────
+        with open(CLF_BUNDLE_PATH, "rb") as fh:
+            clf_bundle = pickle.load(fh)
+        clf_model            = clf_bundle["model"]
+        clf_features         = clf_bundle["feature_cols"]
+        clf_threshold        = float(clf_bundle.get("threshold", 0.5))
+        clf_categorical_cols = clf_bundle.get("categorical_cols", [])
 
-        if getattr(clf_model, "feature_names_", None):
-            clf_features = list(clf_model.feature_names_)
+        # ── Regressor: v5 joblib bundle ─────────────────────────────────
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            reg_bundle = joblib.load(REG_BUNDLE_PATH)
+        reg_model    = reg_bundle["explainer_model"]   # CatBoost regressor used for prediction
+        reg_features = reg_bundle["feature_cols"]
+        # If the CatBoost model stores feature names itself, prefer those
         if getattr(reg_model, "feature_names_", None):
             reg_features = list(reg_model.feature_names_)
 
-        log.info("PdM models loaded. clf=%d features, reg=%d features",
-                 len(clf_features or []), len(reg_features or []))
+        log.info(
+            "PdM models loaded — clf v6-XGB: %d features (threshold=%.2f), reg v5: %d features",
+            len(clf_features), clf_threshold, len(reg_features),
+        )
     except Exception as exc:
         log.exception("Local PdM model loading failed")
         raise RuntimeError(f"Failed to load local PdM models: {exc}") from exc
