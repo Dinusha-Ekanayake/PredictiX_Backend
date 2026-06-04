@@ -59,13 +59,13 @@ def debug_features():
 
 @router.post("/classification", response_model=ClassificationResponse)
 def classification(payload: PredictionRequest):
-    from app.main import clf_model, clf_features
+    from app.main import clf_model, clf_features, clf_threshold, clf_categorical_cols
 
     if clf_model is None:
         raise HTTPException(status_code=500, detail="Classification model is not loaded")
 
     data = payload.model_dump()
-    return run_classification(data, clf_model, clf_features)
+    return run_classification(data, clf_model, clf_features, clf_threshold, clf_categorical_cols)
 
 
 @router.post("/regression", response_model=RegressionResponse)
@@ -87,7 +87,7 @@ def health_score(payload: PredictionRequest):
 
 @router.post("/full", response_model=FullPredictionResponse)
 def full_prediction(payload: PredictionRequest):
-    from app.main import clf_model, clf_features, reg_model, reg_features
+    from app.main import clf_model, clf_features, clf_threshold, clf_categorical_cols, reg_model, reg_features
 
     if clf_model is None or reg_model is None:
         raise HTTPException(status_code=500, detail="Models are not loaded")
@@ -97,6 +97,8 @@ def full_prediction(payload: PredictionRequest):
         data=data,
         clf_model=clf_model,
         clf_features=clf_features,
+        clf_threshold=clf_threshold,
+        clf_categorical_cols=clf_categorical_cols,
         reg_model=reg_model,
         reg_features=reg_features,
     )
