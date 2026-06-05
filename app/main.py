@@ -81,17 +81,13 @@ def _load_pickle(path: Path):
 
 
 scheduler: BackgroundScheduler | None = None
-
+_model_load_lock = __import__('threading').Lock()
 
 def _run_scheduled_batch() -> None:
     """Scheduled job — runs the full PDM batch in a fresh DB session."""
     from app.db.session import SessionLocal
     from app.ai.services.batch_prediction_service import run_batch_for_all_assets
-    import time
-    
-    # Delay execution slightly if this is the startup run, to let Uvicorn bind the port.
-    time.sleep(5)
-    
+
     _load_pdm_models()
 
     db = SessionLocal()
@@ -105,39 +101,53 @@ def _run_scheduled_batch() -> None:
             reg_model=reg_model,
             reg_features=reg_features,
         )
+    except Exception:
+        log.exception("Batch prediction run failed")
     finally:
         db.close()
 
 
+def _run_startup_batch() -> None:
+    """Startup-only wrapper: waits for Uvicorn to fully bind before running the batch."""
+    import time
+    time.sleep(10)  # Give the server 10s to stabilise before loading 100MB models
+    _run_scheduled_batch()
+
+
 def _load_pdm_models():
-    """Lazily load heavy PdM models to prevent OOM on server boot."""
+    """Lazily load heavy PdM models (thread-safe, idempotent)."""
     global clf_model, clf_features, clf_threshold, clf_categorical_cols, reg_model, reg_features
     if clf_model is not None and reg_model is not None:
         return
 
-    try:
-        with open(CLF_BUNDLE_PATH, "rb") as fh:
-            clf_bundle = pickle.load(fh)
-        clf_model            = clf_bundle["model"]
-        clf_features         = clf_bundle["feature_cols"]
-        clf_threshold        = float(clf_bundle.get("threshold", 0.5))
-        clf_categorical_cols = clf_bundle.get("categorical_cols", [])
+    with _model_load_lock:
+        # Double-check inside the lock (another thread may have loaded while we waited)
+        if clf_model is not None and reg_model is not None:
+            return
+        try:
+            with open(CLF_BUNDLE_PATH, "rb") as fh:
+                clf_bundle = pickle.load(fh)
+            clf_model            = clf_bundle["model"]
+            clf_features         = clf_bundle["feature_cols"]
+            clf_threshold        = float(clf_bundle.get("threshold", 0.5))
+            clf_categorical_cols = clf_bundle.get("categorical_cols", [])
 
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            reg_bundle = joblib.load(REG_BUNDLE_PATH)
-        reg_model    = reg_bundle["explainer_model"]
-        reg_features = reg_bundle["feature_cols"]
-        if getattr(reg_model, "feature_names_", None):
-            reg_features = list(reg_model.feature_names_)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                reg_bundle = joblib.load(REG_BUNDLE_PATH)
+            reg_model    = reg_bundle["explainer_model"]
+            reg_features = reg_bundle["feature_cols"]
+            if getattr(reg_model, "feature_names_", None):
+                reg_features = list(reg_model.feature_names_)
 
-        log.info(
-            "PdM models loaded — clf v6-XGB: %d features (threshold=%.2f), reg v5: %d features",
-            len(clf_features), clf_threshold, len(reg_features),
-        )
-    except Exception as exc:
-        log.exception("Local PdM model loading failed")
-        raise RuntimeError(f"Failed to load local PdM models: {exc}") from exc
+            log.info(
+                "PdM models loaded — clf v6-XGB: %d features (threshold=%.2f), reg v5: %d features",
+                len(clf_features), clf_threshold, len(reg_features),
+            )
+        except Exception as exc:
+            log.exception("Local PdM model loading failed")
+            raise RuntimeError(f"Failed to load local PdM models: {exc}") from exc
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -175,14 +185,12 @@ async def lifespan(_: FastAPI):
     scheduler.start()
     log.info("PDM batch scheduler started — interval=%dh", batch_interval_hours)
 
-    # Run immediately on startup so predictions are ready from the first page load.
-    # We do this BEFORE yield so it actually starts, but the thread itself sleeps 
-    # for 5s first to ensure Uvicorn can bind the port and pass healthchecks.
+    # Optionally trigger a batch run on startup (runs 10s AFTER server is stable)
     if os.getenv("BATCH_RUN_ON_STARTUP", "false").lower() == "true":
         import threading
-        t = threading.Thread(target=_run_scheduled_batch, daemon=True, name="pdm_batch_startup")
+        t = threading.Thread(target=_run_startup_batch, daemon=True, name="pdm_batch_startup")
         t.start()
-        log.info("PDM batch startup run launched in background thread")
+        log.info("PDM batch startup run queued (fires in 10s)")
 
     # Signal Uvicorn to bind port and start serving traffic
     yield
