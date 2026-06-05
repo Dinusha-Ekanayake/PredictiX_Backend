@@ -209,16 +209,21 @@ app = FastAPI(title="PredictiX API", version="1.0", lifespan=lifespan)
 # Set this in Railway dashboard to your frontend URL(s).
 # Example: https://predictix.vercel.app,https://predictix.netlify.app
 _default_origins = [
+    # Local development
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "http://localhost:3001",
     "http://127.0.0.1:3001",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    # Vercel production + preview deployments
+    "https://predicti-x-frontend.vercel.app",
+    "https://predicti-x-frontend-dinusha-ekanayakes-projects.vercel.app",
 ]
 _env_origins = os.getenv("ALLOWED_ORIGINS", "")
 _extra_origins = [o.strip() for o in _env_origins.split(",") if o.strip()]
 _allowed_origins = list(set(_default_origins + _extra_origins))
+
 
 app.add_middleware(
     CORSMiddleware,
