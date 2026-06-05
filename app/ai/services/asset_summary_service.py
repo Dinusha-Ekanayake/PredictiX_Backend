@@ -18,7 +18,6 @@ from functools import lru_cache
 from pathlib import Path
 
 from dotenv import load_dotenv
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
 env_path = Path(__file__).resolve().parent.parent.parent / ".env"
 load_dotenv(dotenv_path=env_path)
@@ -120,6 +119,7 @@ def get_asset_summary_model() -> dict:
     if os.getenv("DISABLE_HF_MODELS", "false").lower() == "true":
         raise RuntimeError("Asset summary model is disabled (DISABLE_HF_MODELS=true).")
 
+    from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
     hf_token, model_repo = get_hf_credentials()
     tokenizer = AutoTokenizer.from_pretrained(model_repo, token=hf_token)
     model = AutoModelForSeq2SeqLM.from_pretrained(model_repo, token=hf_token)
