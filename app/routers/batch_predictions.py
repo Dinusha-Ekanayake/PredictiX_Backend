@@ -91,6 +91,8 @@ def trigger_full_batch(db: Session = Depends(get_db)) -> dict:
     For large fleets this may take a while; consider calling from a cron job
     rather than from a user-facing UI.
     """
+    from app.main import _load_pdm_models
+    _load_pdm_models()
     from app.main import clf_model, clf_features, clf_threshold, clf_categorical_cols, reg_model, reg_features
 
     if clf_model is None or reg_model is None:
@@ -112,6 +114,8 @@ def trigger_full_batch(db: Session = Depends(get_db)) -> dict:
 def trigger_single_asset(asset_id: str, db: Session = Depends(get_db)) -> dict:
     """Re-runs the full PDM pipeline for a single asset and upserts the result.
     Returns the prediction summary."""
+    from app.main import _load_pdm_models
+    _load_pdm_models()
     from app.main import clf_model, clf_features, clf_threshold, clf_categorical_cols, reg_model, reg_features
 
     if clf_model is None or reg_model is None:

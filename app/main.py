@@ -87,6 +87,12 @@ def _run_scheduled_batch() -> None:
     """Scheduled job — runs the full PDM batch in a fresh DB session."""
     from app.db.session import SessionLocal
     from app.ai.services.batch_prediction_service import run_batch_for_all_assets
+    import time
+    
+    # Delay execution slightly if this is the startup run, to let Uvicorn bind the port.
+    time.sleep(5)
+    
+    _load_pdm_models()
 
     db = SessionLocal()
     try:
@@ -103,13 +109,13 @@ def _run_scheduled_batch() -> None:
         db.close()
 
 
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    """Load PdM models on startup; start hourly batch scheduler; optionally warm HF models."""
-    global clf_model, clf_features, clf_threshold, clf_categorical_cols, reg_model, reg_features, scheduler
+def _load_pdm_models():
+    """Lazily load heavy PdM models to prevent OOM on server boot."""
+    global clf_model, clf_features, clf_threshold, clf_categorical_cols, reg_model, reg_features
+    if clf_model is not None and reg_model is not None:
+        return
 
     try:
-        # ── Classifier: v6 XGBoost bundle (pickle dict) ────────────────────────
         with open(CLF_BUNDLE_PATH, "rb") as fh:
             clf_bundle = pickle.load(fh)
         clf_model            = clf_bundle["model"]
@@ -117,13 +123,11 @@ async def lifespan(_: FastAPI):
         clf_threshold        = float(clf_bundle.get("threshold", 0.5))
         clf_categorical_cols = clf_bundle.get("categorical_cols", [])
 
-        # ── Regressor: v5 joblib bundle ─────────────────────────────────
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             reg_bundle = joblib.load(REG_BUNDLE_PATH)
-        reg_model    = reg_bundle["explainer_model"]   # CatBoost regressor used for prediction
+        reg_model    = reg_bundle["explainer_model"]
         reg_features = reg_bundle["feature_cols"]
-        # If the CatBoost model stores feature names itself, prefer those
         if getattr(reg_model, "feature_names_", None):
             reg_features = list(reg_model.feature_names_)
 
@@ -134,6 +138,11 @@ async def lifespan(_: FastAPI):
     except Exception as exc:
         log.exception("Local PdM model loading failed")
         raise RuntimeError(f"Failed to load local PdM models: {exc}") from exc
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Start hourly batch scheduler; optionally warm HF models."""
+    global scheduler
 
     if os.getenv("DISABLE_HF_MODELS", "false").lower() != "true":
         try:
@@ -166,17 +175,17 @@ async def lifespan(_: FastAPI):
     scheduler.start()
     log.info("PDM batch scheduler started — interval=%dh", batch_interval_hours)
 
-    # Signal Uvicorn to bind port and start serving traffic
-    yield
-
     # Run immediately on startup so predictions are ready from the first page load.
-    # We do this AFTER yield so Uvicorn can pass Railway healthchecks immediately
-    # before we start the CPU-heavy pandas/XGBoost operations.
-    if os.getenv("BATCH_RUN_ON_STARTUP", "true").lower() == "true":
+    # We do this BEFORE yield so it actually starts, but the thread itself sleeps 
+    # for 5s first to ensure Uvicorn can bind the port and pass healthchecks.
+    if os.getenv("BATCH_RUN_ON_STARTUP", "false").lower() == "true":
         import threading
         t = threading.Thread(target=_run_scheduled_batch, daemon=True, name="pdm_batch_startup")
         t.start()
         log.info("PDM batch startup run launched in background thread")
+
+    # Signal Uvicorn to bind port and start serving traffic
+    yield
 
     # ── Graceful shutdown ──────────────────────────────────────────────────────
     if scheduler and scheduler.running:
