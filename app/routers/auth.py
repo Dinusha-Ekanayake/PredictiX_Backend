@@ -107,7 +107,7 @@ def _login_with_profile(profile, email: str, password: str, requested_role: str)
 
     user_id = str(profile.id)
     token = _create_token(user_id, email, profile_role)
-    print(f"[LOGIN] ✓ (DB) {email} | role={profile_role} | id={user_id}")
+    print(f"[LOGIN] OK (DB) {email} | role={profile_role} | id={user_id}")
 
     return LoginResponse(
         access_token=token,
