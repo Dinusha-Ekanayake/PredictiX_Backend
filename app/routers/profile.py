@@ -15,10 +15,12 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from sqlalchemy.orm import Session
+import uuid
 
 from app.deps import get_current_user, get_db
+from app.db.supabase_client import supabase
 from app.models import Asset, Department, Profile, Warehouse
 from app.schemas.profile import ProfileOut, ProfileUpdate
 from app.schemas.user_profile import UserProfileUpdate
@@ -110,6 +112,7 @@ def _profile_to_response(user: Profile, db: Optional[Session]) -> dict:
         "role": user.role or "",
         "status": user.status or "",
         "assignedAssetsCount": asset_count,
+        "avatar_url": user.avatar_url,
     }
 
 
@@ -164,6 +167,50 @@ def update_my_profile(
             raise HTTPException(status_code=500, detail="Profile update failed")
 
     return _profile_to_response(current_user, db)
+
+
+@router.post("/me/avatar")
+async def upload_my_avatar(
+    file: UploadFile = File(...),
+    current_user: Profile = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if not db:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    # Basic content type validation
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+
+    try:
+        # Read file content
+        file_bytes = await file.read()
+        
+        # Generate a unique filename using UUID to prevent collisions
+        file_ext = file.filename.split(".")[-1] if "." in file.filename else "png"
+        new_filename = f"{current_user.id}_{uuid.uuid4().hex[:8]}.{file_ext}"
+        
+        # Upload to Supabase Storage bucket 'avatars'
+        # We use a public bucket so the frontend can display it easily
+        res = supabase.storage.from_("avatars").upload(
+            path=new_filename,
+            file=file_bytes,
+            file_options={"content-type": file.content_type}
+        )
+        
+        # Get the public URL
+        public_url = supabase.storage.from_("avatars").get_public_url(new_filename)
+        
+        # Update user's profile
+        current_user.avatar_url = public_url
+        db.commit()
+        db.refresh(current_user)
+        
+        return {"avatar_url": public_url}
+        
+    except Exception as e:
+        log.exception("Failed to upload avatar: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to upload avatar")
 
 
 @router.get("/me/assets")
