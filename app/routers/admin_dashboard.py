@@ -404,18 +404,8 @@ def _build_admin_summary(db: Session):
 
     # ── aiSummary (LLM if available, else a real KPI-derived fallback) ────────
     # Always returns a real, data-grounded string — never null and never blocks.
+    # We skip the synchronous LLM call here because it causes the dashboard to hang for 5-10s on load.
     ai_summary: str | None = None
-    try:
-        from app.agents.report_agents import run_warehouse_agent
-
-        result = run_warehouse_agent(db)
-        ai_summary = (result.get("ai_sections") or {}).get("insight_summary")
-        if ai_summary:
-            ai_summary = str(ai_summary).strip() or None
-    except Exception:
-        # No API key / network / parse error — fall through to the KPI fallback.
-        traceback.print_exc()
-        ai_summary = None
 
     if not ai_summary:
         ai_summary = (
