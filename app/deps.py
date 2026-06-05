@@ -56,22 +56,27 @@ def get_current_user(
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid token")
 
+    active_warehouse_id = payload.get("active_warehouse_id")
+
     from app.models import Profile  # local import to avoid circular deps
 
     if db is not None:
         user = db.query(Profile).filter(Profile.id == user_id).first()
         if user:
+            # Dynamically attach the session's active warehouse
+            setattr(user, "active_warehouse_id", active_warehouse_id)
             return user
 
     return _build_mock_profile(
         user_id=user_id,
         email=payload.get("email", "test@example.com"),
         role=payload.get("role", "user"),
+        active_warehouse_id=active_warehouse_id,
         db=db,
     )
 
 
-def _build_mock_profile(*, user_id: str, email: str, role: str, db: Optional[Session]):
+def _build_mock_profile(*, user_id: str, email: str, role: str, active_warehouse_id: str | None, db: Optional[Session]):
     """Construct a duck-typed Profile when the DB record is missing."""
     from app.models import Department
 
@@ -100,6 +105,7 @@ def _build_mock_profile(*, user_id: str, email: str, role: str, db: Optional[Ses
             self.phone = None
             self.status = "active"
             self.warehouse_id = None
+            self.active_warehouse_id = active_warehouse_id
             self.department_id = department_id
             self.meta = {}
             self.employee_id = f"EMP-{user_id[:8]}"
