@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -27,7 +28,7 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/profiles", tags=["Profiles"])
 
 
-# ─── Admin endpoints ──────────────────────────────────────────────────────────
+# ── Admin list endpoint ───────────────────────────────────────────────────────
 
 @router.get("/", response_model=list[ProfileOut])
 def list_profiles(
@@ -36,6 +37,8 @@ def list_profiles(
     warehouse_id: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
+    if not db:
+        return []
     q = db.query(Profile)
     if role:
         q = q.filter(Profile.role == role)
@@ -46,7 +49,7 @@ def list_profiles(
     return q.order_by(Profile.full_name).all()
 
 
-# ─── Self-service endpoints (/profiles/me) ────────────────────────────────────
+# ── Self-service endpoints (/profiles/me) ────────────────────────────────────
 # NOTE: these literal "/me" routes are defined BEFORE the parametrized
 # "/{profile_id}" routes (at the bottom of this file) so that a request to
 # /profiles/me is not captured by /{profile_id} with profile_id="me".
@@ -56,23 +59,37 @@ def _split_name(full: str | None) -> tuple[str, str]:
     return parts[0] if parts else "", " ".join(parts[1:]) if len(parts) > 1 else ""
 
 
-def _profile_to_response(user: Profile, db: Session) -> dict:
-    """Build the frontend-friendly self-profile shape."""
-    department_name = None
-    if user.department_id:
-        dept = db.query(Department).filter(Department.id == user.department_id).first()
-        department_name = dept.name if dept else None
+def _profile_to_response(user: Profile, db: Optional[Session]) -> dict:
+    """Build the frontend-friendly self-profile shape.
 
-    warehouse_name = None
-    if user.warehouse_id:
-        wh = db.query(Warehouse).filter(Warehouse.id == user.warehouse_id).first()
-        warehouse_name = wh.name if wh else None
+    Works for both 'admin' and 'user' roles.
+    Returns department and warehouse as NAME strings (not IDs).
+    Safe to call even when db is None (returns zeroed counts and null names).
+    """
+    department_name: Optional[str] = None
+    warehouse_name: Optional[str] = None
+    asset_count: int = 0
 
-    asset_count = (
-        db.query(Asset)
-        .filter(Asset.assigned_to == str(user.id), Asset.status == "active")
-        .count()
-    )
+    if db is not None:
+        if user.department_id:
+            dept = db.query(Department).filter(Department.id == user.department_id).first()
+            department_name = dept.name if dept else None
+
+        if user.warehouse_id:
+            wh = db.query(Warehouse).filter(Warehouse.id == user.warehouse_id).first()
+            warehouse_name = wh.name if wh else None
+
+        try:
+            # Asset.assigned_to is a UUID column; compare to user.id directly
+            # (SQLAlchemy handles UUID type coercion correctly)
+            asset_count = (
+                db.query(Asset)
+                .filter(Asset.assigned_to == user.id, Asset.status == "active")
+                .count()
+            )
+        except Exception:
+            log.warning("Could not count assigned assets for user %s", user.id)
+            asset_count = 0
 
     first_name, last_name = _split_name(user.full_name)
     address = user.meta.get("address") if isinstance(user.meta, dict) else None
@@ -101,7 +118,18 @@ def get_my_profile(
     current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    real_user = db.query(Profile).filter(Profile.email == current_user.email).first() or current_user
+    """Return the authenticated user's profile.
+
+    Works for both 'admin' and 'user' role users.
+    Re-fetches the user from the DB so that all FK fields (department_id,
+    warehouse_id) are properly populated even when the token was issued for
+    a mock profile.
+    """
+    real_user = current_user
+    if db is not None:
+        fetched = db.query(Profile).filter(Profile.email == current_user.email).first()
+        if fetched:
+            real_user = fetched
     return _profile_to_response(real_user, db)
 
 
@@ -148,7 +176,7 @@ def get_my_assets(
 
     assets = (
         db.query(Asset)
-        .filter(Asset.assigned_to == str(current_user.id), Asset.status == "active")
+        .filter(Asset.assigned_to == current_user.id, Asset.status == "active")
         .all()
     )
 
@@ -187,7 +215,7 @@ def get_my_stats(
 
     count = (
         db.query(Asset)
-        .filter(Asset.assigned_to == str(current_user.id), Asset.status == "active")
+        .filter(Asset.assigned_to == current_user.id, Asset.status == "active")
         .count()
     )
     return {"assignedAssets": count, "activeAssets": count}
@@ -198,6 +226,9 @@ def get_my_colleagues(
     current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    if not db:
+        return []
+
     real_user = db.query(Profile).filter(Profile.email == current_user.email).first()
     if not real_user or not real_user.department_id:
         return []
@@ -227,12 +258,14 @@ def get_my_colleagues(
     return result
 
 
-# ─── Admin endpoints with a path param (registered LAST) ──────────────────────
+# ── Admin endpoints with a path param (registered LAST) ──────────────────────
 # Must come after the literal "/me*" routes above, otherwise "/{profile_id}"
 # greedily matches "me" and shadows the self-service profile endpoint.
 
 @router.get("/{profile_id}", response_model=ProfileOut)
 def get_profile(profile_id: str, db: Session = Depends(get_db)):
+    if not db:
+        raise HTTPException(status_code=503, detail="Database unavailable")
     obj = db.query(Profile).filter(Profile.id == profile_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Profile not found")
@@ -241,6 +274,8 @@ def get_profile(profile_id: str, db: Session = Depends(get_db)):
 
 @router.put("/{profile_id}", response_model=ProfileOut)
 def update_profile(profile_id: str, payload: ProfileUpdate, db: Session = Depends(get_db)):
+    if not db:
+        raise HTTPException(status_code=503, detail="Database unavailable")
     obj = db.query(Profile).filter(Profile.id == profile_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Profile not found")
