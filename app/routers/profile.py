@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 import uuid
 
 from app.deps import get_current_user, get_db
-from app.db.supabase_client import supabase
+from app.db.supabase_client import supabase, admin_supabase
 from app.models import Asset, Department, Profile, Warehouse
 from app.schemas.profile import ProfileOut, ProfileUpdate
 from app.schemas.user_profile import UserProfileUpdate
@@ -192,14 +192,14 @@ async def upload_my_avatar(
         
         # Upload to Supabase Storage bucket 'avatars'
         # We use a public bucket so the frontend can display it easily
-        res = supabase.storage.from_("avatars").upload(
+        res = admin_supabase.storage.from_("avatars").upload(
             path=new_filename,
             file=file_bytes,
             file_options={"content-type": file.content_type}
         )
         
         # Get the public URL
-        public_url = supabase.storage.from_("avatars").get_public_url(new_filename)
+        public_url = admin_supabase.storage.from_("avatars").get_public_url(new_filename)
         
         # Update user's profile
         current_user.avatar_url = public_url
