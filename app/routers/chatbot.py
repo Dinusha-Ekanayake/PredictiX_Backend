@@ -8,7 +8,9 @@ from app.ai.agent.agent_service import run_agent
 from app.ai.agent.tools import ToolContext
 from app.ai.services.knowledge_service import search_knowledge
 from app.ai.services.llm_service import ask_llm
-from app.deps import get_current_user, get_db
+from app.core.toon import to_toon
+from app.deps import get_db, get_current_user
+
 
 router = APIRouter(prefix="/chatbot", tags=["Chatbot"])
 
@@ -29,12 +31,12 @@ class ChatResponse(BaseModel):
 def ask_question(request: ChatRequest):
     """Legacy endpoint: simple RAG over the knowledge base. Kept for backwards compatibility."""
     results = search_knowledge(request.question)
-
-    context = (
-        "\n".join(f"- {r['title']}: {r['content']}" for r in results)
-        if results
-        else "No relevant knowledge found in the system."
-    )
+    # Build TOON-encoded context from knowledge search results
+    if results:
+        # Convert list of result dicts to a simple TOON representation
+        context = to_toon([{"title": r["title"], "content": r["content"]} for r in results])
+    else:
+        context = "No relevant knowledge found in the system."
 
     answer = ask_llm(context, request.question)
     sources = [{"title": r["title"], "category": r["category"]} for r in results]
