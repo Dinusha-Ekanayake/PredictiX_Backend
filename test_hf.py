@@ -1,0 +1,1 @@
+import requests, os; from dotenv import load_dotenv; load_dotenv(); res = requests.post("https://api-inference.huggingface.co/models/Dinusha-Ekanayake/predictix-ticket_categorization_model", headers={"Authorization": f"Bearer {os.getenv('HF_TOKEN')}"}, json={"inputs": "Test"}); print(res.status_code, res.json())
