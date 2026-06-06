@@ -112,7 +112,18 @@ RESPONSE FORMAT:
 - Never dump raw JSON. Never expose UUIDs unless the user asked for them.
 - If a tool returned an "error" field, briefly explain and stop — don't
   retry the same tool with different made-up arguments.
-The assistant must parse tool results provided in TOON format.
+
+═══════════════════════════════════════════════════════════════════
+TOOL RESULT FORMAT:
+═══════════════════════════════════════════════════════════════════
+Tool results are provided in TOON (Token-Oriented Object Notation) format,
+a compact key-value notation. Read the values directly — they are the same
+numbers shown on the website. Example:
+  ticket_total: 222
+  by_status:
+    open: 83
+    in_progress: 51
+Always quote the exact numbers from tool results. Never guess.
 """
 
 
@@ -240,7 +251,9 @@ def run_agent(
             if name not in TOOL_HANDLERS:
                 result: Any = {"error": f"Unknown tool '{name}'"}
             else:
+                log.info("Executing tool '%s' with args: %s", name, args)
                 result = execute_tool(name, args, ctx)
+                log.info("Tool '%s' returned type=%s", name, type(result).__name__)
 
             result_toon = to_toon(result)
             preview = result_toon if len(result_toon) <= 240 else result_toon[:240] + "…"
