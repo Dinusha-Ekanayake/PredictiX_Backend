@@ -45,6 +45,7 @@ class TicketCreate(BaseModel):
     description: str
     priority: Optional[str] = None
     created_by: UUID
+    assigned_to: Optional[UUID] = None
 
 
 class TicketUpdate(BaseModel):
