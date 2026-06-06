@@ -1,0 +1,29 @@
+# Railway Environment Variables Reference
+# ─────────────────────────────────────────────────────────────
+# Copy these into Railway Dashboard → Your Service → Variables
+# DO NOT commit real values — this file shows only keys + descriptions
+
+# ── Database (Supabase) ───────────────────────────────────────
+DATABASE_URL=postgresql+psycopg2://postgres.<project_ref>:<password>@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres
+DATABASE_PASSWORD=<your-supabase-db-password>
+PROJECT_REF=<your-supabase-project-ref>
+
+# ── Supabase API ──────────────────────────────────────────────
+SUPABASE_URL=https://<project_ref>.supabase.co
+SUPABASE_KEY=<your-supabase-anon-key>
+SUPABASE_SERVICE_ROLE_KEY=<your-supabase-service-role-key>
+
+# ── Auth ──────────────────────────────────────────────────────
+JWT_SECRET=<your-jwt-secret>
+
+# ── LLM ───────────────────────────────────────────────────────
+GROQ_API_KEY=<your-groq-api-key>
+
+# ── ML / Batch Predictions ────────────────────────────────────
+DISABLE_HF_MODELS=true           # Keep true on Railway — saves ~3GB RAM
+BATCH_RUN_ON_STARTUP=true        # Run full batch right after server boots
+BATCH_INTERVAL_HOURS=1           # Re-run predictions every hour
+
+# ── CORS ──────────────────────────────────────────────────────
+# Add your frontend URL(s) here (comma-separated, no trailing slash)
+ALLOWED_ORIGINS=https://your-frontend.vercel.app,https://your-frontend.netlify.app
