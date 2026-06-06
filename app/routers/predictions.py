@@ -33,6 +33,8 @@ router = APIRouter(prefix="/predictions", tags=["Predictions"])
 
 @router.get("/health", response_model=HealthResponse)
 def prediction_health():
+    from app.main import _load_pdm_models
+    _load_pdm_models()
     from app.main import clf_model, clf_features, reg_model, reg_features
 
     return {
@@ -48,6 +50,8 @@ def prediction_health():
 
 @router.get("/debug/features", response_model=DebugFeaturesResponse)
 def debug_features():
+    from app.main import _load_pdm_models
+    _load_pdm_models()
     from app.main import clf_features, reg_features
 
     return {
@@ -59,17 +63,21 @@ def debug_features():
 
 @router.post("/classification", response_model=ClassificationResponse)
 def classification(payload: PredictionRequest):
-    from app.main import clf_model, clf_features
+    from app.main import _load_pdm_models
+    _load_pdm_models()
+    from app.main import clf_model, clf_features, clf_threshold, clf_categorical_cols
 
     if clf_model is None:
         raise HTTPException(status_code=500, detail="Classification model is not loaded")
 
     data = payload.model_dump()
-    return run_classification(data, clf_model, clf_features)
+    return run_classification(data, clf_model, clf_features, clf_threshold, clf_categorical_cols)
 
 
 @router.post("/regression", response_model=RegressionResponse)
 def regression(payload: PredictionRequest):
+    from app.main import _load_pdm_models
+    _load_pdm_models()
     from app.main import reg_model, reg_features
 
     if reg_model is None:
@@ -87,7 +95,9 @@ def health_score(payload: PredictionRequest):
 
 @router.post("/full", response_model=FullPredictionResponse)
 def full_prediction(payload: PredictionRequest):
-    from app.main import clf_model, clf_features, reg_model, reg_features
+    from app.main import _load_pdm_models
+    _load_pdm_models()
+    from app.main import clf_model, clf_features, clf_threshold, clf_categorical_cols, reg_model, reg_features
 
     if clf_model is None or reg_model is None:
         raise HTTPException(status_code=500, detail="Models are not loaded")
@@ -97,6 +107,8 @@ def full_prediction(payload: PredictionRequest):
         data=data,
         clf_model=clf_model,
         clf_features=clf_features,
+        clf_threshold=clf_threshold,
+        clf_categorical_cols=clf_categorical_cols,
         reg_model=reg_model,
         reg_features=reg_features,
     )
