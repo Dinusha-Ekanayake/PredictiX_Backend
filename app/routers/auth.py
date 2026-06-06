@@ -127,19 +127,11 @@ def _login_with_profile(profile, email: str, password: str, requested_role: str,
                    f"Please select the correct role.",
         )
 
-    # Validate the warehouse selection
+    # Determine active warehouse automatically
     if profile_role == "super_admin":
-        if not requested_warehouse_id:
-            raise HTTPException(status_code=400, detail="Please select a warehouse to log into.")
-        active_warehouse_id = requested_warehouse_id
+        active_warehouse_id = requested_warehouse_id or str(profile.warehouse_id or "") or _get_default_warehouse_id()
     else:
-        # Admins and Users MUST select their own warehouse
-        if not requested_warehouse_id or requested_warehouse_id != str(profile.warehouse_id):
-            raise HTTPException(
-                status_code=401,
-                detail="You are only allowed to log into your assigned warehouse. Please select the correct warehouse."
-            )
-        active_warehouse_id = str(profile.warehouse_id)
+        active_warehouse_id = str(profile.warehouse_id or "") or _get_default_warehouse_id()
 
     user_id = str(profile.id)
     token = _create_token(user_id, email, profile_role, active_warehouse_id)
@@ -172,12 +164,11 @@ def _login_with_test_user(email: str, password: str, requested_role: str, reques
                    f"Please select the correct role.",
         )
         
-    if not requested_warehouse_id:
-        raise HTTPException(status_code=400, detail="Please select a warehouse to log into.")
+    active_warehouse_id = requested_warehouse_id or _get_default_warehouse_id()
 
     user_id: str = _resolve_user_id(email)
-    token: str = _create_token(user_id, email, user["role"], requested_warehouse_id)
-    print(f"[LOGIN] ✓ (TEST) {email} | role={user['role']} | id={user_id} | wh={requested_warehouse_id}")
+    token: str = _create_token(user_id, email, user["role"], active_warehouse_id)
+    print(f"[LOGIN] OK (TEST) {email} | role={user['role']} | id={user_id} | wh={active_warehouse_id}")
 
     return LoginResponse(
         access_token=token,
@@ -253,3 +244,20 @@ def _create_token(user_id: str, email: str, role: str, active_warehouse_id: str)
     secret: str = os.getenv("JWT_SECRET", "supersecret")
     algorithm: str = os.getenv("JWT_ALGORITHM", "HS256")
     return jwt.encode(payload, secret, algorithm=algorithm)
+
+
+def _get_default_warehouse_id() -> str:
+    """Get the first warehouse ID from the database, falling back to a seeded Colombo ID."""
+    try:
+        from app.db import SessionLocal
+        from app.models import Warehouse
+        db = SessionLocal()
+        try:
+            w = db.query(Warehouse).first()
+            if w:
+                return str(w.id)
+        finally:
+            db.close()
+    except Exception as e:
+        print(f"[LOGIN] Default warehouse lookup failed: {e}")
+    return "c537c281-b6ad-4842-94ec-e937be0083e5"

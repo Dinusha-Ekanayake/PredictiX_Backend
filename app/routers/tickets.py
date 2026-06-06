@@ -30,6 +30,8 @@ from app.schemas.tickets import (
 )
 from app.ai.services.ticket_categorization_service import categorize_ticket_text
 from app.ai.services.ticket_priority_service import predict_ticket_priority
+import logging
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/tickets", tags=["Tickets"])
 
@@ -81,6 +83,13 @@ def create_ticket(payload: TicketCreate, db: Session = Depends(get_db), _: objec
     db.add(obj)
     db.commit()
     db.refresh(obj)
+    
+    try:
+        from app.services.notification_service import NotificationService
+        NotificationService.notify_on_new_ticket(db, str(obj.id))
+    except Exception as exc:
+        log.warning("Failed to send ticket creation email notification: %s", exc)
+        
     return obj
 
 
@@ -197,6 +206,13 @@ def create_my_ticket(
     db.add(obj)
     db.commit()
     db.refresh(obj)
+    
+    try:
+        from app.services.notification_service import NotificationService
+        NotificationService.notify_on_new_ticket(db, str(obj.id))
+    except Exception as exc:
+        log.warning("Failed to send ticket creation email notification: %s", exc)
+        
     asset_name = None
     if obj.asset_id:
         asset_name = db.query(Asset.asset_name).filter(Asset.id == obj.asset_id).scalar()
