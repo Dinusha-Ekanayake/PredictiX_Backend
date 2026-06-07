@@ -113,6 +113,7 @@ def _profile_to_response(user: Profile, db: Optional[Session]) -> dict:
         "status": user.status or "",
         "assignedAssetsCount": asset_count,
         "avatar_url": user.avatar_url,
+        "settings": user.meta.get("settings", {}) if isinstance(user.meta, dict) else {},
     }
 
 
@@ -154,6 +155,14 @@ def update_my_profile(
     if payload.address is not None:
         meta = dict(current_user.meta or {})
         meta["address"] = payload.address
+        current_user.meta = meta
+        
+    if payload.settings is not None:
+        meta = dict(current_user.meta or {})
+        settings = dict(meta.get("settings") or {})
+        # Merge new settings into existing
+        settings.update(payload.settings.model_dump(exclude_unset=True))
+        meta["settings"] = settings
         current_user.meta = meta
 
     if db and hasattr(current_user, "__table__"):

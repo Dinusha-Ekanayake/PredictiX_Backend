@@ -3,6 +3,8 @@ from sqlalchemy.orm import Session
 from app.deps import get_db
 from app.models import TicketComment
 from app.schemas.misc import TicketCommentCreate, TicketCommentOut
+from app.services.in_app_notification_service import InAppNotificationService
+from app.models import Ticket
 
 router = APIRouter(prefix="/ticket-comments", tags=["Ticket Comments"])
 
@@ -13,6 +15,24 @@ def create_ticket_comment(payload: TicketCommentCreate, db: Session = Depends(ge
     db.add(obj)
     db.commit()
     db.refresh(obj)
+    
+    # Notify ticket creator
+    try:
+        ticket = db.query(Ticket).filter(Ticket.id == obj.ticket_id).first()
+        if ticket and ticket.created_by and str(ticket.created_by) != str(obj.author_id):
+            InAppNotificationService.notify_user(
+                db=db,
+                user_id=str(ticket.created_by),
+                title="New Comment on Ticket",
+                message=f"A new comment was added to your ticket: {ticket.title}",
+                priority="low",
+                notification_type="ticket_update",
+                link_url=f"/user/tickets"
+            )
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("Failed to send comment notification: %s", exc)
+        
     return obj
 
 
