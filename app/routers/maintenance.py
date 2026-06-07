@@ -7,6 +7,8 @@ from app.schemas.maintenance import (
     MaintenanceEventUpdate,
     MaintenanceEventOut,
 )
+from app.services.in_app_notification_service import InAppNotificationService
+from app.models import Asset
 
 router = APIRouter(prefix="/maintenance", tags=["Maintenance"])
 
@@ -17,6 +19,24 @@ def create_maintenance_event(payload: MaintenanceEventCreate, db: Session = Depe
     db.add(obj)
     db.commit()
     db.refresh(obj)
+    
+    # Notify assigned user
+    try:
+        asset = db.query(Asset).filter(Asset.id == obj.asset_id).first()
+        if asset and asset.assigned_to:
+            InAppNotificationService.notify_user(
+                db=db,
+                user_id=str(asset.assigned_to),
+                title="Maintenance Scheduled",
+                message=f"Heads up! Asset {asset.asset_code or 'assigned to you'} is scheduled for maintenance: {obj.title}.",
+                priority="medium",
+                notification_type="general",
+                link_url=f"/user/assets/{asset.id}"
+            )
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("Failed to send maintenance notification: %s", exc)
+        
     return obj
 
 
