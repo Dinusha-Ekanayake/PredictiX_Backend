@@ -20,7 +20,7 @@ supabase
 pandas
 numpy
 scikit-learn
-xgboost
+xgboost-cpu
 catboost
 lifelines
 joblib
