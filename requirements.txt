@@ -35,3 +35,4 @@ nltk
 requests
 langchain-groq
 langchain-core
+gradio-client
