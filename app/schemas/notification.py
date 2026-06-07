@@ -30,6 +30,8 @@ class NotificationOut(BaseModel):
     title: str
     message: str
     status: str
+    meta: Optional[dict] = {}
+    created_at: datetime
 
     class Config:
         from_attributes = True
