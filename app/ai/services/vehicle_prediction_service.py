@@ -72,7 +72,10 @@ def build_vehicle_feature_dict(db: Session, asset_id: str) -> dict[str, Any]:
 
     reading = _get_latest_sensor_reading(db, asset_id)
     if not reading:
-        raise ValueError("No sensor reading found for asset")
+        # Provide a mock reading for new assets without telemetry data
+        class EmptyReading:
+            pass
+        reading = EmptyReading()
 
     feature_dict: dict[str, Any] = {}
 

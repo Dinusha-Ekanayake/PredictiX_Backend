@@ -85,7 +85,7 @@ def list_assets(
     is_assigned: bool | None = Query(default=None, description="true = assigned, false = unassigned"),
     sort_by: str = Query(default="created_at"),
     sort_order: str = Query(default="desc"),
-    limit: int = Query(default=100, ge=1, le=500),
+    limit: int = Query(default=100, ge=1, le=2000),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
