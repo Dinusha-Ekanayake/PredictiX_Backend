@@ -63,8 +63,19 @@ def create_faq(
         
     try:
         from app.services.notification_service import NotificationService
+        from app.services.in_app_notification_service import InAppNotificationService
+        
         admin_name = getattr(current_user, "full_name", "Administrator")
         NotificationService.notify_on_new_faq(db, response.data, admin_name)
+        
+        InAppNotificationService.notify_all_users(
+            db=db,
+            title="New Help Desk FAQ",
+            message=f"New FAQ published: {response.data.get('question')}",
+            priority="low",
+            notification_type="system_announcement",
+            link_url="/user/help-desk"
+        )
     except Exception as exc:
         import logging
         logging.getLogger(__name__).warning("Failed to send FAQ email notification: %s", exc)

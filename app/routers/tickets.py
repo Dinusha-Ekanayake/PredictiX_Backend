@@ -34,6 +34,7 @@ from app.ai.services.ticket_categorization_service import categorize_ticket_text
 from app.ai.services.ticket_priority_service import predict_ticket_priority
 import logging
 from app.ai.services.ticket_summary_service import build_ticket_summary_input, generate_ticket_summary
+from app.services.in_app_notification_service import InAppNotificationService
 
 log = logging.getLogger(__name__)
 
@@ -91,8 +92,18 @@ def create_ticket(payload: TicketCreate, db: Session = Depends(get_db), _: objec
     try:
         from app.services.notification_service import NotificationService
         NotificationService.notify_on_new_ticket(db, str(obj.id))
+        
+        if obj.priority in ["high", "critical"]:
+            InAppNotificationService.notify_admins(
+                db=db,
+                title="High Priority Ticket Created",
+                message=f"Ticket {obj.ticket_number}: {obj.title}",
+                priority=obj.priority,
+                notification_type="ticket_created",
+                link_url=f"/admin/tickets"
+            )
     except Exception as exc:
-        log.warning("Failed to send ticket creation email notification: %s", exc)
+        log.warning("Failed to send ticket creation notification: %s", exc)
         
     return obj
 
@@ -214,8 +225,18 @@ def create_my_ticket(
     try:
         from app.services.notification_service import NotificationService
         NotificationService.notify_on_new_ticket(db, str(obj.id))
+        
+        if obj.priority in ["high", "critical"]:
+            InAppNotificationService.notify_admins(
+                db=db,
+                title="High Priority Ticket Created",
+                message=f"Ticket {obj.ticket_number}: {obj.title}",
+                priority=obj.priority,
+                notification_type="ticket_created",
+                link_url=f"/admin/tickets"
+            )
     except Exception as exc:
-        log.warning("Failed to send ticket creation email notification: %s", exc)
+        log.warning("Failed to send ticket creation notification: %s", exc)
         
     asset_name = None
     if obj.asset_id:
@@ -321,6 +342,23 @@ def update_ticket(ticket_id: str, payload: TicketUpdate, db: Session = Depends(g
 
     db.commit()
     db.refresh(obj)
+    
+    # Notify user on status change
+    if new_status and new_status != old_status and new_status in ["resolved", "in_progress"]:
+        try:
+            if obj.created_by:
+                InAppNotificationService.notify_user(
+                    db=db,
+                    user_id=str(obj.created_by),
+                    title="Ticket Status Updated",
+                    message=f"Your ticket '{obj.title}' is now {new_status.replace('_', ' ').title()}.",
+                    priority="medium" if new_status == "resolved" else "low",
+                    notification_type="ticket_resolved" if new_status == "resolved" else "ticket_updated",
+                    link_url=f"/user/tickets"
+                )
+        except Exception as exc:
+            log.warning("Failed to send ticket update notification: %s", exc)
+
     return obj
 
 
