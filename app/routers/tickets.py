@@ -27,10 +27,14 @@ from app.schemas.tickets import (
     TicketCategorizationResponse,
     TicketPriorityRequest,
     TicketPriorityResponse,
+    TicketSummarizationRequest,
+    TicketSummarizationResponse,
 )
 from app.ai.services.ticket_categorization_service import categorize_ticket_text
 from app.ai.services.ticket_priority_service import predict_ticket_priority
 import logging
+from app.ai.services.ticket_summary_service import build_ticket_summary_input, generate_ticket_summary
+
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/tickets", tags=["Tickets"])
@@ -401,3 +405,28 @@ def prioritize_ticket_endpoint(payload: TicketPriorityRequest):
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to classify ticket priority: {exc}") from exc
+
+
+@router.post(
+    "/summarize",
+    response_model=TicketSummarizationResponse,
+    summary="Generate an AI summary of a ticket",
+)
+def summarize_ticket_endpoint(payload: TicketSummarizationRequest):
+    from datetime import datetime
+    try:
+        input_text = build_ticket_summary_input(
+            title=payload.title,
+            description=payload.description,
+            asset_name=payload.asset_name,
+            asset_code=payload.asset_code,
+            category=payload.category,
+            priority=payload.priority,
+        )
+        summary = generate_ticket_summary(input_text)
+        return TicketSummarizationResponse(
+            summary=summary,
+            generated_at=datetime.utcnow().isoformat(),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to summarize ticket: {exc}") from exc

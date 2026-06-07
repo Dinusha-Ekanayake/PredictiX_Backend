@@ -34,8 +34,8 @@ def seed_badulla():
 
         # 2. Create Departments for Badulla
         depts_data = [
-            {"code": "BD-LOG", "name": "Logistics - Badulla"},
-            {"code": "BD-MNT", "name": "Maintenance - Badulla"}
+            {"code": "BD-LOG", "name": "Logistics"},
+            {"code": "BD-MNT", "name": "Maintenance"}
         ]
         dept_map = {}
         for d_data in depts_data:

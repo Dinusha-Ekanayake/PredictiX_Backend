@@ -131,7 +131,13 @@ def _login_with_profile(profile, email: str, password: str, requested_role: str,
     if profile_role == "super_admin":
         active_warehouse_id = requested_warehouse_id or str(profile.warehouse_id or "") or _get_default_warehouse_id()
     else:
-        active_warehouse_id = str(profile.warehouse_id or "") or _get_default_warehouse_id()
+        # Admins and Users log into their assigned warehouse automatically.
+        if requested_warehouse_id and requested_warehouse_id != str(profile.warehouse_id):
+            raise HTTPException(
+                status_code=401,
+                detail="You are only allowed to log into your assigned warehouse. Please select the correct warehouse."
+            )
+        active_warehouse_id = str(profile.warehouse_id) if profile.warehouse_id else _get_default_warehouse_id()
 
     user_id = str(profile.id)
     token = _create_token(user_id, email, profile_role, active_warehouse_id)
@@ -164,7 +170,13 @@ def _login_with_test_user(email: str, password: str, requested_role: str, reques
                    f"Please select the correct role.",
         )
         
-    active_warehouse_id = requested_warehouse_id or _get_default_warehouse_id()
+    if user["role"] == "super_admin":
+        if not requested_warehouse_id:
+            raise HTTPException(status_code=400, detail="Please select a warehouse to log into.")
+        active_warehouse_id = requested_warehouse_id
+    else:
+        # Default fallback for demo users without a DB profile
+        active_warehouse_id = requested_warehouse_id if requested_warehouse_id else _get_default_warehouse_id()
 
     user_id: str = _resolve_user_id(email)
     token: str = _create_token(user_id, email, user["role"], active_warehouse_id)

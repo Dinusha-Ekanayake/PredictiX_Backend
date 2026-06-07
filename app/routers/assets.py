@@ -1,11 +1,16 @@
 """Assets resource — CRUD, search, assignment, status updates."""
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from sqlalchemy import String, cast, or_
 from sqlalchemy.orm import Session
+import uuid
+import logging
 
 from app.deps import get_db
 from app.models import Asset
 from app.schemas.asset import AssetCreate, AssetOut, AssetUpdate
+from app.db.supabase_client import admin_supabase
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/assets", tags=["Assets"])
 
@@ -288,6 +293,61 @@ def update_asset_status(asset_id: str, status: str, db: Session = Depends(get_db
     db.commit()
     db.refresh(obj)
     return obj
+
+
+@router.post("/{asset_id}/image", response_model=AssetOut)
+async def upload_asset_image(
+    asset_id: str,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    obj = db.query(Asset).filter(Asset.id == asset_id).first()
+    if not obj:
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+
+    try:
+        file_bytes = await file.read()
+        file_ext = file.filename.split(".")[-1] if "." in file.filename else "png"
+        new_filename = f"{asset_id}_{uuid.uuid4().hex[:8]}.{file_ext}"
+
+        # Upload to Supabase Storage bucket 'asset-images'
+        res = admin_supabase.storage.from_("asset-images").upload(
+            path=new_filename,
+            file=file_bytes,
+            file_options={"content-type": file.content_type}
+        )
+
+        public_url = admin_supabase.storage.from_("asset-images").get_public_url(new_filename)
+
+        # Update asset's meta dictionary safely
+        meta = dict(obj.meta or {})
+        
+        # Initialize images array
+        images = meta.get("images", [])
+        
+        # Migration: if image_url exists and not in images, add it first
+        legacy_image = meta.pop("image_url", None)
+        if legacy_image and legacy_image not in images:
+            images.insert(0, legacy_image)
+            
+        # Append the new image
+        images.append(public_url)
+        meta["images"] = images
+        
+        obj.meta = meta
+
+        db.commit()
+        db.refresh(obj)
+
+        return obj
+
+    except Exception as e:
+        log.exception("Failed to upload asset image: %s", e)
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to upload asset image")
 
 
 @router.delete("/{asset_id}")
