@@ -2,6 +2,9 @@ from sqlalchemy.orm import Session
 from app.models import Notification, Profile, UserNotificationPreference
 import json
 import logging
+import asyncio
+from app.routers.websockets import notifier
+from app.services.notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
 
@@ -18,30 +21,88 @@ class InAppNotificationService:
         meta: dict = None
     ):
         try:
-            # Check if user has opted out of this notification type
+            # Check preferences for all channels
             prefs = db.query(UserNotificationPreference).filter(
                 UserNotificationPreference.user_id == user_id,
                 UserNotificationPreference.notification_type == notification_type
-            ).first()
+            ).all()
             
-            if prefs and not prefs.enabled:
-                return None
+            in_app_enabled = True
+            email_enabled = False
+            sms_enabled = False
+            
+            for p in prefs:
+                if p.channel == "in_app":
+                    in_app_enabled = p.enabled
+                elif p.channel == "email":
+                    email_enabled = p.enabled
+                elif p.channel == "sms":
+                    sms_enabled = p.enabled
+                    
+            if len(prefs) == 0:
+                email_enabled = True # Default true if no prefs set
                 
-            meta_data = meta or {}
-            if priority:
-                meta_data["priority"] = priority
-            if link_url:
-                meta_data["link_url"] = link_url
+            notification = None
+            if in_app_enabled:
+                meta_data = meta or {}
+                if priority:
+                    meta_data["priority"] = priority
+                if link_url:
+                    meta_data["link_url"] = link_url
+                    
+                notification = Notification(
+                    user_id=user_id,
+                    title=title,
+                    message=message,
+                    type=notification_type,
+                    meta=meta_data
+                )
+                db.add(notification)
+                db.commit()
+                db.refresh(notification)
                 
-            notification = Notification(
-                user_id=user_id,
-                title=title,
-                message=message,
-                type=notification_type,
-                meta=meta_data
-            )
-            db.add(notification)
-            db.commit()
+                # Push to websocket
+                payload = {
+                    "id": str(notification.id),
+                    "title": notification.title,
+                    "message": notification.message,
+                    "type": notification.type,
+                    "status": notification.status,
+                    "created_at": notification.created_at.isoformat() if notification.created_at else None,
+                    "meta": notification.meta
+                }
+                
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(notifier.send_personal_message(payload, str(user_id)))
+                except RuntimeError:
+                    # No running event loop
+                    asyncio.run(notifier.send_personal_message(payload, str(user_id)))
+                    
+            # Send Email
+            if email_enabled:
+                user = db.query(Profile).filter(Profile.id == user_id).first()
+                if user and user.email:
+                    subject = f"PredictiX Alert: {title}"
+                    html_body = f"<html><body><h3>{title}</h3><p>{message}</p>"
+                    if link_url:
+                        html_body += f"<p><a href='{link_url}'>View Details</a></p>"
+                    html_body += "</body></html>"
+                    
+                    NotificationService.send_email(
+                        [user.email], 
+                        subject, 
+                        html_body,
+                        template_params={"name": user.full_name, "message": message, "time": ""}
+                    )
+            
+            # Send SMS (Mocked)
+            if sms_enabled:
+                user = db.query(Profile).filter(Profile.id == user_id).first()
+                phone = user.phone if user and user.phone else "UNKNOWN"
+                logger.info(f"[SMS SENT TO {phone}]: {title} - {message}")
+                print(f"[SMS SENT TO {phone}]: {title} - {message}")
+
             return notification
         except Exception as e:
             db.rollback()

@@ -44,6 +44,7 @@ from .routers.vehicle_predictions import router as vehicle_predictions_router
 from .routers.warehouse_dashboard import warehouse_dashboard_router
 from .routers.warehouses import router as warehouses_router
 from .routers.batch_predictions import router as batch_predictions_router
+from .routers.websockets import router as websockets_router
 
 # Sharada — user-role self-service profile (/user-profile)
 from .routers.user_profile import router as user_profile_router
@@ -324,6 +325,9 @@ app.include_router(faqs_router)
 
 # Diagnostics
 app.include_router(db_debug_router)
+
+# WebSockets
+app.include_router(websockets_router)
 
 
 @app.get("/", tags=["Health"])
