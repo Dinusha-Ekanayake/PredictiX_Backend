@@ -3,6 +3,12 @@ from uuid import UUID
 from typing import Optional
 
 
+class UserSettings(BaseModel):
+    emailNotifications: Optional[bool] = None
+    criticalAlerts: Optional[bool] = None
+    maintenanceAlerts: Optional[bool] = None
+    compactView: Optional[bool] = None
+
 class ProfileUpdate(BaseModel):
     employee_id: Optional[str] = None
     full_name: Optional[str] = None
@@ -13,6 +19,7 @@ class ProfileUpdate(BaseModel):
     warehouse_id: Optional[UUID] = None
     department_id: Optional[UUID] = None
     avatar_url: Optional[str] = None
+    settings: Optional[UserSettings] = None
 
 
 class ProfileOut(BaseModel):
@@ -26,6 +33,7 @@ class ProfileOut(BaseModel):
     warehouse_id: Optional[UUID] = None
     department_id: Optional[UUID] = None
     avatar_url: Optional[str] = None
+    settings: Optional[UserSettings] = None
 
     class Config:
         from_attributes = True
