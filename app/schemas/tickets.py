@@ -45,6 +45,7 @@ class TicketCreate(BaseModel):
     description: str
     priority: Optional[str] = None
     created_by: UUID
+    assigned_to: Optional[UUID] = None
 
 
 class TicketUpdate(BaseModel):
@@ -124,3 +125,17 @@ class TicketPriorityRequest(BaseModel):
 
 class TicketPriorityResponse(BaseModel):
     priority: str
+
+
+class TicketSummarizationRequest(BaseModel):
+    title: str = ""
+    description: str = ""
+    asset_name: Optional[str] = None
+    asset_code: Optional[str] = None
+    category: Optional[str] = None
+    priority: Optional[str] = None
+
+
+class TicketSummarizationResponse(BaseModel):
+    summary: str
+    generated_at: str

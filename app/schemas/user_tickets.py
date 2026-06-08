@@ -38,6 +38,7 @@ class UserTicketCreate(BaseModel):
     predicted_priority: Optional[str] = None
     predicted_category: Optional[str] = None
     ticket_summary: Optional[str] = None
+    assigned_to: Optional[UUID] = None
 
 
 class UserTicketPreviewRequest(BaseModel):
@@ -92,6 +93,7 @@ class UserTicketSummary(BaseModel):
     final_category: Optional[str] = None
     asset_id: Optional[UUID] = None
     warehouse_id: Optional[UUID] = None
+    assigned_to: Optional[UUID] = None
     created_at: datetime
     updated_at: datetime
 

@@ -173,6 +173,7 @@ def create_my_ticket(
             preset_predicted_priority=payload.predicted_priority,
             preset_predicted_category=payload.predicted_category,
             preset_ticket_summary=payload.ticket_summary,
+            assigned_to=payload.assigned_to,
         )
     except Exception as exc:
         db.rollback()

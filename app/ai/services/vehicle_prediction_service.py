@@ -16,6 +16,7 @@ from app.models import (
     AssetFailurePrediction,
     AssetCostPrediction,
 )
+from app.services.in_app_notification_service import InAppNotificationService
 
 
 CLASSIFIER_MODEL_NAME = "pdm_classifier_model"
@@ -71,7 +72,10 @@ def build_vehicle_feature_dict(db: Session, asset_id: str) -> dict[str, Any]:
 
     reading = _get_latest_sensor_reading(db, asset_id)
     if not reading:
-        raise ValueError("No sensor reading found for asset")
+        # Provide a mock reading for new assets without telemetry data
+        class EmptyReading:
+            pass
+        reading = EmptyReading()
 
     feature_dict: dict[str, Any] = {}
 
@@ -296,6 +300,20 @@ def run_vehicle_prediction_and_store(
     db.refresh(run)
     db.refresh(failure_row)
     db.refresh(cost_row)
+
+    if failure_probability >= 0.80:
+        try:
+            InAppNotificationService.notify_admins(
+                db=db,
+                title="Critical Asset Risk Detected",
+                message=f"CRITICAL: Asset {asset.asset_code} has spiked to {round(failure_probability * 100, 1)}% failure probability.",
+                priority="critical",
+                notification_type="admin_alert",
+                link_url=f"/admin/assets/{asset.id}"
+            )
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning("Failed to send critical asset alert: %s", exc)
 
     return {
         "run_id": str(run.id),

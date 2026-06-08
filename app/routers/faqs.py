@@ -2,8 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
+from sqlalchemy.orm import Session
 
-from app.deps import get_current_user
+from app.deps import get_db, get_current_user
 from app.db.supabase_client import supabase
 
 router = APIRouter(prefix="/faqs", tags=["FAQs"])
@@ -42,7 +43,11 @@ def list_faqs():
 
 
 @router.post("/", response_model=FaqOut)
-def create_faq(payload: FaqCreate, current_user: object = Depends(get_current_user)):
+def create_faq(
+    payload: FaqCreate,
+    db: Session = Depends(get_db),
+    current_user: object = Depends(get_current_user)
+):
     if getattr(current_user, "role", "") != "admin":
         raise HTTPException(status_code=403, detail="Only admins can add FAQs")
 
@@ -55,6 +60,26 @@ def create_faq(payload: FaqCreate, current_user: object = Depends(get_current_us
 
     if not response.data:
         raise HTTPException(status_code=500, detail="Failed to insert FAQ")
+        
+    try:
+        from app.services.notification_service import NotificationService
+        from app.services.in_app_notification_service import InAppNotificationService
+        
+        admin_name = getattr(current_user, "full_name", "Administrator")
+        NotificationService.notify_on_new_faq(db, response.data, admin_name)
+        
+        InAppNotificationService.notify_all_users(
+            db=db,
+            title="New Help Desk FAQ",
+            message=f"New FAQ published: {response.data.get('question')}",
+            priority="low",
+            notification_type="system_announcement",
+            link_url="/user/help-desk"
+        )
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("Failed to send FAQ email notification: %s", exc)
+        
     return response.data
 
 

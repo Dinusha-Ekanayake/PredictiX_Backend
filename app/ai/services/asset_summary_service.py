@@ -1,14 +1,7 @@
-"""Asset summary generation service — local Seq2Seq inference (offline).
+"""Asset summary generation service — raw HF Inference API (online).
 
-Loads the fine-tuned Seq2Seq model from HuggingFace **once** and runs
-``model.generate`` locally on CPU. This is the original approach (it ran fine
-before the merge that briefly switched to the online HF Inference API, which
-HF has since retired/paywalled).
-
-Public functions (``generate_asset_summary``, ``warmup_asset_summary_model``,
-``get_asset_summary_model``, ``get_asset_summary_repo``, ``get_hf_credentials``)
-keep their names so the ``/asset-summaries`` router and shared callers don't
-need to change.
+Uses the online HF Inference API to generate asset summaries, bypassing
+huggingface_hub's client-side checks and avoiding slow local weight downloads.
 """
 
 import os
@@ -18,6 +11,8 @@ from functools import lru_cache
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+from app.ai.services._hf_inference import call_hf_inference
 
 env_path = Path(__file__).resolve().parent.parent.parent / ".env"
 load_dotenv(dotenv_path=env_path)
@@ -91,40 +86,15 @@ def _fallback_summary(fields: dict[str, str]) -> str:
     return sentence
 
 
-def get_hf_credentials() -> tuple[str, str]:
-    """Read HF credentials from the environment.
-
-    The token is only used to *download* the (private/public) model weights
-    from the Hub the first time; inference itself runs locally and offline.
-    """
+def get_asset_summary_repo() -> str:
+    """Returns the HF repo ID for the summarization model."""
     hf_token = os.getenv("HF_TOKEN")
     model_repo = os.getenv("HF_ASSET_SUMMARIZATION_REPO")
     if not hf_token:
         raise RuntimeError("HF_TOKEN is not set in .env")
     if not model_repo:
         raise RuntimeError("HF_ASSET_SUMMARIZATION_REPO is not set in .env")
-    return hf_token, model_repo
-
-
-@lru_cache(maxsize=1)
-def get_asset_summary_repo() -> str:
-    """Back-compat shim — the router imports this. Returns the repo id."""
-    _, repo = get_hf_credentials()
-    return repo
-
-
-@lru_cache(maxsize=1)
-def get_asset_summary_model() -> dict:
-    """Download (first call) and cache the local model + tokenizer."""
-    if os.getenv("DISABLE_HF_MODELS", "false").lower() == "true":
-        raise RuntimeError("Asset summary model is disabled (DISABLE_HF_MODELS=true).")
-
-    from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
-    hf_token, model_repo = get_hf_credentials()
-    tokenizer = AutoTokenizer.from_pretrained(model_repo, token=hf_token)
-    model = AutoModelForSeq2SeqLM.from_pretrained(model_repo, token=hf_token)
-    print(f"Asset summary model loaded locally from: {model_repo}")
-    return {"model": model, "tokenizer": tokenizer}
+    return model_repo
 
 
 def generate_asset_summary(input_text: str) -> str:
@@ -142,27 +112,31 @@ def generate_asset_summary(input_text: str) -> str:
 
     fields = _parse_input_fields(input_text)
 
-    # Try the fine-tuned model, but only publish its output if it passes the
-    # quality guard. Any failure or malformed result falls back to a clean,
-    # deterministic summary so a client PDF never shows garbled text.
+    # Try the fine-tuned model via HF Inference API
     try:
-        model_data = get_asset_summary_model()
-        model = model_data["model"]
-        tokenizer = model_data["tokenizer"]
+        repo = get_asset_summary_repo()
+        raw = call_hf_inference(
+            repo,
+            input_text,
+            parameters={
+                "min_length": 50,
+                "max_length": 256,
+                "num_beams": 4,
+                "early_stopping": True
+            }
+        )
+        
+        # HF summarization returns ``[{"summary_text": "..."}]``.
+        generated_text = ""
+        if isinstance(raw, list) and raw and isinstance(raw[0], dict) and "summary_text" in raw[0]:
+            generated_text = raw[0]["summary_text"]
+        elif isinstance(raw, dict) and "summary_text" in raw:
+            generated_text = raw["summary_text"]
+        else:
+            generated_text = str(raw)
 
-        inputs = tokenizer(
-            input_text, return_tensors="pt", max_length=512, truncation=True
-        )
-        summary_ids = model.generate(
-            inputs["input_ids"],
-            max_length=256,
-            min_length=50,
-            num_beams=4,
-            early_stopping=True,
-        )
-        raw = tokenizer.decode(summary_ids[0], skip_special_tokens=True).strip()
-        if _is_clean_summary(raw):
-            return raw
+        if _is_clean_summary(generated_text):
+            return generated_text
         logger.warning("[AssetSummary] model output rejected as malformed; using deterministic fallback")
     except Exception as e:
         logger.warning(f"[AssetSummary] model unavailable ({e}); using deterministic fallback")
@@ -171,10 +145,5 @@ def generate_asset_summary(input_text: str) -> str:
 
 
 def warmup_asset_summary_model() -> None:
-    """Pre-load the model on application startup."""
-    try:
-        get_asset_summary_model()
-        print("Asset summary model warmed up successfully")
-    except Exception as e:
-        print(f"Asset summary model warmup failed: {e}")
-        raise
+    """No-op for raw HTTP. Kept for symmetry with lifespan."""
+    get_asset_summary_repo()

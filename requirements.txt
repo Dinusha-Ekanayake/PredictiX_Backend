@@ -20,7 +20,7 @@ supabase
 pandas
 numpy
 scikit-learn
-xgboost
+xgboost-cpu
 catboost
 lifelines
 joblib
@@ -35,3 +35,4 @@ nltk
 requests
 langchain-groq
 langchain-core
+gradio-client
