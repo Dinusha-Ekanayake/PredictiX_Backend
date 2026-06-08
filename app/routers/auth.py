@@ -88,9 +88,9 @@ def post_login(request: LoginRequest):
     if profile is not None:
         return _login_with_profile(profile, email, password, requested_role, requested_warehouse_id)
 
-    # 2. No DB profile — fall back to the hardcoded demo accounts.
-    print(f"[LOGIN] No DB profile for {email}; trying TEST_USERS fallback")
-    return _login_with_test_user(email, password, requested_role, requested_warehouse_id)
+    # 2. No DB profile — reject login.
+    print(f"[LOGIN] ✗ No DB profile for {email}")
+    raise HTTPException(status_code=401, detail="Invalid email or password.")
 
 
 def _login_with_profile(profile, email: str, password: str, requested_role: str, requested_warehouse_id: str | None) -> LoginResponse:
