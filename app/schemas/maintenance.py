@@ -41,3 +41,13 @@ class MaintenanceEventOut(MaintenanceEventCreate):
 
     class Config:
         from_attributes = True
+
+
+class LogMaintenancePayload(BaseModel):
+    title: str
+    description: Optional[str] = None
+    cost_amount: Decimal
+    odometer_reading: Decimal
+    next_service_date: Optional[datetime] = None
+    performed_at: Optional[datetime] = None
+    notes: Optional[str] = None

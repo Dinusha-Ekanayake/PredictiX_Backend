@@ -13,6 +13,7 @@ from typing import Any, Optional
 from groq import Groq
 
 from .tools import TOOL_HANDLERS, TOOL_SCHEMAS, ToolContext, execute_tool
+from app.core.toon import to_toon
 
 log = logging.getLogger("predictix.agent")
 
@@ -111,6 +112,18 @@ RESPONSE FORMAT:
 - Never dump raw JSON. Never expose UUIDs unless the user asked for them.
 - If a tool returned an "error" field, briefly explain and stop — don't
   retry the same tool with different made-up arguments.
+
+═══════════════════════════════════════════════════════════════════
+TOOL RESULT FORMAT:
+═══════════════════════════════════════════════════════════════════
+Tool results are provided in TOON (Token-Oriented Object Notation) format,
+a compact key-value notation. Read the values directly — they are the same
+numbers shown on the website. Example:
+  ticket_total: 222
+  by_status:
+    open: 83
+    in_progress: 51
+Always quote the exact numbers from tool results. Never guess.
 """
 
 
@@ -238,10 +251,12 @@ def run_agent(
             if name not in TOOL_HANDLERS:
                 result: Any = {"error": f"Unknown tool '{name}'"}
             else:
+                log.info("Executing tool '%s' with args: %s", name, args)
                 result = execute_tool(name, args, ctx)
+                log.info("Tool '%s' returned type=%s", name, type(result).__name__)
 
-            result_json = json.dumps(result, default=str)
-            preview = result_json if len(result_json) <= 240 else result_json[:240] + "…"
+            result_toon = to_toon(result)
+            preview = result_toon if len(result_toon) <= 240 else result_toon[:240] + "…"
 
             tool_trace.append({
                 "name": name,
@@ -253,7 +268,7 @@ def run_agent(
                 "role": "tool",
                 "tool_call_id": tc.id,
                 "name": name,
-                "content": result_json[:8000],  # cap to keep tokens reasonable
+                "content": result_toon[:8000],  # cap to keep tokens reasonable
             })
 
     # Hit the iteration cap without a final answer
