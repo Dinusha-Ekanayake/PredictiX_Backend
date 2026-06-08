@@ -44,6 +44,7 @@ from .routers.vehicle_predictions import router as vehicle_predictions_router
 from .routers.warehouse_dashboard import warehouse_dashboard_router
 from .routers.warehouses import router as warehouses_router
 from .routers.batch_predictions import router as batch_predictions_router
+from .routers.websockets import router as websockets_router
 
 # Sharada — user-role self-service profile (/user-profile)
 from .routers.user_profile import router as user_profile_router
@@ -114,6 +115,32 @@ def _run_startup_batch() -> None:
     _run_scheduled_batch()
 
 
+def _ping_hf_models() -> None:
+    """Scheduled job — constantly pings Hugging Face models to prevent cold starts."""
+    if os.getenv("DISABLE_HF_MODELS", "false").lower() == "true":
+        return
+
+    from app.ai.services._hf_inference import call_hf_inference
+    
+    repos = [
+        "Dinusha-Ekanayake/predictix-asset_summarization_model",
+        "Dinusha-Ekanayake/predictix-ticket_summarization_model",
+        "Dinusha-Ekanayake/predictix-ticket_categorization_model",
+        "Dinusha-Ekanayake/predictix-ticket_prioritization_model",
+    ]
+    
+    for repo in repos:
+        try:
+            # Minimal payload to wake the model up. It may return an error, but the 
+            # HTTP request successfully forces HF to keep the container alive in VRAM.
+            call_hf_inference(repo, "keep_warm_ping", timeout=30, max_cold_start_wait=20)
+            log.debug("Pinged %s to keep warm.", repo)
+        except Exception as e:
+            # Ignore expected inference errors (like ValueError for bad shape),
+            # the request still hit the router and woke the model up.
+            pass
+
+
 def _load_pdm_models():
     """Lazily load heavy PdM models (thread-safe, idempotent)."""
     global clf_model, clf_features, clf_threshold, clf_categorical_cols, reg_model, reg_features
@@ -182,6 +209,20 @@ async def lifespan(_: FastAPI):
         name="PDM hourly batch prediction",
         replace_existing=True,
     )
+    
+    # ── Keep-Warm ping for HF Models ───────────────────────────────────────────
+    if os.getenv("ENABLE_HF_WARMER", "false").lower() == "true":
+        scheduler.add_job(
+            _ping_hf_models,
+            trigger="interval",
+            minutes=7,       # Base interval: 7 minutes
+            jitter=180,      # Add/subtract up to 3 minutes randomly (4 to 10 minute range)
+            id="hf_ping",
+            name="HF Models Keep-Warm Ping",
+            replace_existing=True,
+        )
+        log.info("HF Inference Warmer enabled with dynamic intervals (4-10 mins).")
+    
     scheduler.start()
     log.info("PDM batch scheduler started — interval=%dh", batch_interval_hours)
 
@@ -284,6 +325,9 @@ app.include_router(faqs_router)
 
 # Diagnostics
 app.include_router(db_debug_router)
+
+# WebSockets
+app.include_router(websockets_router)
 
 
 @app.get("/", tags=["Health"])

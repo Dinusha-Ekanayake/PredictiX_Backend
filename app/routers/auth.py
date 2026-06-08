@@ -26,7 +26,8 @@ def _default_password() -> str:
 class LoginRequest(BaseModel):
     email: str
     password: str
-    role: str  # "ADMIN" or "USER" (frontend sends uppercase)
+    role: str  # "ADMIN", "USER", "SUPER_ADMIN" (frontend sends uppercase)
+    warehouse_id: str | None = None
 
 class LoginResponse(BaseModel):
     access_token: str
@@ -50,6 +51,26 @@ TEST_USERS: dict[str, dict] = {
         "full_name": "Anjali Warnakulasuriya",
         "role": "admin",
     },
+    "super.admin1@lankalogix.lk": {
+        "password": "super",
+        "full_name": "Super Admin 1",
+        "role": "super_admin",
+    },
+    "super.admin2@lankalogix.lk": {
+        "password": "super",
+        "full_name": "Super Admin 2",
+        "role": "super_admin",
+    },
+    "super.admin3@lankalogix.lk": {
+        "password": "super",
+        "full_name": "Super Admin 3",
+        "role": "super_admin",
+    },
+    "super.admin4@lankalogix.lk": {
+        "password": "super",
+        "full_name": "Super Admin 4",
+        "role": "super_admin",
+    },
 }
 
 # ─── POST /auth/login ──────────────────────────────────────────────────────────
@@ -60,18 +81,19 @@ def post_login(request: LoginRequest):
     password: str = request.password.strip()
     # Normalise to lowercase so "ADMIN" == "admin"
     requested_role: str = request.role.strip().lower()
+    requested_warehouse_id: str | None = request.warehouse_id
 
     # 1. Try DB-backed authentication first.
     profile = _lookup_profile(email)
     if profile is not None:
-        return _login_with_profile(profile, email, password, requested_role)
+        return _login_with_profile(profile, email, password, requested_role, requested_warehouse_id)
 
     # 2. No DB profile — fall back to the hardcoded demo accounts.
     print(f"[LOGIN] No DB profile for {email}; trying TEST_USERS fallback")
-    return _login_with_test_user(email, password, requested_role)
+    return _login_with_test_user(email, password, requested_role, requested_warehouse_id)
 
 
-def _login_with_profile(profile, email: str, password: str, requested_role: str) -> LoginResponse:
+def _login_with_profile(profile, email: str, password: str, requested_role: str, requested_warehouse_id: str | None) -> LoginResponse:
     """Authenticate against a DB Profile row."""
     profile_role = (profile.role or "").strip().lower()
     profile_status = (profile.status or "").strip().lower()
@@ -105,9 +127,21 @@ def _login_with_profile(profile, email: str, password: str, requested_role: str)
                    f"Please select the correct role.",
         )
 
+    # Determine active warehouse automatically
+    if profile_role == "super_admin":
+        active_warehouse_id = requested_warehouse_id or str(profile.warehouse_id or "") or _get_default_warehouse_id()
+    else:
+        # Admins and Users log into their assigned warehouse automatically.
+        if requested_warehouse_id and requested_warehouse_id != str(profile.warehouse_id):
+            raise HTTPException(
+                status_code=401,
+                detail="You are only allowed to log into your assigned warehouse. Please select the correct warehouse."
+            )
+        active_warehouse_id = str(profile.warehouse_id) if profile.warehouse_id else _get_default_warehouse_id()
+
     user_id = str(profile.id)
-    token = _create_token(user_id, email, profile_role)
-    print(f"[LOGIN] OK (DB) {email} | role={profile_role} | id={user_id}")
+    token = _create_token(user_id, email, profile_role, active_warehouse_id)
+    print(f"[LOGIN] OK (DB) {email} | role={profile_role} | id={user_id} | wh={active_warehouse_id}")
 
     return LoginResponse(
         access_token=token,
@@ -119,7 +153,7 @@ def _login_with_profile(profile, email: str, password: str, requested_role: str)
     )
 
 
-def _login_with_test_user(email: str, password: str, requested_role: str) -> LoginResponse:
+def _login_with_test_user(email: str, password: str, requested_role: str, requested_warehouse_id: str | None) -> LoginResponse:
     """Backward-compat path for the hardcoded demo accounts."""
     if email not in TEST_USERS:
         raise HTTPException(status_code=401, detail="Invalid email or password.")
@@ -135,10 +169,18 @@ def _login_with_test_user(email: str, password: str, requested_role: str) -> Log
             detail=f"This account is registered as '{user['role']}', not '{requested_role}'. "
                    f"Please select the correct role.",
         )
+        
+    if user["role"] == "super_admin":
+        if not requested_warehouse_id:
+            raise HTTPException(status_code=400, detail="Please select a warehouse to log into.")
+        active_warehouse_id = requested_warehouse_id
+    else:
+        # Default fallback for demo users without a DB profile
+        active_warehouse_id = requested_warehouse_id if requested_warehouse_id else _get_default_warehouse_id()
 
     user_id: str = _resolve_user_id(email)
-    token: str = _create_token(user_id, email, user["role"])
-    print(f"[LOGIN] ✓ (TEST) {email} | role={user['role']} | id={user_id}")
+    token: str = _create_token(user_id, email, user["role"], active_warehouse_id)
+    print(f"[LOGIN] OK (TEST) {email} | role={user['role']} | id={user_id} | wh={active_warehouse_id}")
 
     return LoginResponse(
         access_token=token,
@@ -202,14 +244,32 @@ def _resolve_user_id(email: str) -> str:
     return fallback
 
 
-def _create_token(user_id: str, email: str, role: str) -> str:
+def _create_token(user_id: str, email: str, role: str, active_warehouse_id: str) -> str:
     """Encode a 24-hour JWT."""
     payload = {
         "sub": user_id,
         "email": email,
         "role": role,
+        "active_warehouse_id": active_warehouse_id,
         "exp": datetime.utcnow() + timedelta(hours=24),
     }
     secret: str = os.getenv("JWT_SECRET", "supersecret")
     algorithm: str = os.getenv("JWT_ALGORITHM", "HS256")
     return jwt.encode(payload, secret, algorithm=algorithm)
+
+
+def _get_default_warehouse_id() -> str:
+    """Get the first warehouse ID from the database, falling back to a seeded Colombo ID."""
+    try:
+        from app.db import SessionLocal
+        from app.models import Warehouse
+        db = SessionLocal()
+        try:
+            w = db.query(Warehouse).first()
+            if w:
+                return str(w.id)
+        finally:
+            db.close()
+    except Exception as e:
+        print(f"[LOGIN] Default warehouse lookup failed: {e}")
+    return "c537c281-b6ad-4842-94ec-e937be0083e5"
