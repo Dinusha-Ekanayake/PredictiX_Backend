@@ -66,48 +66,7 @@ def get_current_user(
             # Dynamically attach the session's active warehouse
             setattr(user, "active_warehouse_id", active_warehouse_id)
             return user
-
-    return _build_mock_profile(
-        user_id=user_id,
-        email=payload.get("email", "test@example.com"),
-        role=payload.get("role", "user"),
-        active_warehouse_id=active_warehouse_id,
-        db=db,
-    )
-
-
-def _build_mock_profile(*, user_id: str, email: str, role: str, active_warehouse_id: str | None, db: Optional[Session]):
-    """Construct a duck-typed Profile when the DB record is missing."""
-    from app.models import Department
-
-    department_id = None
-    if db is not None:
-        keyword_to_dept = {
-            "transportation": "Transportation",
-            "electrical": "Electrical",
-            "software": "Software",
-            "mechanical": "Mechanical",
-        }
-        dept_name = next(
-            (name for kw, name in keyword_to_dept.items() if kw in email.lower()),
-            "Transportation",
-        )
-        dept = db.query(Department).filter(Department.name == dept_name).first()
-        if dept:
-            department_id = dept.id
-
-    class MockProfile:
-        def __init__(self) -> None:
-            self.id = user_id
-            self.email = email
-            self.role = role
-            self.full_name = email.split("@")[0].replace(".", " ").title()
-            self.phone = None
-            self.status = "active"
-            self.warehouse_id = None
-            self.active_warehouse_id = active_warehouse_id
-            self.department_id = department_id
-            self.meta = {}
-            self.employee_id = f"EMP-{user_id[:8]}"
-
-    return MockProfile()
+        else:
+            raise HTTPException(status_code=401, detail="User not found")
+    else:
+        raise HTTPException(status_code=500, detail="Database connection missing")
