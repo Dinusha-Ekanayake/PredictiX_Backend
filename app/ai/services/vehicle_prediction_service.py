@@ -152,9 +152,25 @@ def build_vehicle_feature_dict(db: Session, asset_id: str) -> dict[str, Any]:
     return feature_dict
 
 
+CATEGORICAL_COLS = {
+    "vehicle_type", "vehicle_role", "make_model", "fuel_type", "transmission", 
+    "service_provider_type", "maintenance_priority", "route_type", "cargo_type", 
+    "operating_shift", "last_service_type", "parts_replaced_last_service", 
+    "major_component_replaced", "sensor_fault_flag"
+}
+
 def build_dataframe_for_features(feature_dict: dict[str, Any], feature_names: list[str]) -> pd.DataFrame:
     row = {feature: feature_dict.get(feature) for feature in feature_names}
-    return pd.DataFrame([row])
+    df = pd.DataFrame([row])
+    
+    # Force correct dtypes for XGBoost enable_categorical=True
+    for col in df.columns:
+        if col in CATEGORICAL_COLS:
+            df[col] = df[col].astype("category")
+        else:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+            
+    return df
 
 
 def compute_health_score(feature_dict: dict[str, Any], failure_probability: float, days_until: float) -> tuple[float, str]:
