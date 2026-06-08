@@ -33,6 +33,7 @@ from .routers.predictions import router as predictions_router
 from .routers.profile import router as profiles_router
 from .routers.report_sources import router as report_sources_router
 from .routers.reports import router as reports_router
+from .routers.asset_reports import router as asset_reports_router
 from .routers.sensor_readings import router as sensor_readings_router
 from .routers.ticket_attachments import router as ticket_attachments_router
 from .routers.ticket_comments import router as ticket_comments_router
@@ -315,6 +316,7 @@ app.include_router(admin_dashboard_router)
 app.include_router(notifications_router)
 app.include_router(notification_preferences_router)
 app.include_router(reports_router)
+app.include_router(asset_reports_router)
 app.include_router(report_sources_router)
 
 # Chatbot
