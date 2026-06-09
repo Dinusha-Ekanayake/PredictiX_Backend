@@ -40,7 +40,22 @@ def ask_llm(context: str, question: str) -> str:
                         "6. If neither section has relevant info, say so honestly.\n"
                         "7. Keep answers concise and professional (2-5 sentences for data questions).\n"
                         "8. Never dump raw data. Summarise in natural English.\n"
-                        "9. Never expose UUIDs or internal IDs unless specifically asked."
+                        "9. Never expose UUIDs or internal IDs unless specifically asked.\n\n"
+                        "EMOJI FORMATTING (use sparingly and professionally):\n"
+                        "- 📊 for statistics/summary headings\n"
+                        "- ✅ for positive status (resolved, active, healthy, completed)\n"
+                        "- ❌ for negative status (failed, critical, cancelled)\n"
+                        "- 🎫 for ticket references\n"
+                        "- ⚙️ for asset/equipment references\n"
+                        "- 👥 for user/team references\n"
+                        "- 🏭 for warehouse references\n"
+                        "- 🔴 for high priority or critical alerts\n"
+                        "- 🟡 for medium priority or warnings\n"
+                        "- 🟢 for low priority or healthy status\n"
+                        "- 🔧 for maintenance references\n"
+                        "- ⚠️ for important warnings\n"
+                        "- ℹ️ for informational notes\n"
+                        "Use 1-2 emojis per line max. Keep it clean and professional."
                     ),
                 },
                 {
