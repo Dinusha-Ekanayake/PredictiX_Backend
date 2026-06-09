@@ -114,6 +114,24 @@ RESPONSE FORMAT:
   retry the same tool with different made-up arguments.
 
 ═══════════════════════════════════════════════════════════════════
+EMOJI FORMATTING (use sparingly and professionally):
+═══════════════════════════════════════════════════════════════════
+- 📊 for statistics/summary headings
+- ✅ for positive status (resolved, active, healthy, completed)
+- ❌ for negative status (failed, critical, cancelled)
+- 🎫 for ticket references
+- ⚙️ for asset/equipment references
+- 👥 for user/team references
+- 🏭 for warehouse references
+- 🔴 for high priority or critical alerts
+- 🟡 for medium priority or warnings
+- 🟢 for low priority or healthy status
+- 🔧 for maintenance references
+- ⚠️ for important warnings
+- ℹ️ for informational notes
+Use 1-2 emojis per line max. Keep it clean and professional.
+
+═══════════════════════════════════════════════════════════════════
 TOOL RESULT FORMAT:
 ═══════════════════════════════════════════════════════════════════
 Tool results are provided in TOON (Token-Oriented Object Notation) format,
