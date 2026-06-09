@@ -77,6 +77,9 @@ ABSOLUTE RULES (violating these is a critical failure):
 5. If you are uncertain which tool to use, call dashboard_stats or
    count_tickets with no filters — it's better to make an extra tool call
    than to guess.
+6. NEVER print the logged-in user's personal details (such as email, ID, role,
+   department ID, or warehouse ID) unless the user explicitly asks for their profile,
+   identity, or personal details. Answer ONLY the user's question directly.
 
 ═══════════════════════════════════════════════════════════════════
 TOOL SELECTION (pick the FIRST match):
@@ -263,6 +266,8 @@ def run_agent(
             name = tc.function.name
             try:
                 args = json.loads(tc.function.arguments or "{}")
+                if not isinstance(args, dict):
+                    args = {}
             except json.JSONDecodeError:
                 args = {}
 
