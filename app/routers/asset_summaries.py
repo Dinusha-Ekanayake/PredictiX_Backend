@@ -3,7 +3,7 @@ from datetime import datetime
 import logging
 
 from app.schemas.asset_summary import AssetSummaryRequest, AssetSummaryResponse
-from app.ai.services.asset_summary_service import generate_asset_summary, get_asset_summary_repo
+from app.ai.services.asset_summary_service import generate_asset_summary, get_asset_summary_repo, get_hf_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -68,10 +68,8 @@ async def health_check():
         
         # Check if credentials are set
         try:
-            from app.ai.services.asset_summary_service import get_asset_summary_repo
-            import os
-            has_token = bool(os.getenv("HF_TOKEN"))
-            repo = get_asset_summary_repo()
+            token, repo = get_hf_credentials()
+            has_token = bool(token)
             has_repo = bool(repo)
         except Exception as e:
             return {
@@ -87,20 +85,22 @@ async def health_check():
         
         # Check if model can be loaded
         try:
-            from app.ai.services.asset_summary_service import get_asset_summary_repo
+            from app.ai.services.asset_summary_service import get_asset_summary_model
+            model = get_asset_summary_model()
+            model_loaded = model is not None
             repo = get_asset_summary_repo()
             
-            logger.info(f"[AssetSummary] Health check: repo={repo}")
+            logger.info(f"[AssetSummary] Health check: model={model_loaded}, repo={repo}")
             
             return {
-                "status": "ok",
-                "model_loaded": True,
-                "message": "Asset summary model is ready via HF Inference API",
+                "status": "ok" if model_loaded else "warning",
+                "model_loaded": model_loaded,
+                "message": "Asset summary model is ready" if model_loaded else "Model initialized but not yet warmed up",
                 "details": {
                     "has_token": has_token,
                     "has_repo": has_repo,
                     "repo": repo,
-                    "model_loaded": True
+                    "model_loaded": model_loaded
                 }
             }
         except Exception as e:

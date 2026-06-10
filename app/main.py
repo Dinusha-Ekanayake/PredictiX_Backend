@@ -182,19 +182,21 @@ async def lifespan(_: FastAPI):
     global scheduler
 
     if os.getenv("DISABLE_HF_MODELS", "false").lower() != "true":
+        # HF model warmups are OPTIONAL optimisations: each service has a graceful
+        # fallback when its model is unavailable. A warmup failure — commonly an
+        # out-of-memory / "paging file too small" (OS error 1455) when loading the
+        # large BART weights — must NOT crash the whole API. Log it and carry on.
         try:
             warmup_ticket_categorizer()
             log.info("Ticket categorization model warmed up.")
         except Exception as exc:
-            log.exception("Ticket categorization warmup failed")
-            raise RuntimeError(f"Failed to load ticket categorization model: {exc}") from exc
+            log.warning("Ticket categorization warmup failed; continuing without it: %s", exc)
 
         try:
             warmup_asset_summary_model()
             log.info("Asset summary model warmed up.")
         except Exception as exc:
-            log.exception("Asset summary warmup failed")
-            raise RuntimeError(f"Failed to load asset summary model: {exc}") from exc
+            log.warning("Asset summary warmup failed; continuing with deterministic fallback: %s", exc)
     else:
         log.info("HuggingFace models disabled (DISABLE_HF_MODELS=true). Skipping warmup.")
 
