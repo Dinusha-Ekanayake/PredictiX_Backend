@@ -22,8 +22,6 @@ Data Sources:
 import os
 import json
 import re
-import time
-import logging
 from typing import Any
 from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -52,8 +50,6 @@ from app.kb.kb_annotator import (
     get_climate_risk_flags,
 )
 
-logger = logging.getLogger(__name__)
-
 
 # ═══════════════════════════════════════════════════════════════
 # LLM SETUP — Groq Llama 3
@@ -73,36 +69,6 @@ def _get_llm(temperature: float = 0.3) -> ChatGroq:
         model_name="llama-3.3-70b-versatile",
         temperature=temperature,
     )
-
-
-def _invoke_with_retry(llm: ChatGroq, messages: list, max_retries: int = 4) -> Any:
-    """
-    Invoke the LLM with exponential-backoff retry on Groq 429 rate-limit errors.
-    Waits 35 s on the first hit (Groq resets TPM every 60 s), doubling each attempt.
-    Raises RuntimeError after all retries are exhausted.
-    """
-    delay = 35  # seconds — Groq free tier resets ~every 60 s
-    for attempt in range(max_retries):
-        try:
-            return llm.invoke(messages)
-        except Exception as exc:
-            err_str = str(exc)
-            if "rate_limit_exceeded" in err_str or "429" in err_str:
-                if attempt < max_retries - 1:
-                    import logging
-                    logging.getLogger(__name__).warning(
-                        "Groq rate limit hit (attempt %d/%d). Waiting %ds before retry.",
-                        attempt + 1, max_retries, delay,
-                    )
-                    time.sleep(delay)
-                    delay = min(delay * 2, 120)  # cap at 2 min
-                else:
-                    raise RuntimeError(
-                        "Groq API rate limit reached. The report uses many tokens — "
-                        "please wait ~60 seconds and try again, or upgrade your Groq plan."
-                    ) from exc
-            else:
-                raise
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -459,8 +425,8 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
             age = current_year - int(yr)
             band = "0-3 yrs" if age <= 3 else "4-6 yrs" if age <= 6 else "7-10 yrs" if age <= 10 else "10+ yrs"
             fleet_age_distribution[band] += cnt
-    except Exception as e:
-        logger.warning("warehouse context B1 (fleet age distribution) failed: %s", e, exc_info=True)
+    except Exception:
+        pass
 
     # Surface assets with no manufacture_year as an explicit "Unknown" band so the
     # age bands reconcile to the full fleet (total_assets). Without this they
@@ -482,8 +448,8 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
               AND warranty_expiry_date >= :today
               AND warranty_expiry_date <= :cutoff
         """), {"today": today_date, "cutoff": expiry_cutoff}).scalar() or 0
-    except Exception as e:
-        logger.warning("warehouse context B2 (warranty expiry) failed: %s", e, exc_info=True)
+    except Exception:
+        pass
 
     # B3. Component Health Averages (sensor_readings — latest per asset)
     component_health: dict[str, float] = {
@@ -525,13 +491,10 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
             total_fault_codes          = int(comp_row[5] or 0)
             avg_fault_codes_per_asset  = float(comp_row[6] or 0)
             monitored_assets           = int(comp_row[7] or 0)
-    except Exception as e:
-        logger.warning("warehouse context B3 (component health) failed: %s", e, exc_info=True)
+    except Exception:
+        pass
 
     # B4. Vendor & Service Provider Breakdown (maintenance_events)
-    # Use the SAME anchored reporting window as the §4 totals/trend (period_start..
-    # period_end), not the rolling 90-day cutoff — otherwise vendor event counts are
-    # drawn from a different period than the headline total and the two disagree.
     vendor_breakdown: list[dict] = []
     try:
         vendor_rows = db.execute(text("""
@@ -540,17 +503,17 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
                    COALESCE(SUM(cost_amount), 0)::numeric  AS total_cost
             FROM maintenance_events
             WHERE vendor_name IS NOT NULL AND vendor_name <> ''
-              AND performed_at >= :start AND performed_at < :end
+              AND performed_at >= :cutoff
             GROUP BY vendor_name
             ORDER BY event_count DESC
             LIMIT 6
-        """), {"start": period_start, "end": period_end}).fetchall()
+        """), {"cutoff": three_months_ago}).fetchall()
         vendor_breakdown = [
             {"vendor": r[0], "events": int(r[1]), "cost": float(r[2])}
             for r in vendor_rows
         ]
-    except Exception as e:
-        logger.warning("warehouse context B4 (vendor breakdown) failed: %s", e, exc_info=True)
+    except Exception:
+        pass
 
     # B5. Ticket MTTR — Mean Time to Resolve
     avg_resolution_hours = 0.0
@@ -568,24 +531,20 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
             avg_resolution_hours = float(mttr_row[0] or 0)
             avg_resolution_days  = float(mttr_row[1] or 0)
 
-        # Cast the enum columns to text BEFORE coalescing with the 'Unknown' literal —
-        # otherwise Postgres tries to coerce 'Unknown' into the ticket_priority enum and
-        # raises "invalid input value for enum", which the except below would silently
-        # swallow (leaving the per-priority breakdown empty while the overall avg shows).
         prio_rows = db.execute(text("""
-            SELECT COALESCE(final_priority::text, priority::text, 'Unknown') AS priority,
+            SELECT COALESCE(final_priority, priority, 'Unknown') AS priority,
                    ROUND(AVG(EXTRACT(EPOCH FROM (resolved_at - opened_at)) / 3600)::numeric, 1) AS avg_hours
             FROM tickets
             WHERE resolved_at IS NOT NULL AND opened_at IS NOT NULL
-            GROUP BY COALESCE(final_priority::text, priority::text, 'Unknown')
+            GROUP BY COALESCE(final_priority, priority, 'Unknown')
             ORDER BY avg_hours DESC
         """)).fetchall()
         mttr_by_priority = [
             {"priority": str(r[0]).title(), "avg_hours": float(r[1] or 0)}
             for r in prio_rows
         ]
-    except Exception as e:
-        logger.warning("warehouse context B5 (ticket MTTR) failed: %s", e, exc_info=True)
+    except Exception:
+        pass
 
     return {
         # Warehouse
@@ -919,26 +878,6 @@ def _guard_narrative(ai_sections: dict, ctx: dict) -> dict:
     return ai_sections
 
 
-# "(KB Referenced)"/"[KB-Referenced]" (bracketed) and bare "KB Referenced".
-_KB_REF_BRACKETED = re.compile(r"[\(\[\{]\s*KB[\s\-]?Referenced\s*[\)\]\}]", re.IGNORECASE)
-_KB_REF_BARE = re.compile(r"\bKB[\s\-]?Referenced\b", re.IGNORECASE)
-
-
-def _strip_kb_referenced(ai_sections: dict) -> dict:
-    """Delete only the phrase 'KB Referenced' from the narrative, leaving the
-    surrounding text and punctuation intact (no joined words, no doubled stops)."""
-    for key, val in list(ai_sections.items()):
-        if not isinstance(val, str):
-            continue
-        cleaned = _KB_REF_BRACKETED.sub(" ", val)          # drop "(KB Referenced)"
-        cleaned = _KB_REF_BARE.sub(" ", cleaned)            # drop bare "KB Referenced"
-        cleaned = re.sub(r"\s+([.,;:!?])", r"\1", cleaned)  # "word ." -> "word."
-        cleaned = re.sub(r"([.,;:!?])(\s*\1)+", r"\1", cleaned)  # ".." / ". ." -> "."
-        cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()    # collapse spaces
-        ai_sections[key] = cleaned
-    return ai_sections
-
-
 def run_warehouse_agent(db: Session) -> dict:
     """
     KB-Enhanced Warehouse Report Agent:
@@ -952,8 +891,13 @@ def run_warehouse_agent(db: Session) -> dict:
     ctx = build_warehouse_context(db)
     context_text = _context_to_prompt_text(ctx)
 
-    # ── Step 2: KB Vector Store (used for top-k retrieval in Step 4) ──────────
+    # ── Step 2: KB Vector Store retrieval ─────────────────────
     kb_store = get_kb_store()
+    # Inject the FULL source-grouped KB. The curated corpus (26 chunks spanning
+    # statutory law, OEM schedules, ISO 55000/55001, SMRP, FMEA and Colombo climate)
+    # is small enough to inject completely, guaranteeing no standard is dropped by
+    # top-k retrieval — the strongest lever for grounded, high-quality report prose.
+    kb_full_context = kb_store.build_full_kb_context()
 
     # ── Step 3: KB Annotations (deterministic — no LLM) ───────
     shap_enriched     = annotate_shap_features(ctx.get("top_shap_features", []))
@@ -984,22 +928,9 @@ def run_warehouse_agent(db: Session) -> dict:
     # ── Step 4: LLM call with KB-grounded prompt ───────────────
     llm = _get_llm(temperature=0.25)
 
-    # Use targeted top-k retrieval instead of full KB injection to stay well under
-    # the 12,000 TPM free-tier limit.  A query that covers all five report sections
-    # retrieves the most relevant chunks (health, cost, maintenance, risk, compliance)
-    # without blowing the token budget.
-    kb_query = (
-        "warehouse fleet health risk maintenance cost compliance ISO SMRP "
-        "FMEA statutory inspection OEM service interval climate"
-    )
-    kb_chunks = kb_store.retrieve(kb_query, top_k=6)
-    kb_focused = "\n\n".join(
-        f"[KB: {c['section']}]\n{c['text']}" for c in kb_chunks
-    )
-
     combined_prompt = (
         f"LIVE DATABASE DATA:\n{context_text}\n\n"
-        f"KNOWLEDGE BASE CONTEXT (ISO 55000 / SMRP Standards):\n{kb_focused}"
+        f"KNOWLEDGE BASE CONTEXT (ISO 55000 / SMRP Standards):\n{kb_full_context}"
     )
 
     messages = [
@@ -1007,7 +938,7 @@ def run_warehouse_agent(db: Session) -> dict:
         HumanMessage(content=f"Generate the full KB-Enhanced warehouse report:\n\n{combined_prompt}"),
     ]
 
-    response = _invoke_with_retry(llm, messages)
+    response = llm.invoke(messages)
     content = response.content.strip()
 
     # Strip code fences if model added them
@@ -1035,10 +966,6 @@ def run_warehouse_agent(db: Session) -> dict:
     # (e.g. "costs trending upwards" while cost data falls, or attributing an
     # artifactual decline to "efficiency"). Prevents those errors standing in the PDF.
     ai_sections = _guard_narrative(ai_sections, ctx)
-
-    # Strip any "KB Referenced" meta-tags the model injects into the prose — this
-    # keyword must not appear in any warehouse report output.
-    ai_sections = _strip_kb_referenced(ai_sections)
 
     return {
         "ai_sections":    ai_sections,
@@ -1080,8 +1007,8 @@ def run_asset_agent(asset_id: str | None = None, db: Session | None = None) -> d
                     "health_score": int(pred.health_score) if pred and pred.health_score else None,
                     "risk_level": pred.risk_level if pred else None,
                 }
-        except Exception as e:
-            logger.warning("run_asset_agent lookup failed for %s: %s", asset_id, e, exc_info=True)
+        except Exception:
+            pass
 
     return {
         "agent": "asset_report_agent",
