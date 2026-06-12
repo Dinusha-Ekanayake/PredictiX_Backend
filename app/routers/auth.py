@@ -88,9 +88,8 @@ def post_login(request: LoginRequest):
     if profile is not None:
         return _login_with_profile(profile, email, password, requested_role, requested_warehouse_id)
 
-    # 2. No DB profile — reject login.
-    print(f"[LOGIN] ✗ No DB profile for {email}")
-    raise HTTPException(status_code=401, detail="Invalid email or password.")
+    # 2. No DB profile — fallback to test accounts.
+    return _login_with_test_user(email, password, requested_role, requested_warehouse_id)
 
 
 def _login_with_profile(profile, email: str, password: str, requested_role: str, requested_warehouse_id: str | None) -> LoginResponse:
@@ -101,7 +100,7 @@ def _login_with_profile(profile, email: str, password: str, requested_role: str,
 
     # Reject inactive accounts.
     if profile_status != "active":
-        print(f"[LOGIN] ✗ {email} | account inactive (status={profile_status})")
+        print(f"[LOGIN] X {email} | account inactive (status={profile_status})")
         raise HTTPException(status_code=401, detail="This account is inactive.")
 
     # Determine which password check applies.
@@ -116,7 +115,7 @@ def _login_with_profile(profile, email: str, password: str, requested_role: str,
         ok = password == _default_password()
 
     if not ok:
-        print(f"[LOGIN] ✗ {email} | invalid password")
+        print(f"[LOGIN] X {email} | invalid password")
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 
     # Validate the declared role against the account role.
