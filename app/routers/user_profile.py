@@ -85,7 +85,8 @@ def get_my_profile(
             "warehouse_id": str(real_user.warehouse_id) if real_user.warehouse_id else None,
             "role": real_user.role or "",
             "status": real_user.status or "",
-            "assignedAssetsCount": asset_count
+            "assignedAssetsCount": asset_count,
+            "avatar_url": real_user.avatar_url
         }
         
     except Exception as e:

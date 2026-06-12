@@ -76,7 +76,7 @@ class TicketOut(BaseModel):
     asset_summary: Optional[str] = None
     asset_id: Optional[UUID] = None
     warehouse_id: Optional[UUID] = None
-    created_by: UUID
+    created_by: Optional[UUID] = None
     assigned_to: Optional[UUID] = None
     reviewed_by: Optional[UUID] = None
     opened_at: Optional[datetime] = None
