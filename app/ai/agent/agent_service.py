@@ -77,6 +77,9 @@ ABSOLUTE RULES (violating these is a critical failure):
 5. If you are uncertain which tool to use, call dashboard_stats or
    count_tickets with no filters — it's better to make an extra tool call
    than to guess.
+6. NEVER print the logged-in user's personal details (such as email, ID, role,
+   department ID, or warehouse ID) unless the user explicitly asks for their profile,
+   identity, or personal details. Answer ONLY the user's question directly.
 
 ═══════════════════════════════════════════════════════════════════
 TOOL SELECTION (pick the FIRST match):
@@ -112,6 +115,25 @@ RESPONSE FORMAT:
 - Never dump raw JSON. Never expose UUIDs unless the user asked for them.
 - If a tool returned an "error" field, briefly explain and stop — don't
   retry the same tool with different made-up arguments.
+- When presenting list items, counts, or categories (such as ticket counts per category), ALWAYS format them as a bulleted list. Each list item MUST start with an appropriate emoji (e.g. ⚡ for electrical, ⚙️ for mechanical, 🔧 for maintenance, 🟢 for low priority, 🔴 for high priority, etc.).
+
+═══════════════════════════════════════════════════════════════════
+EMOJI FORMATTING (use sparingly and professionally):
+═══════════════════════════════════════════════════════════════════
+- 📊 for statistics/summary headings
+- ✅ for positive status (resolved, active, healthy, completed)
+- ❌ for negative status (failed, critical, cancelled)
+- 🎫 for ticket references
+- ⚙️ for asset/equipment references
+- 👥 for user/team references
+- 🏭 for warehouse references
+- 🔴 for high priority or critical alerts
+- 🟡 for medium priority or warnings
+- 🟢 for low priority or healthy status
+- 🔧 for maintenance references
+- ⚠️ for important warnings
+- ℹ️ for informational notes
+Use 1-2 emojis per line max. Keep it clean and professional.
 
 ═══════════════════════════════════════════════════════════════════
 TOOL RESULT FORMAT:
@@ -132,6 +154,34 @@ def _get_groq_client() -> Groq:
     if not api_key:
         raise RuntimeError("GROQ_API_KEY is not configured")
     return Groq(api_key=api_key)
+
+
+def _get_rate_limit_reset_time(e: Exception, err_str: str) -> str | None:
+    # 1. Try to check headers
+    if hasattr(e, "response") and e.response is not None:
+        headers = getattr(e.response, "headers", {})
+        ra = headers.get("retry-after")
+        if ra:
+            try:
+                sec = float(ra)
+                if sec < 60:
+                    return f"{round(sec)} seconds"
+                else:
+                    return f"{round(sec / 60, 1)} minutes"
+            except ValueError:
+                return str(ra)
+        
+        rt = headers.get("x-ratelimit-reset-tokens")
+        if rt:
+            return str(rt)
+
+    # 2. Try to parse from the error message text
+    import re
+    match = re.search(r"try again in\s+([^'\"\.\}]+)", err_str)
+    if match:
+        return match.group(1).strip()
+
+    return None
 
 
 def run_agent(
@@ -189,9 +239,17 @@ def run_agent(
             log.exception("Groq call failed (iteration %d)", iteration)
             err_str = str(e).lower()
             if "rate" in err_str or "429" in err_str or "quota" in err_str or "limit" in err_str:
-                friendly = (
-                    "I'm a bit busy right now. Please try again in a moment."
-                )
+                reset_time = _get_rate_limit_reset_time(e, err_str)
+                if reset_time:
+                    friendly = (
+                        f"I have reached my temporary limit of tokens (words). "
+                        f"Please try again in {reset_time}."
+                    )
+                else:
+                    friendly = (
+                        "I have reached my temporary limit of tokens (words). "
+                        "Please try again in a moment."
+                    )
             elif "timeout" in err_str or "timed out" in err_str:
                 friendly = (
                     "That took longer than expected. Please try again with a more specific question."
@@ -245,6 +303,8 @@ def run_agent(
             name = tc.function.name
             try:
                 args = json.loads(tc.function.arguments or "{}")
+                if not isinstance(args, dict):
+                    args = {}
             except json.JSONDecodeError:
                 args = {}
 
