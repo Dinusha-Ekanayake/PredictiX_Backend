@@ -22,6 +22,7 @@ Data Sources:
 import os
 import json
 import re
+import time
 from typing import Any
 from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -69,6 +70,36 @@ def _get_llm(temperature: float = 0.3) -> ChatGroq:
         model_name="llama-3.3-70b-versatile",
         temperature=temperature,
     )
+
+
+def _invoke_with_retry(llm: ChatGroq, messages: list, max_retries: int = 4) -> Any:
+    """
+    Invoke the LLM with exponential-backoff retry on Groq 429 rate-limit errors.
+    Waits 35 s on the first hit (Groq resets TPM every 60 s), doubling each attempt.
+    Raises RuntimeError after all retries are exhausted.
+    """
+    delay = 35  # seconds — Groq free tier resets ~every 60 s
+    for attempt in range(max_retries):
+        try:
+            return llm.invoke(messages)
+        except Exception as exc:
+            err_str = str(exc)
+            if "rate_limit_exceeded" in err_str or "429" in err_str:
+                if attempt < max_retries - 1:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "Groq rate limit hit (attempt %d/%d). Waiting %ds before retry.",
+                        attempt + 1, max_retries, delay,
+                    )
+                    time.sleep(delay)
+                    delay = min(delay * 2, 120)  # cap at 2 min
+                else:
+                    raise RuntimeError(
+                        "Groq API rate limit reached. The report uses many tokens — "
+                        "please wait ~60 seconds and try again, or upgrade your Groq plan."
+                    ) from exc
+            else:
+                raise
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -891,13 +922,8 @@ def run_warehouse_agent(db: Session) -> dict:
     ctx = build_warehouse_context(db)
     context_text = _context_to_prompt_text(ctx)
 
-    # ── Step 2: KB Vector Store retrieval ─────────────────────
+    # ── Step 2: KB Vector Store (used for top-k retrieval in Step 4) ──────────
     kb_store = get_kb_store()
-    # Inject the FULL source-grouped KB. The curated corpus (26 chunks spanning
-    # statutory law, OEM schedules, ISO 55000/55001, SMRP, FMEA and Colombo climate)
-    # is small enough to inject completely, guaranteeing no standard is dropped by
-    # top-k retrieval — the strongest lever for grounded, high-quality report prose.
-    kb_full_context = kb_store.build_full_kb_context()
 
     # ── Step 3: KB Annotations (deterministic — no LLM) ───────
     shap_enriched     = annotate_shap_features(ctx.get("top_shap_features", []))
@@ -928,9 +954,22 @@ def run_warehouse_agent(db: Session) -> dict:
     # ── Step 4: LLM call with KB-grounded prompt ───────────────
     llm = _get_llm(temperature=0.25)
 
+    # Use targeted top-k retrieval instead of full KB injection to stay well under
+    # the 12,000 TPM free-tier limit.  A query that covers all five report sections
+    # retrieves the most relevant chunks (health, cost, maintenance, risk, compliance)
+    # without blowing the token budget.
+    kb_query = (
+        "warehouse fleet health risk maintenance cost compliance ISO SMRP "
+        "FMEA statutory inspection OEM service interval climate"
+    )
+    kb_chunks = kb_store.retrieve(kb_query, top_k=6)
+    kb_focused = "\n\n".join(
+        f"[KB: {c['section']}]\n{c['text']}" for c in kb_chunks
+    )
+
     combined_prompt = (
         f"LIVE DATABASE DATA:\n{context_text}\n\n"
-        f"KNOWLEDGE BASE CONTEXT (ISO 55000 / SMRP Standards):\n{kb_full_context}"
+        f"KNOWLEDGE BASE CONTEXT (ISO 55000 / SMRP Standards):\n{kb_focused}"
     )
 
     messages = [
@@ -938,7 +977,7 @@ def run_warehouse_agent(db: Session) -> dict:
         HumanMessage(content=f"Generate the full KB-Enhanced warehouse report:\n\n{combined_prompt}"),
     ]
 
-    response = llm.invoke(messages)
+    response = _invoke_with_retry(llm, messages)
     content = response.content.strip()
 
     # Strip code fences if model added them
