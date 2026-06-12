@@ -372,7 +372,6 @@ def create_user_ticket(
     preset_predicted_priority: Optional[str] = None,
     preset_predicted_category: Optional[str] = None,
     preset_ticket_summary: Optional[str] = None,
-    assigned_to: Optional[UUID] = None,
 ) -> Ticket:
     """Create a new ticket on behalf of the user, optionally enriching with AI."""
     predicted_priority: Optional[str] = None
@@ -414,7 +413,6 @@ def create_user_ticket(
         asset_id=asset_id,
         warehouse_id=warehouse_id,
         created_by=user_id,
-        assigned_to=assigned_to,
     )
     db.add(ticket)
     db.commit()
