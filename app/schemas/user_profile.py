@@ -19,6 +19,7 @@ class UserProfileOut(BaseModel):
     role: str
     status: str
     assignedAssetsCount: int      # COUNT of active assignments
+    avatar_url: Optional[str] = None
     settings: Optional[UserSettings] = None
 
 class UserProfileUpdate(BaseModel):
