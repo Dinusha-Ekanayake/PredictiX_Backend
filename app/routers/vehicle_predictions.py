@@ -12,7 +12,7 @@ from app.schemas.prediction import VehiclePredictionStoredResponse
 def predict_vehicle(asset_id: str, requested_by: str | None = None, db: Session = Depends(get_db)):
     from app.main import _load_pdm_models
     _load_pdm_models()
-    from app.main import clf_model, clf_features, reg_model, reg_features
+    from app.main import clf_model, clf_features, clf_categorical_cols, reg_model, reg_features
 
     if clf_model is None or reg_model is None:
         raise HTTPException(status_code=500, detail="Models are not loaded")
@@ -24,6 +24,7 @@ def predict_vehicle(asset_id: str, requested_by: str | None = None, db: Session 
             requested_by=requested_by,
             clf_model=clf_model,
             clf_features=clf_features,
+            clf_categorical_cols=clf_categorical_cols,
             reg_model=reg_model,
             reg_features=reg_features,
         )
