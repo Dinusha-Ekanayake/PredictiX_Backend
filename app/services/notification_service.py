@@ -701,13 +701,13 @@ class NotificationService:
     @staticmethod
     def notify_on_new_faq(db: Session, faq_data: dict, admin_name: str) -> bool:
         """
-        Notify all active users and admins when a new FAQ is created in the Help Desk.
+        Notify all active admins when a new FAQ is created in the Help Desk.
         """
         try:
             from app.models import Profile
             
-            # 1. Fetch active profile emails
-            profiles = db.query(Profile).filter(Profile.status == "active").all()
+            # 1. Fetch active admin profile emails
+            profiles = db.query(Profile).filter(Profile.role == "admin", Profile.status == "active").all()
             recipient_emails = {p.email for p in profiles if p.email}
             
             # Hardcoded demo email

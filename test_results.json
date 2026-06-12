@@ -1,0 +1,15 @@
+{
+  "passed": [
+    "Auth Login",
+    "Get Current Profile",
+    "List Warehouses",
+    "List Departments",
+    "List Assets",
+    "Get Single Asset",
+    "Predictions API Health",
+    "Get Asset Failure Prediction",
+    "List Tickets",
+    "Warehouse Dashboard Summary"
+  ],
+  "failed": []
+}

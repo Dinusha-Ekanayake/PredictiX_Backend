@@ -230,7 +230,7 @@ class AgentRequest(BaseModel):
 
 class ToolTraceItem(BaseModel):
     name: str
-    args: dict
+    args: Optional[dict] = None
     result_preview: str
 
 
