@@ -67,6 +67,20 @@ def get_current_user(
             setattr(user, "active_warehouse_id", active_warehouse_id)
             return user
         else:
-            raise HTTPException(status_code=401, detail="User not found")
+            # No DB row — build a lightweight in-memory stub for demo / super-admin accounts
+            email = payload.get("email", "")
+            role = payload.get("role", "user")
+            stub = Profile(
+                id=user_id,
+                email=email,
+                full_name=email.split("@")[0].replace(".", " ").title(),
+                role=role,
+                status="active",
+                warehouse_id=None,
+                department_id=None,
+                meta={},
+            )
+            setattr(stub, "active_warehouse_id", active_warehouse_id)
+            return stub
     else:
         raise HTTPException(status_code=500, detail="Database connection missing")

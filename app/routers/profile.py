@@ -184,42 +184,46 @@ async def upload_my_avatar(
     current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    if not db:
-        raise HTTPException(status_code=503, detail="Database unavailable")
-
+    content_type = file.content_type or "image/png"
     # Basic content type validation
-    if not file.content_type.startswith("image/"):
+    if not content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image")
 
     try:
         # Read file content
         file_bytes = await file.read()
-        
-        # Generate a unique filename using UUID to prevent collisions
-        file_ext = file.filename.split(".")[-1] if "." in file.filename else "png"
+
+        # Generate a unique filename — guard against None filename
+        filename = file.filename or "upload"
+        file_ext = filename.rsplit(".", 1)[-1] if "." in filename else "png"
         new_filename = f"{current_user.id}_{uuid.uuid4().hex[:8]}.{file_ext}"
-        
+
         # Upload to Supabase Storage bucket 'avatars'
-        # We use a public bucket so the frontend can display it easily
         res = admin_supabase.storage.from_("avatars").upload(
             path=new_filename,
             file=file_bytes,
-            file_options={"content-type": file.content_type}
+            file_options={"content-type": content_type}
         )
-        
+
         # Get the public URL
         public_url = admin_supabase.storage.from_("avatars").get_public_url(new_filename)
-        
-        # Update user's profile
-        current_user.avatar_url = public_url
-        db.commit()
-        db.refresh(current_user)
-        
+
+        # Update user's profile in DB only if this is a real DB-backed user
+        if db is not None:
+            db_user = db.query(Profile).filter(Profile.id == current_user.id).first()
+            if db_user:
+                db_user.avatar_url = public_url
+                db.commit()
+                db.refresh(db_user)
+
         return {"avatar_url": public_url}
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
-        log.exception("Failed to upload avatar: %s", e)
-        raise HTTPException(status_code=500, detail="Failed to upload avatar")
+        log.exception("Failed to upload avatar for user %s: %s", current_user.id, e)
+        raise HTTPException(status_code=500, detail=f"Failed to upload avatar: {str(e)}")
+
 
 
 @router.get("/me/assets")
