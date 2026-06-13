@@ -27,6 +27,8 @@ from app.schemas.tickets import (
     TicketCategorizationResponse,
     TicketPriorityRequest,
     TicketPriorityResponse,
+    TicketPreviewRequest,
+    TicketPreviewResponse,
 )
 from app.ai.services.ticket_categorization_service import categorize_ticket_text
 from app.ai.services.ticket_priority_service import predict_ticket_priority
@@ -77,6 +79,10 @@ def create_ticket(payload: TicketCreate, db: Session = Depends(get_db), _: objec
     data["ticket_number"] = _generate_ticket_number(db)
     if data.get("priority"):
         data["priority"] = _normalize_priority(data["priority"])
+    if data.get("predicted_priority"):
+        data["predicted_priority"] = _normalize_priority(data["predicted_priority"])
+    if data.get("predicted_category"):
+        data["predicted_category"] = _normalize_category(data["predicted_category"])
     obj = Ticket(**data)
     db.add(obj)
     db.commit()
@@ -354,6 +360,32 @@ def delete_ticket(ticket_id: str, db: Session = Depends(get_db)):
     return {"message": "Ticket deleted", "id": ticket_id}
 
 
+@router.post("/preview", response_model=TicketPreviewResponse)
+def preview_ticket(payload: TicketPreviewRequest, _: object = Depends(get_current_user)):
+    """Run category + priority AI without saving. Used by the create dialog."""
+    errors: dict[str, str] = {}
+    predicted_category: str | None = None
+    predicted_priority: str | None = None
+
+    try:
+        cat = categorize_ticket_text(title=payload.title, description=payload.description)
+        predicted_category = cat.get("predicted_label")
+    except Exception as exc:
+        errors["category"] = str(exc)
+
+    try:
+        pri = predict_ticket_priority(title=payload.title, description=payload.description)
+        predicted_priority = pri.lower() if pri else None
+    except Exception as exc:
+        errors["priority"] = str(exc)
+
+    return TicketPreviewResponse(
+        predicted_category=predicted_category,
+        predicted_priority=predicted_priority,
+        errors=errors,
+    )
+
+
 @router.post(
     "/categorize",
     response_model=TicketCategorizationResponse,
@@ -380,7 +412,7 @@ def categorize_ticket_endpoint(payload: TicketCategorizationRequest):
 def prioritize_ticket_endpoint(payload: TicketPriorityRequest):
     try:
         priority = predict_ticket_priority(title="", description=payload.text)
-        return TicketPriorityResponse(**priority)
+        return TicketPriorityResponse(priority=priority)
     except HTTPException:
         raise
     except Exception as exc:
