@@ -1,40 +1,29 @@
-"""Ticket categorization service — raw HF Inference API (online).
+"""Ticket categorization service — calls the PredictiX Gradio Space API."""
 
-Same approach as ``ticket_priority_service``: we POST to the HF Inference
-API URL directly to bypass ``huggingface_hub``'s client-side check that
-rejects models without a ``pipeline_tag`` in their model card.
-
-Public functions (``categorize_ticket_text``, ``warmup_ticket_categorizer``)
-keep the same signatures and return shapes so existing callers don't change.
-"""
-
+import json
 import os
 from functools import lru_cache
 
+import requests
 from dotenv import load_dotenv
-
-from app.ai.services._hf_inference import call_hf_inference
 
 load_dotenv()
 
-MODEL_REPO = os.getenv("HF_TICKET_CATEGORIZATION_REPO")
 
-
-def _assert_configured():
-    if not os.getenv("HF_TOKEN"):
-        raise RuntimeError("HF_TOKEN is not set in .env")
-    if not MODEL_REPO:
-        raise RuntimeError("HF_TICKET_CATEGORIZATION_REPO is not set in .env")
+def _get_space_url() -> str:
+    url = os.getenv("HF_AI_SPACE_URL")
+    if not url:
+        raise RuntimeError("HF_AI_SPACE_URL is not set in .env")
+    return url.rstrip("/")
 
 
 @lru_cache(maxsize=1)
 def get_ticket_categorizer_repo() -> str:
-    _assert_configured()
-    return MODEL_REPO  # type: ignore[return-value]
+    return os.getenv("HF_TICKET_CATEGORIZATION_REPO", "")
 
 
 def categorize_ticket_text(title: str, description: str) -> dict:
-    """Classify the ticket text into a category via the HF Inference API.
+    """Classify ticket text via the remote Gradio Space.
 
     Returns ``{"predicted_label", "confidence", "scores"}``.
     """
@@ -43,32 +32,49 @@ def categorize_ticket_text(title: str, description: str) -> dict:
     if not title and not description:
         raise ValueError("Both title and description cannot be empty.")
 
-    repo = get_ticket_categorizer_repo()
     text = f"Title: {title}\nDescription: {description}"
-    raw = call_hf_inference(repo, text)
+    space_url = _get_space_url()
 
-    if isinstance(raw, list) and raw and isinstance(raw[0], list):
-        raw = raw[0]
-    if not isinstance(raw, list) or not raw:
-        raise RuntimeError(f"Unexpected category response shape: {raw!r}")
+    r1 = requests.post(
+        f"{space_url}/gradio_api/call/categorize",
+        json={"data": [text]},
+        timeout=30,
+    )
+    if r1.status_code >= 400:
+        raise RuntimeError(f"Categorization Space error {r1.status_code}: {r1.text[:200]}")
+    event_id = r1.json().get("event_id")
 
-    scores = [
-        {"label": item["label"], "score": round(float(item["score"]), 4)}
-        for item in raw
-        if isinstance(item, dict) and "label" in item and "score" in item
-    ]
-    if not scores:
-        raise RuntimeError("HF returned no category predictions.")
-    scores.sort(key=lambda x: x["score"], reverse=True)
-    top = scores[0]
+    r2 = requests.get(
+        f"{space_url}/gradio_api/call/categorize/{event_id}",
+        stream=True,
+        timeout=120,
+    )
+    raw = None
+    for line in r2.iter_lines():
+        if line:
+            decoded = line.decode()
+            if decoded.startswith("data:"):
+                raw = json.loads(decoded[5:])
+                break
+
+    if not raw:
+        raise RuntimeError("Categorization Space returned no data")
+    result = raw[0] if isinstance(raw, list) else raw
+    if isinstance(result, dict) and "error" in result:
+        raise RuntimeError(f"Categorization model error: {result['error']}")
+    if not isinstance(result, list) or not result:
+        raise RuntimeError(f"Unexpected response shape: {result!r}")
+
+    scores = result
+    scores_sorted = sorted(scores, key=lambda x: x.get("score", 0), reverse=True)
+    top = scores_sorted[0]
 
     return {
         "predicted_label": top["label"],
-        "confidence": top["score"],
-        "scores": scores,
+        "confidence": round(float(top["score"]), 4),
+        "scores": scores_sorted,
     }
 
 
 def warmup_ticket_categorizer() -> None:
-    """No-op — the raw HTTP client is stateless."""
-    get_ticket_categorizer_repo()
+    pass
