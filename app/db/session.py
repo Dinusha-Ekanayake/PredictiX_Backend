@@ -25,12 +25,6 @@ DATABASE_URL = os.getenv(
 )
 
 if DATABASE_URL:
-    # Ensure SQLAlchemy has a driver
-    if DATABASE_URL.startswith("postgres://"):
-        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg2://", 1)
-    elif DATABASE_URL.startswith("postgresql://"):
-        DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://", 1)
-        
     _safe_url = DATABASE_URL.split("@")[-1] if "@" in DATABASE_URL else DATABASE_URL
     logger.info("[DB] Connecting to: %s", _safe_url)
 else:
