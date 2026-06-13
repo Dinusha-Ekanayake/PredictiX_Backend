@@ -1,5 +1,6 @@
 sqlalchemy
 alembic
+apscheduler
 psycopg[binary]
 python-jose
 passlib[bcrypt]
