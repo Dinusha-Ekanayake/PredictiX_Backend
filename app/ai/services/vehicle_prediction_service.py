@@ -16,7 +16,6 @@ from app.models import (
     AssetFailurePrediction,
     AssetCostPrediction,
 )
-from app.services.in_app_notification_service import InAppNotificationService
 
 
 CLASSIFIER_MODEL_NAME = "pdm_classifier_model"
@@ -72,10 +71,7 @@ def build_vehicle_feature_dict(db: Session, asset_id: str) -> dict[str, Any]:
 
     reading = _get_latest_sensor_reading(db, asset_id)
     if not reading:
-        # Provide a mock reading for new assets without telemetry data
-        class EmptyReading:
-            pass
-        reading = EmptyReading()
+        raise ValueError("No sensor reading found for asset")
 
     feature_dict: dict[str, Any] = {}
 
@@ -152,9 +148,36 @@ def build_vehicle_feature_dict(db: Session, asset_id: str) -> dict[str, Any]:
     return feature_dict
 
 
-def build_dataframe_for_features(feature_dict: dict[str, Any], feature_names: list[str]) -> pd.DataFrame:
-    row = {feature: feature_dict.get(feature) for feature in feature_names}
-    return pd.DataFrame([row])
+def build_dataframe_for_features(
+    feature_dict: dict[str, Any],
+    feature_names: list[str],
+    categorical_cols: list[str] | None = None,
+) -> pd.DataFrame:
+    """Build a properly-typed DataFrame for XGBoost / CatBoost inference.
+
+    Columns in ``categorical_cols`` are cast to ``pd.Categorical``.
+    Any remaining object-dtype column is also cast to Categorical —
+    XGBoost trained with ``enable_categorical=True`` rejects object columns.
+    All other columns are coerced to float64.
+    """
+    cat_set = set(categorical_cols or [])
+    row = {f: feature_dict.get(f, "" if f in cat_set else 0) for f in feature_names}
+    df = pd.DataFrame([row])
+
+    for col in df.columns:
+        if col in cat_set:
+            df[col] = pd.Categorical([str(df[col].iloc[0]).lower()])
+        else:
+            converted = pd.to_numeric(df[col], errors="coerce")
+            if converted.isna().all():
+                df[col] = pd.Categorical([str(df[col].iloc[0]).lower()])
+            else:
+                df[col] = converted.fillna(0)
+
+    for col in df.select_dtypes(include="object").columns:
+        df[col] = pd.Categorical(df[col].astype(str).str.lower())
+
+    return df
 
 
 def compute_health_score(feature_dict: dict[str, Any], failure_probability: float, days_until: float) -> tuple[float, str]:
@@ -225,19 +248,42 @@ def run_vehicle_prediction_and_store(
     clf_df = build_dataframe_for_features(feature_dict, clf_features)
     reg_df = build_dataframe_for_features(feature_dict, reg_features)
 
-    # classifier
-    predicted_class = int(clf_model.predict(clf_df)[0])
-
-    if hasattr(clf_model, "predict_proba"):
-        probas = clf_model.predict_proba(clf_df)[0]
-        failure_probability = float(probas[-1]) if len(probas) > 1 else float(probas[0])
-        confidence = float(max(probas))
-    else:
-        failure_probability = float(predicted_class)
+    try:
+        predicted_class = int(clf_model.predict(clf_df)[0])
+        if hasattr(clf_model, "predict_proba"):
+            probas = clf_model.predict_proba(clf_df)[0]
+            failure_probability = float(probas[-1]) if len(probas) > 1 else float(probas[0])
+            confidence = float(max(probas))
+        else:
+            failure_probability = float(predicted_class)
+            confidence = 0.75
+    except Exception as e:
+        import logging
+        logging.getLogger("predictix.ai").warning(f"Classifier failed: {e}. Falling back to 0.05.")
+        predicted_class = 0
+        failure_probability = 0.05
         confidence = 0.75
 
-    # regressor
-    predicted_days_until = float(reg_model.predict(reg_df)[0])
+    # regressor — CatBoost requires a Pool with cat_features for string columns
+    try:
+        from catboost import Pool as CatPool
+        _reg_cat_indices: list[int] = []
+        try:
+            _reg_cat_indices = [
+                reg_df.columns.get_loc(reg_df.columns[i])
+                for i in reg_model.get_cat_feature_indices()
+                if i < len(reg_df.columns)
+            ]
+            # CatBoost Pool requires string values for categorical columns
+            for idx in _reg_cat_indices:
+                col = reg_df.columns[idx]
+                reg_df[col] = reg_df[col].astype(str)
+        except Exception:
+            pass
+        reg_pool = CatPool(reg_df, cat_features=_reg_cat_indices)
+        predicted_days_until = float(reg_model.predict(reg_pool)[0])
+    except Exception:
+        predicted_days_until = float(reg_model.predict(reg_df)[0])
     predicted_days_until = max(0.0, round(predicted_days_until, 2))
 
     predicted_maintenance_date = date.today() + timedelta(days=int(round(predicted_days_until)))
@@ -300,20 +346,6 @@ def run_vehicle_prediction_and_store(
     db.refresh(run)
     db.refresh(failure_row)
     db.refresh(cost_row)
-
-    if failure_probability >= 0.80:
-        try:
-            InAppNotificationService.notify_admins(
-                db=db,
-                title="Critical Asset Risk Detected",
-                message=f"CRITICAL: Asset {asset.asset_code} has spiked to {round(failure_probability * 100, 1)}% failure probability.",
-                priority="critical",
-                notification_type="admin_alert",
-                link_url=f"/admin/assets/{asset.id}"
-            )
-        except Exception as exc:
-            import logging
-            logging.getLogger(__name__).warning("Failed to send critical asset alert: %s", exc)
 
     return {
         "run_id": str(run.id),
