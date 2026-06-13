@@ -372,7 +372,6 @@ def create_user_ticket(
     preset_predicted_priority: Optional[str] = None,
     preset_predicted_category: Optional[str] = None,
     preset_ticket_summary: Optional[str] = None,
-    assigned_to: Optional[UUID] = None,
 ) -> Ticket:
     """Create a new ticket on behalf of the user, optionally enriching with AI."""
     predicted_priority: Optional[str] = None
@@ -414,7 +413,6 @@ def create_user_ticket(
         asset_id=asset_id,
         warehouse_id=warehouse_id,
         created_by=user_id,
-        assigned_to=assigned_to,
     )
     db.add(ticket)
     db.commit()
@@ -461,6 +459,22 @@ def add_user_comment(
         user_id=user_id,
         comment=comment,
         is_internal=False,
+    )
+    db.add(obj)
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+def add_user_attachment(
+    db: Session, *, ticket_id: UUID, user_id: UUID, file_path: str, mime_type: Optional[str] = None, original_filename: Optional[str] = None
+) -> TicketAttachment:
+    obj = TicketAttachment(
+        ticket_id=ticket_id,
+        file_path=file_path,
+        mime_type=mime_type,
+        original_filename=original_filename,
+        uploaded_by=user_id,
     )
     db.add(obj)
     db.commit()
