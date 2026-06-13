@@ -386,7 +386,7 @@ cp .env.example .env
 alembic upgrade head
 
 # 6. Start the development server
-uvicorn app.main:app --reload --port 8000
+
 ```
 
 The API will be available at `http://localhost:8000`.  
@@ -415,7 +415,7 @@ alembic history
 
 ---
 
-## Seeding the Database
+## Seuvicorn app.main:app --reload --port 8000eding the Database
 
 The `seed_data/` directory contains scripts and SQL fixtures for initial data:
 
