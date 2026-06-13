@@ -182,6 +182,12 @@ async def lifespan(_: FastAPI):
             raise RuntimeError(f"Failed to load ticket categorization model: {exc}") from exc
 
         try:
+            warmup_ticket_priority()
+            log.info("Ticket priority model warmed up.")
+        except Exception as exc:
+            log.warning("Ticket priority warmup failed (non-fatal): %s", exc)
+
+        try:
             warmup_asset_summary_model()
             log.info("Asset summary model warmed up.")
         except Exception as exc:
