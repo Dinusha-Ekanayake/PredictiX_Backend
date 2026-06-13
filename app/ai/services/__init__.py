@@ -19,7 +19,6 @@ from app.ai.services.ticket_categorization_service import (
 )
 
 from app.ai.services.ticket_priority_service import (
-    get_ticket_priority_repo,
     predict_ticket_priority,
     warmup_ticket_priority,
 )
@@ -43,7 +42,6 @@ __all__ = [
     "warmup_ticket_categorizer",
     # Ticket priority (user-tickets section)
     "predict_ticket_priority",
-    "get_ticket_priority_repo",
     "warmup_ticket_priority",
     # Ticket summary (user-tickets section)
     "generate_ticket_summary",
