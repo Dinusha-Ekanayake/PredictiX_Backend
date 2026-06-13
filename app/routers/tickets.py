@@ -369,7 +369,7 @@ def preview_ticket(payload: TicketPreviewRequest, _: object = Depends(get_curren
 
     try:
         cat = categorize_ticket_text(title=payload.title, description=payload.description)
-        predicted_category = cat.get("predicted_label")
+        predicted_category = (cat.get("predicted_label") or "").lower() or None
     except Exception as exc:
         errors["category"] = str(exc)
 
