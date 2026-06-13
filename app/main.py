@@ -109,8 +109,7 @@ def _load_pdm_models():
             log.info("PdM models loaded — clf: %d features, reg: %d features",
                      len(clf_features or []), len(reg_features or []))
         except Exception as exc:
-            log.exception("Local PdM model loading failed")
-            raise RuntimeError(f"Failed to load local PdM models: {exc}") from exc
+            log.warning("Local PdM model loading failed (non-fatal): %s", exc)
 
 
 def _run_scheduled_batch() -> None:
@@ -178,8 +177,7 @@ async def lifespan(_: FastAPI):
             warmup_ticket_categorizer()
             log.info("Ticket categorization model warmed up.")
         except Exception as exc:
-            log.exception("Ticket categorization warmup failed")
-            raise RuntimeError(f"Failed to load ticket categorization model: {exc}") from exc
+            log.warning("Ticket categorization warmup failed (non-fatal): %s", exc)
 
         try:
             warmup_ticket_priority()
@@ -191,8 +189,7 @@ async def lifespan(_: FastAPI):
             warmup_asset_summary_model()
             log.info("Asset summary model warmed up.")
         except Exception as exc:
-            log.exception("Asset summary warmup failed")
-            raise RuntimeError(f"Failed to load asset summary model: {exc}") from exc
+            log.warning("Asset summary warmup failed (non-fatal): %s", exc)
     else:
         log.info("HuggingFace models disabled (DISABLE_HF_MODELS=true). Skipping warmup.")
 
