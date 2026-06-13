@@ -6,3 +6,6 @@ __pycache__/
 *.pyo
 
 alembic/
+
+# Transformer/sentence-transformer model weights — too large for GitHub
+*.safetensors
