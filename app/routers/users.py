@@ -31,7 +31,6 @@ from app.schemas.user_profile import (
     UserUpdate,
 )
 from app.services.notification_service import NotificationService
-from app.services.in_app_notification_service import InAppNotificationService
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/users", tags=["Users"])
@@ -227,16 +226,6 @@ def create_user(data: UserCreate, db: Session = Depends(get_db)):
 
     try:
         NotificationService.notify_on_new_user(db, str(new_id))
-        
-        # In-App Notification
-        InAppNotificationService.notify_admins(
-            db=db,
-            title="New User Registration",
-            message=f"New user {data.name} ({data.email}) requires verification/role assignment.",
-            priority="medium",
-            notification_type="admin_alert",
-            link_url=f"/admin/users"
-        )
     except Exception:
         log.exception("New-user notification failed (non-fatal)")
 
