@@ -1,38 +1,31 @@
-# ── Core API ──────────────────────────────────────────────────────────────────
-fastapi
-uvicorn[standard]
-python-multipart
+sqlalchemy
+alembic
+apscheduler
+psycopg[binary]
+python-jose
+passlib[bcrypt]
 pydantic-settings
-python-jose[cryptography]
-email-validator
+python-multipart
 
-# ── Auth ──────────────────────────────────────────────────────────────────────
 passlib==1.7.4
 bcrypt==4.1.2
 
-# ── Database ──────────────────────────────────────────────────────────────────
-sqlalchemy
-alembic
-psycopg2-binary
-supabase
-
-# ── ML / PDM models ───────────────────────────────────────────────────────────
+fastapi
+uvicorn
 pandas
 numpy
 scikit-learn
-xgboost-cpu
 catboost
+shap
+supabase
+xgboost
 lifelines
 joblib
-shap
 
-# ── Scheduler ─────────────────────────────────────────────────────────────────
-apscheduler>=3.10
-
-# ── LLM / external APIs ───────────────────────────────────────────────────────
+transformers
+torch --index-url https://download.pytorch.org/whl/cpu
+huggingface_hub
+safetensors
 groq
 nltk
-requests
-langchain-groq
-langchain-core
-gradio-client
+sentence-transformers
