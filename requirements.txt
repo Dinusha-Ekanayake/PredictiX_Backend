@@ -23,7 +23,7 @@ lifelines
 joblib
 
 transformers
-torch --index-url https://download.pytorch.org/whl/cpu
+torch
 huggingface_hub
 safetensors
 groq
