@@ -89,31 +89,26 @@ def build_asset_feature_dict(db: Session, asset_id: str) -> dict[str, Any]:
     if not reading:
         raise ValueError("No sensor reading found for asset")
 
+    age_years = _to_float(asset.vehicle_age_years, default=1.0) or 1.0
+    engine_hours_total = _to_float(getattr(reading, "engine_hours_total", None))
+    hours_per_day = engine_hours_total / max(1.0, age_years * 365.0)
+
     return {
-        # static features
-        "vehicle_type":                   asset.vehicle_type or "Other",
-        "vehicle_role":                   asset.vehicle_role or "transport",
-        "payload_capacity_kg":            _to_float(asset.payload_capacity_kg, 2000),
-        "vehicle_age_years":              _to_float(asset.vehicle_age_years, 1.0),
-        "lifetime_service_count":         _to_int(asset.lifetime_service_count, 0),
-        "lifetime_breakdown_count":       _to_int(asset.lifetime_breakdown_count, 0),
-        
-        # sensor features
-        "tire_health_pct":                _to_float(getattr(reading, "tire_health_pct", None)),
-        "brake_health_pct":               _to_float(getattr(reading, "brake_health_pct", None)),
-        "battery_health_pct":             _to_float(getattr(reading, "battery_health_pct", None)),
-        "oil_life_pct":                   _to_float(getattr(reading, "oil_life_pct", None)),
-        "hydraulic_health_pct":           _to_float(getattr(reading, "hydraulic_health_pct", None)),
-        "vibration_rms_mm_s":             _to_float(getattr(reading, "vibration_rms_mm_s", None)),
-        "engine_hours_since_last_service": _to_float(getattr(reading, "engine_hours_since_last_service", None)),
-        "days_since_last_service":        _to_int(getattr(reading, "days_since_last_service", None)),
-        "active_fault_code_count":        _to_int(getattr(reading, "active_fault_code_count", None)),
-        "payload_utilization_pct":        _to_float(getattr(reading, "payload_utilization_pct", None)),
-        "downtime_hours_last_90d":        _to_float(getattr(reading, "downtime_hours_last_90d", None)),
-        "overload_events_30d":            _to_int(getattr(reading, "overload_events_30d", None)),
-        "engine_temp_avg_c":              _to_float(getattr(reading, "engine_temp_avg_c", None)),
-        "coolant_temp_max_c":             _to_float(getattr(reading, "coolant_temp_max_c", None)),
-        "mileage_since_last_service_km":  _to_float(getattr(reading, "mileage_since_last_service_km", None)),
+        # numeric covariates (must match the training column names exactly)
+        "vehicle_age_years":        round(age_years, 2),
+        "engine_hours_total":       round(engine_hours_total, 1),
+        "hours_per_day":            round(hours_per_day, 2),
+        "payload_utilization_pct":  _to_float(getattr(reading, "payload_utilization_pct", None)),
+        "overload_events_30d":      _to_int(getattr(reading, "overload_events_30d", None)),
+        "avg_vibration_rms_mm_s":   _to_float(getattr(reading, "vibration_rms_mm_s", None)),
+        "avg_engine_temp_c":        _to_float(getattr(reading, "engine_temp_avg_c", None)),
+        "ambient_humidity_avg_pct": _to_float(getattr(reading, "ambient_humidity_avg_pct", None)),
+        "rough_road_pct":           _to_float(getattr(reading, "rough_road_pct", None)),
+        "port_route_pct":           _to_float(getattr(reading, "port_route_pct", None)),
+        "days_since_last_service":  _to_int(getattr(reading, "days_since_last_service", None)),
+        # categoricals (one-hot encoded at predict time to match training)
+        "vehicle_type":             asset.vehicle_type or "Other",
+        "vehicle_role":             asset.vehicle_role or asset.vehicle_type or "transport",
     }
 
 
