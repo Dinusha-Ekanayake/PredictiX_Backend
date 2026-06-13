@@ -185,19 +185,19 @@ def build_dataframe_for_features(
 
     for col in df.columns:
         if col in cat_set:
-            df[col] = pd.Categorical([str(df[col].iloc[0])])
+            df[col] = pd.Categorical([str(df[col].iloc[0]).lower()])
         else:
             converted = pd.to_numeric(df[col], errors="coerce")
             if converted.isna().all():
                 # Could not convert at all — treat as categorical
-                df[col] = pd.Categorical([str(df[col].iloc[0])])
+                df[col] = pd.Categorical([str(df[col].iloc[0]).lower()])
             else:
                 df[col] = converted.fillna(0)
 
     # Final safety pass: cast any remaining object columns to Categorical
     # (covers columns in clf_categorical_cols that were not in our explicit list)
     for col in df.select_dtypes(include="object").columns:
-        df[col] = pd.Categorical(df[col].astype(str))
+        df[col] = pd.Categorical(df[col].astype(str).str.lower())
 
     return df
 
@@ -271,15 +271,20 @@ def run_vehicle_prediction_and_store(
     clf_df = build_dataframe_for_features(feature_dict, clf_features, categorical_cols=clf_categorical_cols)
     reg_df = build_dataframe_for_features(feature_dict, reg_features, categorical_cols=None)
 
-    # classifier
-    predicted_class = int(clf_model.predict(clf_df)[0])
-
-    if hasattr(clf_model, "predict_proba"):
-        probas = clf_model.predict_proba(clf_df)[0]
-        failure_probability = float(probas[-1]) if len(probas) > 1 else float(probas[0])
-        confidence = float(max(probas))
-    else:
-        failure_probability = float(predicted_class)
+    try:
+        predicted_class = int(clf_model.predict(clf_df)[0])
+        if hasattr(clf_model, "predict_proba"):
+            probas = clf_model.predict_proba(clf_df)[0]
+            failure_probability = float(probas[-1]) if len(probas) > 1 else float(probas[0])
+            confidence = float(max(probas))
+        else:
+            failure_probability = float(predicted_class)
+            confidence = 0.75
+    except Exception as e:
+        import logging
+        logging.getLogger("predictix.ai").warning(f"XGBoost classification failed (likely unknown category): {e}. Falling back to 0.05.")
+        predicted_class = 0
+        failure_probability = 0.05
         confidence = 0.75
 
     # regressor
