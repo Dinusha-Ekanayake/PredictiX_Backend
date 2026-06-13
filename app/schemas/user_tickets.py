@@ -38,7 +38,6 @@ class UserTicketCreate(BaseModel):
     predicted_priority: Optional[str] = None
     predicted_category: Optional[str] = None
     ticket_summary: Optional[str] = None
-    assigned_to: Optional[UUID] = None
 
 
 class UserTicketPreviewRequest(BaseModel):
@@ -74,6 +73,12 @@ class UserTicketCommentCreate(BaseModel):
     comment: str = Field(..., min_length=1)
 
 
+class UserTicketAttachmentCreate(BaseModel):
+    file_path: str
+    mime_type: Optional[str] = None
+    original_filename: Optional[str] = None
+
+
 # ---------------------------------------------------------------------------
 # Outputs
 # ---------------------------------------------------------------------------
@@ -93,7 +98,6 @@ class UserTicketSummary(BaseModel):
     final_category: Optional[str] = None
     asset_id: Optional[UUID] = None
     warehouse_id: Optional[UUID] = None
-    assigned_to: Optional[UUID] = None
     created_at: datetime
     updated_at: datetime
 
