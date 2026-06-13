@@ -104,13 +104,7 @@ def _parse_snapshot_date(snapshot_date_raw: str) -> pd.Timestamp:
         )
 
 
-def run_classification(
-    data: dict,
-    clf_model,
-    clf_features: list[str],
-    clf_threshold: float = 0.5,
-    clf_categorical_cols: list[str] | None = None,
-) -> dict:
+def run_classification(data: dict, clf_model, clf_features: list[str]) -> dict:
     if not isinstance(clf_features, list):
         raise HTTPException(status_code=500, detail="clf_features is not a list")
 
@@ -120,16 +114,10 @@ def run_classification(
 
     try:
         x_clf = prepare_input(data, clf_features)
-
-        # XGBoost needs numeric-only input — one-hot encode categoricals
-        cat_cols = [c for c in (clf_categorical_cols or []) if c in x_clf.columns]
-        if cat_cols:
-            x_clf = pd.get_dummies(x_clf, columns=cat_cols)
-        else:
-            x_clf = clean_and_cast_inputs(x_clf, categorical_features=[])
+        x_clf = clean_and_cast_inputs(x_clf, categorical_features=[])
 
         prob = float(clf_model.predict_proba(x_clf)[0][1])
-        maintenance_required = int(prob >= clf_threshold)
+        maintenance_required = int(prob >= 0.6)
         risk_level, recommended_action = get_risk_and_action(prob)
 
         return {
@@ -310,10 +298,8 @@ def run_full_prediction(
     clf_features: list[str],
     reg_model,
     reg_features: list[str],
-    clf_threshold: float = 0.5,
-    clf_categorical_cols: list[str] | None = None,
 ) -> dict:
-    classification = run_classification(data, clf_model, clf_features, clf_threshold, clf_categorical_cols)
+    classification = run_classification(data, clf_model, clf_features)
     regression = run_regression(data, reg_model, reg_features)
     health = run_health_score(data)
 
