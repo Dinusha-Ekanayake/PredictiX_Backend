@@ -165,8 +165,14 @@ def _run_classifier(fd: dict, clf_model, clf_features: list[str], clf_threshold:
         else:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-    probas = clf_model.predict_proba(df)[0]
-    prob = float(probas[-1]) if len(probas) > 1 else float(probas[0])
+    try:
+        probas = clf_model.predict_proba(df)[0]
+        prob = float(probas[-1]) if len(probas) > 1 else float(probas[0])
+    except Exception as e:
+        import logging
+        logging.getLogger("predictix.ai").warning(f"XGBoost classification failed (likely unknown category): {e}. Falling back to 0.05.")
+        prob = 0.05
+
     return round(prob, 4), bool(prob >= clf_threshold)
 
 

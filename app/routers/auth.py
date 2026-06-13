@@ -1,46 +1,85 @@
-"""Authentication router — issues JWTs for the test accounts.
+"""Authentication router.
 
-Replace TEST_USERS with a real DB-backed lookup once the profiles
-table is seeded for staging.
+Flow
+----
+POST /auth/login
+    - Email + password only. Role is detected automatically from the DB.
+    - user  → token issued immediately, redirect to user dashboard.
+    - admin → token issued immediately (warehouse already fixed to their profile).
+    - super_admin → no token yet; returns requires_warehouse_selection=True
+                    plus a list of all active warehouses.
+
+POST /auth/login/select-warehouse
+    - Super admin submits a warehouse_id they chose from the dropdown.
+    - A short-lived (5-min) signed intermediate token from the first step is
+      verified, then a full 24-hour JWT is issued scoped to that warehouse.
+
+GET  /auth/warehouses
+    - Returns all active warehouses (used to populate the dropdown).
 """
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
-from jose import jwt
+from __future__ import annotations
+
 from datetime import datetime, timedelta
+from typing import Optional
+import logging
 import os
 import uuid
+
+from fastapi import APIRouter, HTTPException
+from jose import JWTError, jwt
+from pydantic import BaseModel
 
 from app.core.security import verify_password
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
+log = logging.getLogger(__name__)
 
+# ─── helpers ──────────────────────────────────────────────────────────────────
 
 def _default_password() -> str:
-    """Read DEFAULT_PASSWORD from env, stripping surrounding spaces/quotes."""
     raw = os.getenv("DEFAULT_PASSWORD", "Predictix@123")
-    cleaned = raw.strip().strip('"').strip("'").strip()
-    return cleaned or "Predictix@123"
+    return raw.strip().strip('"').strip("'").strip() or "Predictix@123"
 
-# ─── Schemas ───────────────────────────────────────────────────────────────────
+def _secret() -> str:
+    return os.getenv("JWT_SECRET", "supersecret")
+
+def _algorithm() -> str:
+    return os.getenv("JWT_ALGORITHM", "HS256")
+
+# ─── schemas ──────────────────────────────────────────────────────────────────
 
 class LoginRequest(BaseModel):
     email: str
     password: str
-    role: str  # "ADMIN", "USER", "SUPER_ADMIN" (frontend sends uppercase)
-    warehouse_id: str | None = None
+
+class WarehouseOption(BaseModel):
+    id: str
+    name: str
+    code: str
+    city: Optional[str] = None
 
 class LoginResponse(BaseModel):
-    access_token: str
-    token_type: str
-    user_id: str
-    email: str
-    role: str       # lowercase: "admin" | "user"
-    full_name: str
+    # Set when authentication is complete (user / admin).
+    access_token: Optional[str] = None
+    token_type: str = "bearer"
+    user_id: Optional[str] = None
+    email: Optional[str] = None
+    role: Optional[str] = None        # "user" | "admin" | "super_admin"
+    full_name: Optional[str] = None
+    warehouse_id: Optional[str] = None
+    warehouse_name: Optional[str] = None
+    # Set only for super_admin — frontend shows the warehouse picker.
+    requires_warehouse_selection: bool = False
+    selection_token: Optional[str] = None   # short-lived token for step 2
+    warehouses: Optional[list[WarehouseOption]] = None
 
-# ─── Test accounts ─────────────────────────────────────────────────────────────
-# Replace with real DB lookup once users table is seeded.
+class WarehouseSelectRequest(BaseModel):
+    selection_token: str   # from step 1
+    warehouse_id: str
 
-TEST_USERS: dict[str, dict] = {
+# ─── demo fallback accounts (no DB row) ──────────────────────────────────────
+
+_DEMO_USERS: dict[str, dict] = {
     "nuwan.gunasekara.tra1@lankalogix.lk": {
         "password": "user",
         "full_name": "Nuwan Gunasekara",
@@ -73,123 +112,85 @@ TEST_USERS: dict[str, dict] = {
     },
 }
 
-# ─── POST /auth/login ──────────────────────────────────────────────────────────
+# ─── POST /auth/login ─────────────────────────────────────────────────────────
 
 @router.post("/login", response_model=LoginResponse)
 def post_login(request: LoginRequest):
-    email: str = request.email.strip().lower()
-    password: str = request.password.strip()
-    # Normalise to lowercase so "ADMIN" == "admin"
-    requested_role: str = request.role.strip().lower()
-    requested_warehouse_id: str | None = request.warehouse_id
+    email = request.email.strip().lower()
+    password = request.password.strip()
 
-    # 1. Try DB-backed authentication first.
     profile = _lookup_profile(email)
     if profile is not None:
-        return _login_with_profile(profile, email, password, requested_role, requested_warehouse_id)
+        return _authenticate_profile(profile, email, password)
 
-    # 2. No DB profile — fall back to the hardcoded demo accounts.
-    print(f"[LOGIN] No DB profile for {email}; trying TEST_USERS fallback")
-    return _login_with_test_user(email, password, requested_role, requested_warehouse_id)
+    log.info("[LOGIN] No DB profile for %s; trying demo fallback", email)
+    return _authenticate_demo(email, password)
 
 
-def _login_with_profile(profile, email: str, password: str, requested_role: str, requested_warehouse_id: str | None) -> LoginResponse:
-    """Authenticate against a DB Profile row."""
-    profile_role = (profile.role or "").strip().lower()
-    profile_status = (profile.status or "").strip().lower()
-    full_name = profile.full_name or "Unknown"
+# ─── POST /auth/login/select-warehouse ────────────────────────────────────────
 
-    # Reject inactive accounts.
-    if profile_status != "active":
-        print(f"[LOGIN] ✗ {email} | account inactive (status={profile_status})")
-        raise HTTPException(status_code=401, detail="This account is inactive.")
+@router.post("/login/select-warehouse", response_model=LoginResponse)
+def select_warehouse(request: WarehouseSelectRequest):
+    """Step 2 for super_admin: verify the short-lived selection token and
+    issue a full JWT scoped to the chosen warehouse."""
+    try:
+        payload = jwt.decode(request.selection_token, _secret(), algorithms=[_algorithm()])
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid or expired selection token. Please log in again.")
 
-    # Determine which password check applies.
-    meta = profile.meta if isinstance(profile.meta, dict) else {}
-    stored_hash = meta.get("password_hash") or ""
+    if payload.get("type") != "warehouse_selection":
+        raise HTTPException(status_code=401, detail="Invalid token type.")
 
-    if stored_hash:
-        ok = verify_password(password, stored_hash)
-    elif email in TEST_USERS:
-        ok = password == TEST_USERS[email]["password"]
-    else:
-        ok = password == _default_password()
+    user_id: str = payload["sub"]
+    email: str = payload["email"]
+    full_name: str = payload.get("full_name", "")
 
-    if not ok:
-        print(f"[LOGIN] ✗ {email} | invalid password")
-        raise HTTPException(status_code=401, detail="Invalid email or password.")
+    # Validate the chosen warehouse exists and is active.
+    warehouse = _lookup_warehouse(request.warehouse_id)
+    if warehouse is None:
+        raise HTTPException(status_code=404, detail="Warehouse not found.")
+    if not warehouse.is_active:
+        raise HTTPException(status_code=400, detail="This warehouse is currently inactive.")
 
-    # Validate the declared role against the account role.
-    if requested_role and requested_role != profile_role:
-        raise HTTPException(
-            status_code=401,
-            detail=f"This account is registered as '{profile_role}', not '{requested_role}'. "
-                   f"Please select the correct role.",
-        )
+    wh_id = str(warehouse.id)
+    wh_name = warehouse.name
 
-    # Determine active warehouse automatically
-    if profile_role == "super_admin":
-        active_warehouse_id = requested_warehouse_id or str(profile.warehouse_id or "") or _get_default_warehouse_id()
-    else:
-        # Admins and Users log into their assigned warehouse automatically.
-        if requested_warehouse_id and requested_warehouse_id != str(profile.warehouse_id):
-            raise HTTPException(
-                status_code=401,
-                detail="You are only allowed to log into your assigned warehouse. Please select the correct warehouse."
-            )
-        active_warehouse_id = str(profile.warehouse_id) if profile.warehouse_id else _get_default_warehouse_id()
-
-    user_id = str(profile.id)
-    token = _create_token(user_id, email, profile_role, active_warehouse_id)
-    print(f"[LOGIN] OK (DB) {email} | role={profile_role} | id={user_id} | wh={active_warehouse_id}")
+    token = _create_token(user_id, email, "super_admin", warehouse_id=wh_id)
+    log.info("[LOGIN] ✓ super_admin %s selected warehouse %s (%s)", email, wh_name, wh_id[:8])
 
     return LoginResponse(
         access_token=token,
         token_type="bearer",
         user_id=user_id,
         email=email,
-        role=profile_role,
+        role="super_admin",
         full_name=full_name,
+        warehouse_id=wh_id,
+        warehouse_name=wh_name,
     )
 
 
-def _login_with_test_user(email: str, password: str, requested_role: str, requested_warehouse_id: str | None) -> LoginResponse:
-    """Backward-compat path for the hardcoded demo accounts."""
-    if email not in TEST_USERS:
-        raise HTTPException(status_code=401, detail="Invalid email or password.")
+# ─── GET /auth/warehouses ──────────────────────────────────────────────────────
 
-    user = TEST_USERS[email]
+@router.get("/warehouses", response_model=list[WarehouseOption])
+def list_warehouses():
+    """Return all active warehouses for the super_admin picker."""
+    try:
+        from app.db import SessionLocal
+        from app.models import Warehouse
+        db = SessionLocal()
+        try:
+            rows = db.query(Warehouse).filter(Warehouse.is_active == True).order_by(Warehouse.name).all()
+            return [
+                WarehouseOption(id=str(w.id), name=w.name, code=w.code, city=w.city)
+                for w in rows
+            ]
+        finally:
+            db.close()
+    except Exception as e:
+        log.warning("[AUTH] Warehouse list failed: %s", e)
+        raise HTTPException(status_code=500, detail="Could not fetch warehouses.")
 
-    if user["password"] != password:
-        raise HTTPException(status_code=401, detail="Invalid email or password.")
-
-    if requested_role and requested_role != user["role"]:
-        raise HTTPException(
-            status_code=401,
-            detail=f"This account is registered as '{user['role']}', not '{requested_role}'. "
-                   f"Please select the correct role.",
-        )
-        
-    if user["role"] == "super_admin":
-        if not requested_warehouse_id:
-            raise HTTPException(status_code=400, detail="Please select a warehouse to log into.")
-        active_warehouse_id = requested_warehouse_id
-    else:
-        # Default fallback for demo users without a DB profile
-        active_warehouse_id = requested_warehouse_id if requested_warehouse_id else _get_default_warehouse_id()
-
-    user_id: str = _resolve_user_id(email)
-    token: str = _create_token(user_id, email, user["role"], active_warehouse_id)
-    print(f"[LOGIN] OK (TEST) {email} | role={user['role']} | id={user_id} | wh={active_warehouse_id}")
-
-    return LoginResponse(
-        access_token=token,
-        token_type="bearer",
-        user_id=user_id,
-        email=email,
-        role=user["role"],
-        full_name=user["full_name"],
-    )
 
 # ─── GET /auth/test ────────────────────────────────────────────────────────────
 
@@ -197,34 +198,168 @@ def _login_with_test_user(email: str, password: str, requested_role: str, reques
 def test_auth():
     return {"message": "Auth router working"}
 
-# ─── Helpers ───────────────────────────────────────────────────────────────────
+
+# ─── internal: authenticate ───────────────────────────────────────────────────
+
+def _authenticate_profile(profile, email: str, password: str) -> LoginResponse:
+    role = (profile.role or "").strip().lower()
+    status = (profile.status or "").strip().lower()
+    full_name = profile.full_name or "Unknown"
+
+    if status != "active":
+        log.info("[LOGIN] ✗ %s | inactive account", email)
+        raise HTTPException(status_code=401, detail="This account is inactive.")
+
+    # Password check: hashed → demo override → default password.
+    meta = profile.meta if isinstance(profile.meta, dict) else {}
+    stored_hash = meta.get("password_hash") or ""
+
+    if stored_hash:
+        ok = verify_password(password, stored_hash)
+    else:
+        demo_pw = _DEMO_USERS.get(email, {}).get("password")
+        ok = password == _default_password() or (demo_pw is not None and password == demo_pw)
+
+    if not ok:
+        log.info("[LOGIN] ✗ %s | wrong password", email)
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+    user_id = str(profile.id)
+
+    # ── super_admin: warehouse picker needed ──────────────────────────────────
+    if role == "super_admin":
+        warehouses = _fetch_all_warehouses()
+        selection_token = _create_selection_token(user_id, email, full_name)
+        log.info("[LOGIN] ✓ super_admin %s — awaiting warehouse selection", email)
+        return LoginResponse(
+            requires_warehouse_selection=True,
+            selection_token=selection_token,
+            user_id=user_id,
+            email=email,
+            role="super_admin",
+            full_name=full_name,
+            warehouses=warehouses,
+        )
+
+    # ── admin: token scoped to their assigned warehouse ───────────────────────
+    if role == "admin":
+        wh_id = str(profile.warehouse_id) if profile.warehouse_id else None
+        wh_name = _warehouse_name(wh_id)
+        token = _create_token(user_id, email, role, warehouse_id=wh_id)
+        log.info("[LOGIN] ✓ admin %s | warehouse=%s | id=%s", email, wh_name, user_id[:8])
+        return LoginResponse(
+            access_token=token,
+            user_id=user_id,
+            email=email,
+            role=role,
+            full_name=full_name,
+            warehouse_id=wh_id,
+            warehouse_name=wh_name,
+        )
+
+    # ── user: token issued immediately ────────────────────────────────────────
+    token = _create_token(user_id, email, role)
+    log.info("[LOGIN] ✓ user %s | id=%s", email, user_id[:8])
+    return LoginResponse(
+        access_token=token,
+        user_id=user_id,
+        email=email,
+        role=role,
+        full_name=full_name,
+    )
+
+
+def _authenticate_demo(email: str, password: str) -> LoginResponse:
+    """Fallback for hardcoded demo accounts with no DB row."""
+    if email not in _DEMO_USERS:
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+    demo = _DEMO_USERS[email]
+    if demo["password"] != password:
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+    user_id = _resolve_user_id(email)
+    role = demo["role"]
+    full_name = demo["full_name"]
+
+    wh_id, wh_name = None, None
+    if role == "admin":
+        # Try to get warehouse from DB even for demo accounts.
+        profile = _lookup_profile(email)
+        if profile and profile.warehouse_id:
+            wh_id = str(profile.warehouse_id)
+            wh_name = _warehouse_name(wh_id)
+
+    token = _create_token(user_id, email, role, warehouse_id=wh_id)
+    log.info("[LOGIN] ✓ (demo) %s | role=%s", email, role)
+    return LoginResponse(
+        access_token=token,
+        user_id=user_id,
+        email=email,
+        role=role,
+        full_name=full_name,
+        warehouse_id=wh_id,
+        warehouse_name=wh_name,
+    )
+
+
+# ─── internal: DB helpers ──────────────────────────────────────────────────────
 
 def _lookup_profile(email: str):
-    """Case-insensitive Profile lookup by email.
-
-    Returns the Profile or None. Any DB failure is swallowed (returns None)
-    so login cleanly falls back to the TEST_USERS path — never a 500.
-    """
     try:
         from sqlalchemy import func
         from app.db import SessionLocal
         from app.models import Profile
         db = SessionLocal()
         try:
-            return (
-                db.query(Profile)
-                .filter(func.lower(Profile.email) == email)
-                .first()
-            )
+            return db.query(Profile).filter(func.lower(Profile.email) == email).first()
         finally:
             db.close()
     except Exception as e:
-        print(f"[LOGIN] DB profile lookup failed (non-fatal): {e}")
+        log.warning("[LOGIN] DB profile lookup failed (non-fatal): %s", e)
         return None
 
 
+def _lookup_warehouse(warehouse_id: str):
+    try:
+        from app.db import SessionLocal
+        from app.models import Warehouse
+        db = SessionLocal()
+        try:
+            return db.query(Warehouse).filter(Warehouse.id == warehouse_id).first()
+        finally:
+            db.close()
+    except Exception as e:
+        log.warning("[LOGIN] Warehouse lookup failed: %s", e)
+        return None
+
+
+def _warehouse_name(warehouse_id: Optional[str]) -> Optional[str]:
+    if not warehouse_id:
+        return None
+    wh = _lookup_warehouse(warehouse_id)
+    return wh.name if wh else None
+
+
+def _fetch_all_warehouses() -> list[WarehouseOption]:
+    try:
+        from app.db import SessionLocal
+        from app.models import Warehouse
+        db = SessionLocal()
+        try:
+            rows = db.query(Warehouse).filter(Warehouse.is_active == True).order_by(Warehouse.name).all()
+            return [
+                WarehouseOption(id=str(w.id), name=w.name, code=w.code, city=w.city)
+                for w in rows
+            ]
+        finally:
+            db.close()
+    except Exception as e:
+        log.warning("[LOGIN] Warehouse fetch failed: %s", e)
+        return []
+
+
 def _resolve_user_id(email: str) -> str:
-    """Try to get real user_id from DB; fall back to deterministic UUID."""
     try:
         from app.db import SessionLocal
         from app.models import Profile
@@ -232,44 +367,36 @@ def _resolve_user_id(email: str) -> str:
         try:
             user = db.query(Profile).filter(Profile.email == email).first()
             if user:
-                print(f"[LOGIN] Found user in DB: {user.id}")
                 return str(user.id)
         finally:
             db.close()
     except Exception as e:
-        print(f"[LOGIN] DB lookup failed (non-fatal): {e}")
-
-    fallback = str(uuid.uuid5(uuid.NAMESPACE_DNS, email))
-    print(f"[LOGIN] Using deterministic UUID fallback: {fallback}")
-    return fallback
+        log.warning("[LOGIN] DB user_id lookup failed: %s", e)
+    return str(uuid.uuid5(uuid.NAMESPACE_DNS, email))
 
 
-def _create_token(user_id: str, email: str, role: str, active_warehouse_id: str) -> str:
-    """Encode a 24-hour JWT."""
-    payload = {
+# ─── internal: token creation ─────────────────────────────────────────────────
+
+def _create_token(user_id: str, email: str, role: str, *, warehouse_id: Optional[str] = None) -> str:
+    """Issue a 24-hour JWT. Includes warehouse_id when provided."""
+    payload: dict = {
         "sub": user_id,
         "email": email,
         "role": role,
-        "active_warehouse_id": active_warehouse_id,
         "exp": datetime.utcnow() + timedelta(hours=24),
     }
-    secret: str = os.getenv("JWT_SECRET", "supersecret")
-    algorithm: str = os.getenv("JWT_ALGORITHM", "HS256")
-    return jwt.encode(payload, secret, algorithm=algorithm)
+    if warehouse_id:
+        payload["warehouse_id"] = warehouse_id
+    return jwt.encode(payload, _secret(), algorithm=_algorithm())
 
 
-def _get_default_warehouse_id() -> str:
-    """Get the first warehouse ID from the database, falling back to a seeded Colombo ID."""
-    try:
-        from app.db import SessionLocal
-        from app.models import Warehouse
-        db = SessionLocal()
-        try:
-            w = db.query(Warehouse).first()
-            if w:
-                return str(w.id)
-        finally:
-            db.close()
-    except Exception as e:
-        print(f"[LOGIN] Default warehouse lookup failed: {e}")
-    return "c537c281-b6ad-4842-94ec-e937be0083e5"
+def _create_selection_token(user_id: str, email: str, full_name: str) -> str:
+    """Issue a short-lived (5-min) intermediate token for the warehouse picker."""
+    payload = {
+        "sub": user_id,
+        "email": email,
+        "full_name": full_name,
+        "type": "warehouse_selection",
+        "exp": datetime.utcnow() + timedelta(minutes=5),
+    }
+    return jwt.encode(payload, _secret(), algorithm=_algorithm())
