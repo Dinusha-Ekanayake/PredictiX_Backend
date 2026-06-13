@@ -259,13 +259,31 @@ def run_vehicle_prediction_and_store(
             confidence = 0.75
     except Exception as e:
         import logging
-        logging.getLogger("predictix.ai").warning(f"XGBoost classification failed (likely unknown category): {e}. Falling back to 0.05.")
+        logging.getLogger("predictix.ai").warning(f"Classifier failed: {e}. Falling back to 0.05.")
         predicted_class = 0
         failure_probability = 0.05
         confidence = 0.75
 
-    # regressor
-    predicted_days_until = float(reg_model.predict(reg_df)[0])
+    # regressor — CatBoost requires a Pool with cat_features for string columns
+    try:
+        from catboost import Pool as CatPool
+        _reg_cat_indices: list[int] = []
+        try:
+            _reg_cat_indices = [
+                reg_df.columns.get_loc(reg_df.columns[i])
+                for i in reg_model.get_cat_feature_indices()
+                if i < len(reg_df.columns)
+            ]
+            # CatBoost Pool requires string values for categorical columns
+            for idx in _reg_cat_indices:
+                col = reg_df.columns[idx]
+                reg_df[col] = reg_df[col].astype(str)
+        except Exception:
+            pass
+        reg_pool = CatPool(reg_df, cat_features=_reg_cat_indices)
+        predicted_days_until = float(reg_model.predict(reg_pool)[0])
+    except Exception:
+        predicted_days_until = float(reg_model.predict(reg_df)[0])
     predicted_days_until = max(0.0, round(predicted_days_until, 2))
 
     predicted_maintenance_date = date.today() + timedelta(days=int(round(predicted_days_until)))
