@@ -16,14 +16,24 @@ This module also handles the two transient cases the API can return:
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
-from gradio_client import Client
+
+import requests
+
+# Legacy host ``api-inference.huggingface.co`` was retired by HF and no longer
+# resolves (DNS ``getaddrinfo`` failure). Serverless inference now lives behind
+# the Inference Providers router; the ``hf-inference`` provider keeps the same
+# ``{"inputs", "parameters"}`` request / pipeline-style response shape.
+HF_API_URL = "https://router.huggingface.co/hf-inference/models/{repo}"
+
 
 def _token() -> str:
     tok = os.getenv("HF_TOKEN")
     if not tok:
         raise RuntimeError("HF_TOKEN is not set in .env")
     return tok
+
 
 def call_hf_inference(
     repo: str,
@@ -33,39 +43,59 @@ def call_hf_inference(
     timeout: int = 60,
     max_cold_start_wait: int = 30,
 ) -> Any:
+    """POST to HF Inference API and return the parsed JSON body.
+
+    Args:
+        repo: HuggingFace model repo id (e.g. ``"Owner/model-name"``).
+        inputs: The text to feed to the model.
+        parameters: Optional generation/decoding params (HF passes these
+            through to the underlying pipeline).
+        timeout: Per-request HTTP timeout (seconds).
+        max_cold_start_wait: Max seconds we'll wait for a 503 cold-start
+            retry. If HF asks for longer, we give up and raise.
+    """
     if os.getenv("DISABLE_HF_MODELS", "false").lower() == "true":
         raise RuntimeError("HF models disabled (DISABLE_HF_MODELS=true).")
 
-    # Map the requested model repo to the correct Gradio endpoint inside our Space
-    if "categorization" in repo.lower():
-        api_name = "/categorize"
-    elif "ticket_summarization" in repo.lower():
-        api_name = "/summarize_ticket"
-    elif "asset_summarization" in repo.lower():
-        api_name = "/summarize_asset"
-    else:
-        raise ValueError(f"Unknown repo mapping for Gradio Space: {repo}")
+    url = HF_API_URL.format(repo=repo)
+    headers = {
+        "Authorization": f"Bearer {_token()}",
+        "Content-Type": "application/json",
+    }
+    body: dict[str, Any] = {"inputs": inputs}
+    if parameters:
+        body["parameters"] = parameters
 
-    space_id = "Dinusha-Ekanayake/predictix-inference-api"
-    hf_token = _token()
+    for attempt in (1, 2):
+        resp = requests.post(url, headers=headers, json=body, timeout=timeout)
 
-    # Initialize the Gradio client (it connects securely to the private space)
-    client = Client(space_id, token=hf_token)
+        if resp.status_code == 503 and attempt == 1:
+            # Cold start — wait the suggested time then retry once.
+            try:
+                wait = float(resp.json().get("estimated_time", 5))
+            except Exception:
+                wait = 5.0
+            if wait > max_cold_start_wait:
+                raise RuntimeError(
+                    f"Model '{repo}' is loading; estimated wait {wait:.0f}s "
+                    f"exceeds {max_cold_start_wait}s cap."
+                )
+            time.sleep(min(wait, max_cold_start_wait))
+            continue
 
-    # Send the request
-    try:
-        result = client.predict(inputs, api_name=api_name)
-    except Exception as e:
-        raise RuntimeError(f"Gradio Space Inference failed: {e}")
+        if resp.status_code >= 400:
+            # Try to surface the HF error body verbatim — usually JSON
+            # ``{"error": "..."}`` but sometimes plain text.
+            try:
+                err = resp.json().get("error", resp.text)
+            except Exception:
+                err = resp.text
+            raise RuntimeError(f"HF API {resp.status_code}: {err}")
 
-    # Format the result to mimic Hugging Face's original API response shape
-    if api_name == "/categorize":
-        # Gradio returns the list directly: [{"label": "...", "score": ...}]
-        return result
-    else:
-        # Gradio returns: {"summary": "..."}
-        # Original API expected: [{"summary_text": "..."}]
-        if isinstance(result, dict) and "summary" in result:
-            return [{"summary_text": result["summary"]}]
-        # Fallback if result shape is weird
-        return [{"summary_text": str(result)}]
+        data = resp.json()
+        # HF sometimes returns 200 with an ``{"error": ...}`` body.
+        if isinstance(data, dict) and "error" in data and len(data) <= 2:
+            raise RuntimeError(f"HF API error: {data['error']}")
+        return data
+
+    raise RuntimeError(f"Model '{repo}' did not respond after retry.")
