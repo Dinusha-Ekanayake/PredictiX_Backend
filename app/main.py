@@ -64,10 +64,10 @@ log = logging.getLogger("predictix")
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_DIR = BASE_DIR / "ai" / "models"
 
-# v6 XGBoost classifier — saved as a bundle dict {model, feature_cols, threshold, categorical_cols, ...}
-CLF_BUNDLE_PATH = MODEL_DIR / "pdm_classifier_model" / "predictix_xgboost_classifier_v6.pkl"
-# v5 regressor — saved via joblib as a bundle dict {explainer_model, feature_cols, ...}
-REG_BUNDLE_PATH = MODEL_DIR / "pdm_regressor_model" / "predictix_pm_model_v5.pkl"
+CLF_MODEL_PATH    = MODEL_DIR / "pdm_classifier_model" / "predictive_maintenance_model.pkl"
+CLF_FEATURES_PATH = MODEL_DIR / "pdm_classifier_model" / "maintenance_classifier_features.pkl"
+REG_MODEL_PATH    = MODEL_DIR / "pdm_regressor_model"  / "days_until_next_maintenance_regressor.pkl"
+REG_FEATURES_PATH = MODEL_DIR / "pdm_regressor_model"  / "regression_selected_features.pkl"
 
 clf_model = None
 clf_features: list = []
@@ -76,14 +76,42 @@ clf_categorical_cols: list = []
 reg_model = None
 reg_features: list = []
 
+scheduler: BackgroundScheduler | None = None
+_model_load_lock = __import__('threading').Lock()
+
 
 def _load_pickle(path: Path):
     with open(path, "rb") as fh:
         return pickle.load(fh)
 
 
-scheduler: BackgroundScheduler | None = None
-_model_load_lock = __import__('threading').Lock()
+def _load_pdm_models():
+    """Lazily load heavy PdM models (thread-safe, idempotent)."""
+    global clf_model, clf_features, clf_threshold, clf_categorical_cols, reg_model, reg_features
+    if clf_model is not None and reg_model is not None:
+        return
+
+    with _model_load_lock:
+        if clf_model is not None and reg_model is not None:
+            return
+        try:
+            clf_model    = _load_pickle(CLF_MODEL_PATH)
+            clf_features = _load_pickle(CLF_FEATURES_PATH)
+            if getattr(clf_model, "feature_names_", None):
+                clf_features = list(clf_model.feature_names_)
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                reg_model = _load_pickle(REG_MODEL_PATH)
+            reg_features = _load_pickle(REG_FEATURES_PATH)
+            if getattr(reg_model, "feature_names_", None):
+                reg_features = list(reg_model.feature_names_)
+
+            log.info("PdM models loaded — clf: %d features, reg: %d features",
+                     len(clf_features or []), len(reg_features or []))
+        except Exception as exc:
+            log.warning("Local PdM model loading failed (non-fatal): %s", exc)
+
 
 def _run_scheduled_batch() -> None:
     """Scheduled job — runs the full PDM batch in a fresh DB session."""
@@ -110,92 +138,59 @@ def _run_scheduled_batch() -> None:
 
 
 def _run_startup_batch() -> None:
-    """Startup-only wrapper: waits for Uvicorn to fully bind before running the batch."""
+    """Startup-only wrapper: waits 10s for Uvicorn to fully bind before running."""
     import time
-    time.sleep(10)  # Give the server 10s to stabilise before loading 100MB models
+    time.sleep(10)
     _run_scheduled_batch()
 
 
 def _ping_hf_models() -> None:
-    """Scheduled job — constantly pings Hugging Face models to prevent cold starts."""
+    """Scheduled job — pings HuggingFace models to prevent cold starts."""
     if os.getenv("DISABLE_HF_MODELS", "false").lower() == "true":
         return
 
     from app.ai.services._hf_inference import call_hf_inference
-    
+
     repos = [
         "Dinusha-Ekanayake/predictix-asset_summarization_model",
         "Dinusha-Ekanayake/predictix-ticket_summarization_model",
         "Dinusha-Ekanayake/predictix-ticket_categorization_model",
         "Dinusha-Ekanayake/predictix-ticket_prioritization_model",
     ]
-    
+
     for repo in repos:
         try:
-            # Minimal payload to wake the model up. It may return an error, but the 
-            # HTTP request successfully forces HF to keep the container alive in VRAM.
             call_hf_inference(repo, "keep_warm_ping", timeout=30, max_cold_start_wait=20)
             log.debug("Pinged %s to keep warm.", repo)
-        except Exception as e:
-            # Ignore expected inference errors (like ValueError for bad shape),
-            # the request still hit the router and woke the model up.
+        except Exception:
             pass
-
-
-def _load_pdm_models():
-    """Lazily load heavy PdM models (thread-safe, idempotent)."""
-    global clf_model, clf_features, clf_threshold, clf_categorical_cols, reg_model, reg_features
-    if clf_model is not None and reg_model is not None:
-        return
-
-    with _model_load_lock:
-        # Double-check inside the lock (another thread may have loaded while we waited)
-        if clf_model is not None and reg_model is not None:
-            return
-        try:
-            with open(CLF_BUNDLE_PATH, "rb") as fh:
-                clf_bundle = pickle.load(fh)
-            clf_model            = clf_bundle["model"]
-            clf_features         = clf_bundle["feature_cols"]
-            clf_threshold        = float(clf_bundle.get("threshold", 0.5))
-            clf_categorical_cols = clf_bundle.get("categorical_cols", [])
-
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                reg_bundle = joblib.load(REG_BUNDLE_PATH)
-            reg_model    = reg_bundle["explainer_model"]
-            reg_features = reg_bundle["feature_cols"]
-            if getattr(reg_model, "feature_names_", None):
-                reg_features = list(reg_model.feature_names_)
-
-            log.info(
-                "PdM models loaded — clf v6-XGB: %d features (threshold=%.2f), reg v5: %d features",
-                len(clf_features), clf_threshold, len(reg_features),
-            )
-        except Exception as exc:
-            log.exception("Local PdM model loading failed")
-            raise RuntimeError(f"Failed to load local PdM models: {exc}") from exc
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    """Start hourly batch scheduler; optionally warm HF models."""
+    """Load PdM models on startup; start batch scheduler; optionally warm HF models."""
     global scheduler
+
+    _load_pdm_models()
 
     if os.getenv("DISABLE_HF_MODELS", "false").lower() != "true":
         try:
             warmup_ticket_categorizer()
             log.info("Ticket categorization model warmed up.")
         except Exception as exc:
-            log.exception("Ticket categorization warmup failed")
-            raise RuntimeError(f"Failed to load ticket categorization model: {exc}") from exc
+            log.warning("Ticket categorization warmup failed (non-fatal): %s", exc)
+
+        try:
+            warmup_ticket_priority()
+            log.info("Ticket priority model warmed up.")
+        except Exception as exc:
+            log.warning("Ticket priority warmup failed (non-fatal): %s", exc)
 
         try:
             warmup_asset_summary_model()
             log.info("Asset summary model warmed up.")
         except Exception as exc:
-            log.exception("Asset summary warmup failed")
-            raise RuntimeError(f"Failed to load asset summary model: {exc}") from exc
+            log.warning("Asset summary warmup failed (non-fatal): %s", exc)
     else:
         log.info("HuggingFace models disabled (DISABLE_HF_MODELS=true). Skipping warmup.")
 
@@ -210,34 +205,30 @@ async def lifespan(_: FastAPI):
         name="PDM hourly batch prediction",
         replace_existing=True,
     )
-    
-    # ── Keep-Warm ping for HF Models ───────────────────────────────────────────
+
     if os.getenv("ENABLE_HF_WARMER", "false").lower() == "true":
         scheduler.add_job(
             _ping_hf_models,
             trigger="interval",
-            minutes=7,       # Base interval: 7 minutes
-            jitter=180,      # Add/subtract up to 3 minutes randomly (4 to 10 minute range)
+            minutes=7,
+            jitter=180,
             id="hf_ping",
             name="HF Models Keep-Warm Ping",
             replace_existing=True,
         )
-        log.info("HF Inference Warmer enabled with dynamic intervals (4-10 mins).")
-    
+        log.info("HF Inference Warmer enabled (4-10 min intervals).")
+
     scheduler.start()
     log.info("PDM batch scheduler started — interval=%dh", batch_interval_hours)
 
-    # Optionally trigger a batch run on startup (runs 10s AFTER server is stable)
     if os.getenv("BATCH_RUN_ON_STARTUP", "false").lower() == "true":
         import threading
         t = threading.Thread(target=_run_startup_batch, daemon=True, name="pdm_batch_startup")
         t.start()
         log.info("PDM batch startup run queued (fires in 10s)")
 
-    # Signal Uvicorn to bind port and start serving traffic
     yield
 
-    # ── Graceful shutdown ──────────────────────────────────────────────────────
     if scheduler and scheduler.running:
         scheduler.shutdown(wait=False)
         log.info("PDM batch scheduler stopped.")
@@ -247,25 +238,19 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="PredictiX API", version="1.0", lifespan=lifespan)
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
-# ALLOWED_ORIGINS env var: comma-separated list of allowed origins.
-# Set this in Railway dashboard to your frontend URL(s).
-# Example: https://predictix.vercel.app,https://predictix.netlify.app
 _default_origins = [
-    # Local development
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "http://localhost:3001",
     "http://127.0.0.1:3001",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
-    # Vercel production + preview deployments
     "https://predicti-x-frontend.vercel.app",
     "https://predicti-x-frontend-dinusha-ekanayakes-projects.vercel.app",
 ]
 _env_origins = os.getenv("ALLOWED_ORIGINS", "")
 _extra_origins = [o.strip() for o in _env_origins.split(",") if o.strip()]
 _allowed_origins = list(set(_default_origins + _extra_origins))
-
 
 app.add_middleware(
     CORSMiddleware,
@@ -280,7 +265,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(profiles_router)
 app.include_router(users_router)
-app.include_router(user_profile_router)        # Sharada — user-role profile
+app.include_router(user_profile_router)
 
 # Organisation
 app.include_router(warehouses_router)
@@ -300,16 +285,16 @@ app.include_router(tickets_router)
 app.include_router(ticket_comments_router)
 app.include_router(ticket_attachments_router)
 app.include_router(ticket_status_history_router)
-app.include_router(user_tickets_router)        # Sharada — user-role ticket section
+app.include_router(user_tickets_router)
 
 # Predictions & ML
 app.include_router(predictions_router)
 app.include_router(vehicle_predictions_router)
-app.include_router(batch_predictions_router)       # hourly cached predictions
+app.include_router(batch_predictions_router)
 app.include_router(prediction_explanations_router)
 app.include_router(model_registry_router)
 app.include_router(warehouse_dashboard_router)
-app.include_router(survival_predictions_router)  # Sharada — FRSO survival predictions
+app.include_router(survival_predictions_router)
 app.include_router(admin_dashboard_router)
 
 # Notifications & reports

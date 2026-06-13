@@ -20,6 +20,7 @@ from app.deps import get_current_user, get_db
 from app.models import Profile, Ticket
 from app.schemas.user_tickets import (
     UserTicketAttachmentOut,
+    UserTicketAttachmentCreate,
     UserTicketCommentCreate,
     UserTicketCommentOut,
     UserTicketCreate,
@@ -173,7 +174,6 @@ def create_my_ticket(
             preset_predicted_priority=payload.predicted_priority,
             preset_predicted_category=payload.predicted_category,
             preset_ticket_summary=payload.ticket_summary,
-            assigned_to=payload.assigned_to,
         )
     except Exception as exc:
         db.rollback()
@@ -275,3 +275,34 @@ def add_my_ticket_comment(
         comment=payload.comment,
     )
     return UserTicketCommentOut.model_validate(obj)
+
+
+@router.post(
+    "/{ticket_id}/attachments",
+    response_model=UserTicketAttachmentOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def add_my_ticket_attachment(
+    payload: UserTicketAttachmentCreate,
+    ticket_id: UUID = Path(...),
+    current_user: Profile = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Add an attachment to a ticket the user is allowed to view."""
+    ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    if not svc.user_can_view_ticket(ticket, current_user.id):
+        raise HTTPException(
+            status_code=403, detail="Not allowed to add attachments to this ticket"
+        )
+
+    obj = svc.add_user_attachment(
+        db,
+        ticket_id=ticket_id,
+        user_id=current_user.id,
+        file_path=payload.file_path,
+        mime_type=payload.mime_type,
+        original_filename=payload.original_filename,
+    )
+    return UserTicketAttachmentOut.model_validate(obj)
