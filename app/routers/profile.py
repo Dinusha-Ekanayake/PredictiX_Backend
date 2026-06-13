@@ -14,7 +14,11 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+import io
+import os
+import uuid as _uuid
+
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy.orm import Session
 
 from app.deps import get_current_user, get_db
@@ -93,6 +97,7 @@ def _profile_to_response(user: Profile, db: Session) -> dict:
         "role": user.role or "",
         "status": user.status or "",
         "assignedAssetsCount": asset_count,
+        "avatar_url": user.avatar_url or None,
     }
 
 
@@ -136,6 +141,57 @@ def update_my_profile(
             raise HTTPException(status_code=500, detail="Profile update failed")
 
     return _profile_to_response(current_user, db)
+
+
+@router.post("/me/avatar")
+def upload_my_avatar(
+    file: UploadFile = File(...),
+    current_user: Profile = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image.")
+
+    contents = file.file.read()
+    if len(contents) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File size must be less than 5MB.")
+
+    ext = (file.filename or "avatar.jpg").rsplit(".", 1)[-1].lower()
+    if ext not in {"jpg", "jpeg", "png", "gif", "webp"}:
+        ext = "jpg"
+
+    user_id = str(current_user.id)
+    filename = f"{user_id}/{_uuid.uuid4()}.{ext}"
+
+    try:
+        from app.db.supabase_client import supabase
+        supabase.storage.from_("avatars").upload(
+            path=filename,
+            file=contents,
+            file_options={"content-type": file.content_type, "upsert": "true"},
+        )
+        supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
+        avatar_url = f"{supabase_url}/storage/v1/object/public/avatars/{filename}"
+    except Exception as e:
+        log.warning("[AVATAR] Supabase upload failed: %s — falling back to base64", e)
+        import base64
+        b64 = base64.b64encode(contents).decode()
+        avatar_url = f"data:{file.content_type};base64,{b64}"
+
+    real_user = db.query(Profile).filter(Profile.id == current_user.id).first()
+    if not real_user:
+        raise HTTPException(status_code=404, detail="Profile not found.")
+
+    real_user.avatar_url = avatar_url
+    try:
+        db.commit()
+        db.refresh(real_user)
+    except Exception:
+        db.rollback()
+        log.exception("Failed to save avatar_url")
+        raise HTTPException(status_code=500, detail="Failed to save avatar.")
+
+    return {"avatar_url": avatar_url}
 
 
 @router.get("/me/assets")
