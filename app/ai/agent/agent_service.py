@@ -115,10 +115,7 @@ def run_agent(
             friendly = "Oops! My apologies, but it looks like I’m having a little trouble connecting to our systems right now. Please try again in a few minutes, or contact our support team at support@company.com."
             
             if "rate limit reached" in err_str or "rate_limit_exceeded" in err_str or "429" in err_str:
-                import re
-                match = re.search(r"try again in ([0-9]+[a-z]+[0-9.]*[a-z]*)", str(e), re.IGNORECASE)
-                time_str = match.group(1) if match else "a little while"
-                friendly = f"I've reached my daily token limit! 🛑 Please try again in {time_str} when the tokens reset."
+                friendly = "I've reached my daily token limit! 🛑 Please try again in a little while when the tokens reset."
             elif "timeout" in err_str or "timed out" in err_str:
                 friendly = "Oops! My apologies, but the request timed out. Please try again in a few minutes."
 
