@@ -138,7 +138,8 @@ class EmailTemplates:
     def new_user_welcome_email(new_user_name: str, email: str, temp_password: str) -> tuple:
         """Email template for new user welcome - uses real database data"""
         subject = "Welcome to PredictiX - Your Account is Ready!"
-        
+        app_url = os.getenv("APP_URL", "https://predicti-x-frontend.vercel.app")
+
         html_body = f"""
         <html>
             <head>
@@ -168,7 +169,7 @@ class EmailTemplates:
                             <em>Please change your password after your first login for security.</em>
                         </div>
                         
-                        <p>You can now access PredictiX at: <a href="http://localhost:3001" class="button">Access PredictiX</a></p>
+                        <p>You can now access PredictiX at: <a href="{app_url}" class="button">Access PredictiX</a></p>
                         
                         <p><strong>Quick Start Guide:</strong></p>
                         <ul>
