@@ -50,7 +50,7 @@ def call_hf_inference(
     hf_token = _token()
 
     # Initialize the Gradio client (it connects securely to the private space)
-    client = Client(space_id, hf_token=hf_token)
+    client = Client(space_id, token=hf_token)
 
     # Send the request
     try:
