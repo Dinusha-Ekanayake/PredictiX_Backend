@@ -15,6 +15,7 @@ def list_user_notifications(
     current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    print(f"DEBUG: list_user_notifications called with status={status}")
     """
     Get all notifications for current authenticated user.
     Optional filter by status (unread, read, etc.)
