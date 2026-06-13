@@ -1,46 +1,11 @@
-# Environment
 .env
-.env.*
-
-# Virtual environments
 .venv/
-venv/
-env/
 
-# Python bytecode
 __pycache__/
 *.pyc
 *.pyo
-*.pyd
-*.pycache
 
-# Alembic (not yet in use)
 alembic/
 
-# IDE / Editor
-.vscode/
-.idea/
-.claude/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Temp / scratch files
-*_tmp.py
-*_tmp.json
-admin_summary_tmp.json
-_check_maint_tmp.py
-clean_repo/
-seed_data/
-
-# Large data files (model .pkl files ARE tracked intentionally)
-*.csv
-*.log
-
-# Test artifacts
-.pytest_cache/
-htmlcov/
-.coverage
+# Transformer/sentence-transformer model weights — too large for GitHub
+*.safetensors
