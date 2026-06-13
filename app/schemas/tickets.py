@@ -45,7 +45,6 @@ class TicketCreate(BaseModel):
     description: str
     priority: Optional[str] = None
     created_by: UUID
-    assigned_to: Optional[UUID] = None
 
 
 class TicketUpdate(BaseModel):
@@ -76,7 +75,7 @@ class TicketOut(BaseModel):
     asset_summary: Optional[str] = None
     asset_id: Optional[UUID] = None
     warehouse_id: Optional[UUID] = None
-    created_by: Optional[UUID] = None
+    created_by: UUID
     assigned_to: Optional[UUID] = None
     reviewed_by: Optional[UUID] = None
     opened_at: Optional[datetime] = None
@@ -125,17 +124,3 @@ class TicketPriorityRequest(BaseModel):
 
 class TicketPriorityResponse(BaseModel):
     priority: str
-
-
-class TicketSummarizationRequest(BaseModel):
-    title: str = ""
-    description: str = ""
-    asset_name: Optional[str] = None
-    asset_code: Optional[str] = None
-    category: Optional[str] = None
-    priority: Optional[str] = None
-
-
-class TicketSummarizationResponse(BaseModel):
-    summary: str
-    generated_at: str
