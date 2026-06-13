@@ -61,17 +61,24 @@ def get_current_user(
     if db is not None:
         user = db.query(Profile).filter(Profile.id == user_id).first()
         if user:
+            # Super admin JWT carries the warehouse they selected at login.
+            # Override the profile's warehouse_id so all downstream queries
+            # are automatically scoped to the chosen warehouse.
+            jwt_warehouse_id = payload.get("warehouse_id")
+            if jwt_warehouse_id:
+                user.warehouse_id = jwt_warehouse_id
             return user
 
     return _build_mock_profile(
         user_id=user_id,
         email=payload.get("email", "test@example.com"),
         role=payload.get("role", "user"),
+        warehouse_id=payload.get("warehouse_id"),
         db=db,
     )
 
 
-def _build_mock_profile(*, user_id: str, email: str, role: str, db: Optional[Session]):
+def _build_mock_profile(*, user_id: str, email: str, role: str, warehouse_id: Optional[str] = None, db: Optional[Session]):
     """Construct a duck-typed Profile when the DB record is missing."""
     from app.models import Department
 
@@ -99,7 +106,7 @@ def _build_mock_profile(*, user_id: str, email: str, role: str, db: Optional[Ses
             self.full_name = email.split("@")[0].replace(".", " ").title()
             self.phone = None
             self.status = "active"
-            self.warehouse_id = None
+            self.warehouse_id = warehouse_id
             self.department_id = department_id
             self.meta = {}
             self.employee_id = f"EMP-{user_id[:8]}"
