@@ -27,16 +27,11 @@ from app.schemas.tickets import (
     TicketCategorizationResponse,
     TicketPriorityRequest,
     TicketPriorityResponse,
-    TicketSummarizationRequest,
-    TicketSummarizationResponse,
+    TicketPreviewRequest,
+    TicketPreviewResponse,
 )
 from app.ai.services.ticket_categorization_service import categorize_ticket_text
 from app.ai.services.ticket_priority_service import predict_ticket_priority
-import logging
-from app.ai.services.ticket_summary_service import build_ticket_summary_input, generate_ticket_summary
-from app.services.in_app_notification_service import InAppNotificationService
-
-log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/tickets", tags=["Tickets"])
 
@@ -84,27 +79,14 @@ def create_ticket(payload: TicketCreate, db: Session = Depends(get_db), _: objec
     data["ticket_number"] = _generate_ticket_number(db)
     if data.get("priority"):
         data["priority"] = _normalize_priority(data["priority"])
+    if data.get("predicted_priority"):
+        data["predicted_priority"] = _normalize_priority(data["predicted_priority"])
+    if data.get("predicted_category"):
+        data["predicted_category"] = _normalize_category(data["predicted_category"])
     obj = Ticket(**data)
     db.add(obj)
     db.commit()
     db.refresh(obj)
-    
-    try:
-        from app.services.notification_service import NotificationService
-        NotificationService.notify_on_new_ticket(db, str(obj.id))
-        
-        if obj.priority in ["high", "critical"]:
-            InAppNotificationService.notify_admins(
-                db=db,
-                title="High Priority Ticket Created",
-                message=f"Ticket {obj.ticket_number}: {obj.title}",
-                priority=obj.priority,
-                notification_type="ticket_created",
-                link_url=f"/admin/tickets"
-            )
-    except Exception as exc:
-        log.warning("Failed to send ticket creation notification: %s", exc)
-        
     return obj
 
 
@@ -221,23 +203,6 @@ def create_my_ticket(
     db.add(obj)
     db.commit()
     db.refresh(obj)
-    
-    try:
-        from app.services.notification_service import NotificationService
-        NotificationService.notify_on_new_ticket(db, str(obj.id))
-        
-        if obj.priority in ["high", "critical"]:
-            InAppNotificationService.notify_admins(
-                db=db,
-                title="High Priority Ticket Created",
-                message=f"Ticket {obj.ticket_number}: {obj.title}",
-                priority=obj.priority,
-                notification_type="ticket_created",
-                link_url=f"/admin/tickets"
-            )
-    except Exception as exc:
-        log.warning("Failed to send ticket creation notification: %s", exc)
-        
     asset_name = None
     if obj.asset_id:
         asset_name = db.query(Asset.asset_name).filter(Asset.id == obj.asset_id).scalar()
@@ -342,23 +307,6 @@ def update_ticket(ticket_id: str, payload: TicketUpdate, db: Session = Depends(g
 
     db.commit()
     db.refresh(obj)
-    
-    # Notify user on status change
-    if new_status and new_status != old_status and new_status in ["resolved", "in_progress"]:
-        try:
-            if obj.created_by:
-                InAppNotificationService.notify_user(
-                    db=db,
-                    user_id=str(obj.created_by),
-                    title="Ticket Status Updated",
-                    message=f"Your ticket '{obj.title}' is now {new_status.replace('_', ' ').title()}.",
-                    priority="medium" if new_status == "resolved" else "low",
-                    notification_type="ticket_resolved" if new_status == "resolved" else "ticket_updated",
-                    link_url=f"/user/tickets"
-                )
-        except Exception as exc:
-            log.warning("Failed to send ticket update notification: %s", exc)
-
     return obj
 
 
@@ -412,6 +360,32 @@ def delete_ticket(ticket_id: str, db: Session = Depends(get_db)):
     return {"message": "Ticket deleted", "id": ticket_id}
 
 
+@router.post("/preview", response_model=TicketPreviewResponse)
+def preview_ticket(payload: TicketPreviewRequest, _: object = Depends(get_current_user)):
+    """Run category + priority AI without saving. Used by the create dialog."""
+    errors: dict[str, str] = {}
+    predicted_category: str | None = None
+    predicted_priority: str | None = None
+
+    try:
+        cat = categorize_ticket_text(title=payload.title, description=payload.description)
+        predicted_category = (cat.get("predicted_label") or "").lower() or None
+    except Exception as exc:
+        errors["category"] = str(exc)
+
+    try:
+        pri = predict_ticket_priority(title=payload.title, description=payload.description)
+        predicted_priority = pri.lower() if pri else None
+    except Exception as exc:
+        errors["priority"] = str(exc)
+
+    return TicketPreviewResponse(
+        predicted_category=predicted_category,
+        predicted_priority=predicted_priority,
+        errors=errors,
+    )
+
+
 @router.post(
     "/categorize",
     response_model=TicketCategorizationResponse,
@@ -438,33 +412,8 @@ def categorize_ticket_endpoint(payload: TicketCategorizationRequest):
 def prioritize_ticket_endpoint(payload: TicketPriorityRequest):
     try:
         priority = predict_ticket_priority(title="", description=payload.text)
-        return TicketPriorityResponse(**priority)
+        return TicketPriorityResponse(priority=priority)
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to classify ticket priority: {exc}") from exc
-
-
-@router.post(
-    "/summarize",
-    response_model=TicketSummarizationResponse,
-    summary="Generate an AI summary of a ticket",
-)
-def summarize_ticket_endpoint(payload: TicketSummarizationRequest):
-    from datetime import datetime
-    try:
-        input_text = build_ticket_summary_input(
-            title=payload.title,
-            description=payload.description,
-            asset_name=payload.asset_name,
-            asset_code=payload.asset_code,
-            category=payload.category,
-            priority=payload.priority,
-        )
-        summary = generate_ticket_summary(input_text)
-        return TicketSummarizationResponse(
-            summary=summary,
-            generated_at=datetime.utcnow().isoformat(),
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to summarize ticket: {exc}") from exc
