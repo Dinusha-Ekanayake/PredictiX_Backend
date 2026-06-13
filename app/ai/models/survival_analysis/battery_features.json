@@ -1,0 +1,37 @@
+{
+  "feature_cols": [
+    "payload_capacity_kg",
+    "vehicle_age_years",
+    "lifetime_service_count",
+    "lifetime_breakdown_count",
+    "tire_health_pct",
+    "brake_health_pct",
+    "battery_health_pct",
+    "oil_life_pct",
+    "hydraulic_health_pct",
+    "vibration_rms_mm_s",
+    "engine_hours_since_last_service",
+    "days_since_last_service",
+    "active_fault_code_count",
+    "payload_utilization_pct",
+    "downtime_hours_last_90d",
+    "overload_events_30d",
+    "engine_temp_avg_c",
+    "coolant_temp_max_c",
+    "mileage_since_last_service_km",
+    "vehicle_type_Forklift_2.5T",
+    "vehicle_type_Forklift_3.0T",
+    "vehicle_type_Heavy_Truck_16T",
+    "vehicle_type_Light_Truck_3.5T",
+    "vehicle_type_Medium_Truck_7T",
+    "vehicle_type_Mini_Truck_1T",
+    "vehicle_role_heavy_cargo_transport",
+    "vehicle_role_internal_material_handling",
+    "vehicle_role_last_mile_delivery",
+    "vehicle_role_regional_distribution"
+  ],
+  "categorical_one_hot": [
+    "vehicle_type",
+    "vehicle_role"
+  ]
+}
