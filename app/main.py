@@ -45,6 +45,7 @@ from .routers.warehouse_dashboard import warehouse_dashboard_router
 from .routers.warehouses import router as warehouses_router
 from .routers.batch_predictions import router as batch_predictions_router
 from .routers.websockets import router as websockets_router
+from .routers.asset_reports import router as asset_reports_router 
 
 # Sharada — user-role self-service profile (/user-profile)
 from .routers.user_profile import router as user_profile_router
@@ -316,6 +317,7 @@ app.include_router(notifications_router)
 app.include_router(notification_preferences_router)
 app.include_router(reports_router)
 app.include_router(report_sources_router)
+app.include_router(asset_reports_router)          # Asset PDF report generation
 
 # Chatbot
 app.include_router(chatbot_router)
