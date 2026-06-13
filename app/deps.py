@@ -56,31 +56,52 @@ def get_current_user(
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    active_warehouse_id = payload.get("active_warehouse_id")
-
     from app.models import Profile  # local import to avoid circular deps
 
     if db is not None:
         user = db.query(Profile).filter(Profile.id == user_id).first()
         if user:
-            # Dynamically attach the session's active warehouse
-            setattr(user, "active_warehouse_id", active_warehouse_id)
             return user
-        else:
-            # No DB row — build a lightweight in-memory stub for demo / super-admin accounts
-            email = payload.get("email", "")
-            role = payload.get("role", "user")
-            stub = Profile(
-                id=user_id,
-                email=email,
-                full_name=email.split("@")[0].replace(".", " ").title(),
-                role=role,
-                status="active",
-                warehouse_id=None,
-                department_id=None,
-                meta={},
-            )
-            setattr(stub, "active_warehouse_id", active_warehouse_id)
-            return stub
-    else:
-        raise HTTPException(status_code=500, detail="Database connection missing")
+
+    return _build_mock_profile(
+        user_id=user_id,
+        email=payload.get("email", "test@example.com"),
+        role=payload.get("role", "user"),
+        db=db,
+    )
+
+
+def _build_mock_profile(*, user_id: str, email: str, role: str, db: Optional[Session]):
+    """Construct a duck-typed Profile when the DB record is missing."""
+    from app.models import Department
+
+    department_id = None
+    if db is not None:
+        keyword_to_dept = {
+            "transportation": "Transportation",
+            "electrical": "Electrical",
+            "software": "Software",
+            "mechanical": "Mechanical",
+        }
+        dept_name = next(
+            (name for kw, name in keyword_to_dept.items() if kw in email.lower()),
+            "Transportation",
+        )
+        dept = db.query(Department).filter(Department.name == dept_name).first()
+        if dept:
+            department_id = dept.id
+
+    class MockProfile:
+        def __init__(self) -> None:
+            self.id = user_id
+            self.email = email
+            self.role = role
+            self.full_name = email.split("@")[0].replace(".", " ").title()
+            self.phone = None
+            self.status = "active"
+            self.warehouse_id = None
+            self.department_id = department_id
+            self.meta = {}
+            self.employee_id = f"EMP-{user_id[:8]}"
+
+    return MockProfile()

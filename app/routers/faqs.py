@@ -2,9 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
-from sqlalchemy.orm import Session
 
-from app.deps import get_db, get_current_user
+from app.deps import get_current_user
 from app.db.supabase_client import supabase
 
 router = APIRouter(prefix="/faqs", tags=["FAQs"])
@@ -43,53 +42,26 @@ def list_faqs():
 
 
 @router.post("/", response_model=FaqOut)
-def create_faq(
-    payload: FaqCreate,
-    db: Session = Depends(get_db),
-    current_user: object = Depends(get_current_user)
-):
-    if getattr(current_user, "role", "").lower() not in ["admin", "super_admin"]:
-        raise HTTPException(status_code=403, detail="Only admins and super admins can add FAQs")
+def create_faq(payload: FaqCreate, current_user: object = Depends(get_current_user)):
+    if getattr(current_user, "role", "") != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can add FAQs")
 
     response = supabase.from_("faqs").insert({
         "question": payload.question.strip(),
         "answer": payload.answer.strip(),
         "category": payload.category,
         "is_active": True,
-    }).execute()
+    }).select("id,question,answer,category,tags,is_active,created_at,updated_at").single().execute()
 
     if not response.data:
         raise HTTPException(status_code=500, detail="Failed to insert FAQ")
-        
-    faq_data = response.data[0]
-        
-    try:
-        from app.services.notification_service import NotificationService
-        from app.services.in_app_notification_service import InAppNotificationService
-        
-        admin_name = getattr(current_user, "full_name", "Administrator")
-        NotificationService.notify_on_new_faq(db, faq_data, admin_name)
-        
-        InAppNotificationService.notify_all_users(
-            db=db,
-            title="New Help Desk FAQ",
-            message=f"New FAQ published: {faq_data.get('question')}",
-            priority="low",
-            notification_type="system",
-            link_url="/user/help-desk"
-        )
-    except Exception as exc:
-        import logging
-        logging.getLogger(__name__).warning("Failed to send FAQ email notification: %s", exc)
-        
-    return faq_data
-
+    return response.data
 
 
 @router.put("/{faq_id}", response_model=FaqOut)
 def update_faq(faq_id: str, payload: FaqUpdate, current_user: object = Depends(get_current_user)):
-    if getattr(current_user, "role", "").lower() not in ["admin", "super_admin"]:
-        raise HTTPException(status_code=403, detail="Only admins and super admins can update FAQs")
+    if getattr(current_user, "role", "") != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can update FAQs")
 
     updates = {k: v for k, v in payload.model_dump().items() if v is not None}
     if not updates:
@@ -97,18 +69,19 @@ def update_faq(faq_id: str, payload: FaqUpdate, current_user: object = Depends(g
 
     updates["updated_at"] = datetime.utcnow().isoformat()
 
-    response = supabase.from_("faqs").update(updates).eq("id", faq_id).execute()
+    response = supabase.from_("faqs").update(updates).eq("id", faq_id).select(
+        "id,question,answer,category,tags,is_active,created_at,updated_at"
+    ).single().execute()
 
     if not response.data:
         raise HTTPException(status_code=404, detail="FAQ not found")
-    return response.data[0]
-
+    return response.data
 
 
 @router.delete("/{faq_id}")
 def delete_faq(faq_id: str, current_user: object = Depends(get_current_user)):
-    if getattr(current_user, "role", "").lower() not in ["admin", "super_admin"]:
-        raise HTTPException(status_code=403, detail="Only admins and super admins can delete FAQs")
+    if getattr(current_user, "role", "") != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can delete FAQs")
 
     supabase.from_("faqs").delete().eq("id", faq_id).execute()
     return {"message": "FAQ deleted"}

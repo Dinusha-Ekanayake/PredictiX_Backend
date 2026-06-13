@@ -16,7 +16,6 @@ from app.models import (
     AssetFailurePrediction,
     AssetCostPrediction,
 )
-from app.services.in_app_notification_service import InAppNotificationService
 
 
 CLASSIFIER_MODEL_NAME = "pdm_classifier_model"
@@ -72,32 +71,21 @@ def build_vehicle_feature_dict(db: Session, asset_id: str) -> dict[str, Any]:
 
     reading = _get_latest_sensor_reading(db, asset_id)
     if not reading:
-        # Provide a mock reading for new assets without telemetry data
-        class EmptyReading:
-            pass
-        reading = EmptyReading()
+        raise ValueError("No sensor reading found for asset")
 
     feature_dict: dict[str, Any] = {}
 
-    # ── Asset-level string (categorical) features ─────────────────────────────
-    feature_dict["vehicle_type"]        = str(asset.vehicle_type or "")
-    feature_dict["vehicle_role"]        = str(asset.vehicle_role or asset.vehicle_type or "transport")
-    feature_dict["make_model"]          = str(asset.make_model or "")
-    feature_dict["fuel_type"]           = str(asset.fuel_type or "")
-    feature_dict["transmission"]        = str(asset.transmission or "")
-    feature_dict["maintenance_priority"] = str(asset.maintenance_priority or "")
-    feature_dict["service_provider_type"] = str(asset.service_provider_type or "")
-
-    # ── Asset-level numeric features ──────────────────────────────────────────
-    feature_dict["payload_capacity_kg"]      = _to_float(asset.payload_capacity_kg)
-    feature_dict["vehicle_age_years"]        = _to_int(asset.vehicle_age_years)
-    feature_dict["manufacture_year"]         = _to_int(asset.manufacture_year)
-    feature_dict["lifetime_service_count"]   = _to_int(asset.lifetime_service_count)
+    # asset-level features
+    feature_dict["vehicle_role"] = asset.vehicle_role or asset.vehicle_type or "transport"
+    feature_dict["payload_capacity_kg"] = _to_float(asset.payload_capacity_kg)
+    feature_dict["vehicle_age_years"] = _to_int(asset.vehicle_age_years)
+    feature_dict["lifetime_service_count"] = _to_int(asset.lifetime_service_count)
     feature_dict["lifetime_breakdown_count"] = _to_int(asset.lifetime_breakdown_count)
 
-    # ── Sensor / engineered numeric columns ───────────────────────────────────
-    sensor_float_cols = [
+    # sensor / engineered features
+    columns = [
         "engine_hours_since_last_service",
+        "days_since_last_service",
         "tire_health_pct",
         "brake_health_pct",
         "mileage_since_last_service_km",
@@ -112,52 +100,50 @@ def build_vehicle_feature_dict(db: Session, asset_id: str) -> dict[str, Any]:
         "battery_voltage_v",
         "odometer_km",
         "downtime_hours_last_90d",
+        "active_fault_code_count",
         "distance_last_30d_km",
         "payload_utilization_pct",
+        "trip_count_30d",
         "ambient_humidity_avg_pct",
         "rough_road_pct",
         "idle_hours_last_30d",
         "port_route_pct",
-        "urban_route_pct",
+        "overload_events_30d",
         "fuel_rate_lph",
         "avg_payload_kg",
-        "ambient_temp_avg_c",
-        "avg_trip_distance_km",
-        "fuel_efficiency_km_per_l",
-        "maintenance_cost_last_service_lkr",
-        "rainfall_mm_30d",
-        "tire_pressure_psi",
-        "operating_hours_last_30d",
-    ]
-    sensor_int_cols = [
-        "days_since_last_service",
-        "active_fault_code_count",
-        "trip_count_30d",
-        "overload_events_30d",
-        "start_stop_burden_30d",
-    ]
-    sensor_bool_cols = [
-        "sensor_fault_flag",
-        "is_home_warehouse_service",
-    ]
-    sensor_str_cols = [
-        "route_type",
-        "cargo_type",
-        "operating_shift",
-        "last_service_type",
-        "parts_replaced_last_service",
-        "major_component_replaced",
     ]
 
-    for col in sensor_float_cols:
-        feature_dict[col] = _to_float(getattr(reading, col, None))
-    for col in sensor_int_cols:
-        feature_dict[col] = _to_int(getattr(reading, col, None))
-    for col in sensor_bool_cols:
-        val = getattr(reading, col, None)
-        feature_dict[col] = bool(val) if val is not None else False
-    for col in sensor_str_cols:
-        feature_dict[col] = str(getattr(reading, col, None) or "")
+    for col in columns:
+        feature_dict[col] = getattr(reading, col, None)
+
+    # fallback defaults / harmonization
+    feature_dict["engine_hours_since_last_service"] = _to_float(feature_dict.get("engine_hours_since_last_service"))
+    feature_dict["days_since_last_service"] = _to_int(feature_dict.get("days_since_last_service"))
+    feature_dict["tire_health_pct"] = _to_float(feature_dict.get("tire_health_pct"))
+    feature_dict["brake_health_pct"] = _to_float(feature_dict.get("brake_health_pct"))
+    feature_dict["mileage_since_last_service_km"] = _to_float(feature_dict.get("mileage_since_last_service_km"))
+    feature_dict["battery_health_pct"] = _to_float(feature_dict.get("battery_health_pct"))
+    feature_dict["oil_life_pct"] = _to_float(feature_dict.get("oil_life_pct"))
+    feature_dict["hydraulic_health_pct"] = _to_float(feature_dict.get("hydraulic_health_pct"))
+    feature_dict["vibration_rms_mm_s"] = _to_float(feature_dict.get("vibration_rms_mm_s"))
+    feature_dict["fuel_price_lkr_per_l"] = _to_float(feature_dict.get("fuel_price_lkr_per_l"))
+    feature_dict["engine_hours_total"] = _to_float(feature_dict.get("engine_hours_total"))
+    feature_dict["coolant_temp_max_c"] = _to_float(feature_dict.get("coolant_temp_max_c"))
+    feature_dict["engine_temp_avg_c"] = _to_float(feature_dict.get("engine_temp_avg_c"))
+    feature_dict["battery_voltage_v"] = _to_float(feature_dict.get("battery_voltage_v"))
+    feature_dict["odometer_km"] = _to_float(feature_dict.get("odometer_km"))
+    feature_dict["downtime_hours_last_90d"] = _to_float(feature_dict.get("downtime_hours_last_90d"))
+    feature_dict["active_fault_code_count"] = _to_int(feature_dict.get("active_fault_code_count"))
+    feature_dict["distance_last_30d_km"] = _to_float(feature_dict.get("distance_last_30d_km"))
+    feature_dict["payload_utilization_pct"] = _to_float(feature_dict.get("payload_utilization_pct"))
+    feature_dict["trip_count_30d"] = _to_int(feature_dict.get("trip_count_30d"))
+    feature_dict["ambient_humidity_avg_pct"] = _to_float(feature_dict.get("ambient_humidity_avg_pct"))
+    feature_dict["rough_road_pct"] = _to_float(feature_dict.get("rough_road_pct"))
+    feature_dict["idle_hours_last_30d"] = _to_float(feature_dict.get("idle_hours_last_30d"))
+    feature_dict["port_route_pct"] = _to_float(feature_dict.get("port_route_pct"))
+    feature_dict["overload_events_30d"] = _to_int(feature_dict.get("overload_events_30d"))
+    feature_dict["fuel_rate_lph"] = _to_float(feature_dict.get("fuel_rate_lph"))
+    feature_dict["avg_payload_kg"] = _to_float(feature_dict.get("avg_payload_kg"))
 
     return feature_dict
 
@@ -167,20 +153,15 @@ def build_dataframe_for_features(
     feature_names: list[str],
     categorical_cols: list[str] | None = None,
 ) -> pd.DataFrame:
-    """
-    Build a properly-typed DataFrame for XGBoost / CatBoost inference.
+    """Build a properly-typed DataFrame for XGBoost / CatBoost inference.
 
-    - Columns in ``categorical_cols`` are cast to ``pd.Categorical``.
-    - Any remaining column that still has ``object`` dtype is also cast to
-      ``pd.Categorical`` as a safety-net — XGBoost trained with
-      ``enable_categorical=True`` rejects object columns outright.
-    - All other columns are coerced to numeric (float64).
+    Columns in ``categorical_cols`` are cast to ``pd.Categorical``.
+    Any remaining object-dtype column is also cast to Categorical —
+    XGBoost trained with ``enable_categorical=True`` rejects object columns.
+    All other columns are coerced to float64.
     """
     cat_set = set(categorical_cols or [])
-    row = {
-        f: feature_dict.get(f, "" if f in cat_set else 0)
-        for f in feature_names
-    }
+    row = {f: feature_dict.get(f, "" if f in cat_set else 0) for f in feature_names}
     df = pd.DataFrame([row])
 
     for col in df.columns:
@@ -189,13 +170,10 @@ def build_dataframe_for_features(
         else:
             converted = pd.to_numeric(df[col], errors="coerce")
             if converted.isna().all():
-                # Could not convert at all — treat as categorical
                 df[col] = pd.Categorical([str(df[col].iloc[0]).lower()])
             else:
                 df[col] = converted.fillna(0)
 
-    # Final safety pass: cast any remaining object columns to Categorical
-    # (covers columns in clf_categorical_cols that were not in our explicit list)
     for col in df.select_dtypes(include="object").columns:
         df[col] = pd.Categorical(df[col].astype(str).str.lower())
 
@@ -260,7 +238,6 @@ def run_vehicle_prediction_and_store(
     clf_features: list[str],
     reg_model,
     reg_features: list[str],
-    clf_categorical_cols: list[str] | None = None,
 ) -> dict[str, Any]:
     asset = _get_asset(db, asset_id)
     if not asset:
@@ -268,8 +245,8 @@ def run_vehicle_prediction_and_store(
 
     feature_dict = build_vehicle_feature_dict(db, asset_id)
 
-    clf_df = build_dataframe_for_features(feature_dict, clf_features, categorical_cols=clf_categorical_cols)
-    reg_df = build_dataframe_for_features(feature_dict, reg_features, categorical_cols=None)
+    clf_df = build_dataframe_for_features(feature_dict, clf_features)
+    reg_df = build_dataframe_for_features(feature_dict, reg_features)
 
     try:
         predicted_class = int(clf_model.predict(clf_df)[0])
@@ -351,20 +328,6 @@ def run_vehicle_prediction_and_store(
     db.refresh(run)
     db.refresh(failure_row)
     db.refresh(cost_row)
-
-    if failure_probability >= 0.80:
-        try:
-            InAppNotificationService.notify_admins(
-                db=db,
-                title="Critical Asset Risk Detected",
-                message=f"CRITICAL: Asset {asset.asset_code} has spiked to {round(failure_probability * 100, 1)}% failure probability.",
-                priority="critical",
-                notification_type="admin_alert",
-                link_url=f"/admin/assets/{asset.id}"
-            )
-        except Exception as exc:
-            import logging
-            logging.getLogger(__name__).warning("Failed to send critical asset alert: %s", exc)
 
     return {
         "run_id": str(run.id),

@@ -9,10 +9,3 @@ from .base import Base
 from .session import SessionLocal, engine, DATABASE_URL
 
 __all__ = ["Base", "SessionLocal", "engine", "DATABASE_URL"]
-
-
-
-
-
-
-# .ok now it's time for this too. let's choose best model properly by comparing. give me the updated .ipynb file as predictix_pm_model_v4-classifier
