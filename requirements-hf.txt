@@ -1,0 +1,11 @@
+# HuggingFace / heavy model dependencies
+# Install these ONLY when DISABLE_HF_MODELS=false (local dev or GPU server)
+#
+# Usage:
+#   pip install -r requirements.txt -r requirements-hf.txt
+#
+transformers
+torch
+huggingface_hub
+safetensors
+sentence-transformers
