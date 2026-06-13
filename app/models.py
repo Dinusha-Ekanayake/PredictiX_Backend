@@ -467,3 +467,36 @@ class UserNotificationPreference(Base):
     enabled = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class PdmBatchPrediction(Base):
+    """One row per asset — upserted by the hourly batch PDM scheduler."""
+
+    __tablename__ = "pdm_batch_predictions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id", ondelete="CASCADE"), nullable=False, unique=True)
+
+    failure_probability = Column(Numeric(10, 4))
+    maintenance_required = Column(Boolean)
+    risk_level = Column(Text)
+
+    predicted_days_until_maintenance = Column(Integer)
+    predicted_maintenance_date = Column(Date)
+
+    health_score = Column(Numeric(10, 4))
+    health_status = Column(Text)
+    contributing_factors = Column(JSONB, default=[])
+
+    estimated_cost_lkr = Column(Numeric(12, 2))
+    min_cost_lkr = Column(Numeric(12, 2))
+    max_cost_lkr = Column(Numeric(12, 2))
+
+    top_explanations = Column(JSONB, default=[])
+
+    predicted_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    run_duration_ms = Column(Integer)
+    error_message = Column(Text)
+    status = Column(Text, nullable=False, default="ok")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
