@@ -1,12 +1,15 @@
 """PredictiX API — FastAPI application entry point."""
 from __future__ import annotations
 
+import joblib
 import logging
 import os
 import pickle
+import warnings
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -40,6 +43,8 @@ from .routers.users import router as users_router
 from .routers.vehicle_predictions import router as vehicle_predictions_router
 from .routers.warehouse_dashboard import warehouse_dashboard_router
 from .routers.warehouses import router as warehouses_router
+from .routers.batch_predictions import router as batch_predictions_router
+from .routers.websockets import router as websockets_router
 
 # Sharada — user-role self-service profile (/user-profile)
 from .routers.user_profile import router as user_profile_router
@@ -64,9 +69,14 @@ REG_MODEL_PATH    = MODEL_DIR / "pdm_regressor_model"  / "days_until_next_mainte
 REG_FEATURES_PATH = MODEL_DIR / "pdm_regressor_model"  / "regression_selected_features.pkl"
 
 clf_model = None
-clf_features = None
+clf_features: list = []
+clf_threshold: float = 0.5
+clf_categorical_cols: list = []
 reg_model = None
-reg_features = None
+reg_features: list = []
+
+scheduler: BackgroundScheduler | None = None
+_model_load_lock = __import__('threading').Lock()
 
 
 def _load_pickle(path: Path):
@@ -74,27 +84,94 @@ def _load_pickle(path: Path):
         return pickle.load(fh)
 
 
+def _load_pdm_models():
+    """Lazily load heavy PdM models (thread-safe, idempotent)."""
+    global clf_model, clf_features, clf_threshold, clf_categorical_cols, reg_model, reg_features
+    if clf_model is not None and reg_model is not None:
+        return
+
+    with _model_load_lock:
+        if clf_model is not None and reg_model is not None:
+            return
+        try:
+            clf_model    = _load_pickle(CLF_MODEL_PATH)
+            clf_features = _load_pickle(CLF_FEATURES_PATH)
+            if getattr(clf_model, "feature_names_", None):
+                clf_features = list(clf_model.feature_names_)
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                reg_model = _load_pickle(REG_MODEL_PATH)
+            reg_features = _load_pickle(REG_FEATURES_PATH)
+            if getattr(reg_model, "feature_names_", None):
+                reg_features = list(reg_model.feature_names_)
+
+            log.info("PdM models loaded — clf: %d features, reg: %d features",
+                     len(clf_features or []), len(reg_features or []))
+        except Exception as exc:
+            log.exception("Local PdM model loading failed")
+            raise RuntimeError(f"Failed to load local PdM models: {exc}") from exc
+
+
+def _run_scheduled_batch() -> None:
+    """Scheduled job — runs the full PDM batch in a fresh DB session."""
+    from app.db.session import SessionLocal
+    from app.ai.services.batch_prediction_service import run_batch_for_all_assets
+
+    _load_pdm_models()
+
+    db = SessionLocal()
+    try:
+        run_batch_for_all_assets(
+            db=db,
+            clf_model=clf_model,
+            clf_features=clf_features,
+            clf_threshold=clf_threshold,
+            clf_categorical_cols=clf_categorical_cols,
+            reg_model=reg_model,
+            reg_features=reg_features,
+        )
+    except Exception:
+        log.exception("Batch prediction run failed")
+    finally:
+        db.close()
+
+
+def _run_startup_batch() -> None:
+    """Startup-only wrapper: waits 10s for Uvicorn to fully bind before running."""
+    import time
+    time.sleep(10)
+    _run_scheduled_batch()
+
+
+def _ping_hf_models() -> None:
+    """Scheduled job — pings HuggingFace models to prevent cold starts."""
+    if os.getenv("DISABLE_HF_MODELS", "false").lower() == "true":
+        return
+
+    from app.ai.services._hf_inference import call_hf_inference
+
+    repos = [
+        "Dinusha-Ekanayake/predictix-asset_summarization_model",
+        "Dinusha-Ekanayake/predictix-ticket_summarization_model",
+        "Dinusha-Ekanayake/predictix-ticket_categorization_model",
+        "Dinusha-Ekanayake/predictix-ticket_prioritization_model",
+    ]
+
+    for repo in repos:
+        try:
+            call_hf_inference(repo, "keep_warm_ping", timeout=30, max_cold_start_wait=20)
+            log.debug("Pinged %s to keep warm.", repo)
+        except Exception:
+            pass
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    """Load PdM models on startup; optionally warm Hugging Face models."""
-    global clf_model, clf_features, reg_model, reg_features
+    """Load PdM models on startup; start batch scheduler; optionally warm HF models."""
+    global scheduler
 
-    try:
-        clf_model = _load_pickle(CLF_MODEL_PATH)
-        clf_features = _load_pickle(CLF_FEATURES_PATH)
-        reg_model = _load_pickle(REG_MODEL_PATH)
-        reg_features = _load_pickle(REG_FEATURES_PATH)
-
-        if getattr(clf_model, "feature_names_", None):
-            clf_features = list(clf_model.feature_names_)
-        if getattr(reg_model, "feature_names_", None):
-            reg_features = list(reg_model.feature_names_)
-
-        log.info("PdM models loaded. clf=%d features, reg=%d features",
-                 len(clf_features or []), len(reg_features or []))
-    except Exception as exc:
-        log.exception("Local PdM model loading failed")
-        raise RuntimeError(f"Failed to load local PdM models: {exc}") from exc
+    _load_pdm_models()
 
     if os.getenv("DISABLE_HF_MODELS", "false").lower() != "true":
         try:
@@ -113,22 +190,67 @@ async def lifespan(_: FastAPI):
     else:
         log.info("HuggingFace models disabled (DISABLE_HF_MODELS=true). Skipping warmup.")
 
+    # ── Hourly batch PDM scheduler ─────────────────────────────────────────────
+    batch_interval_hours = int(os.getenv("BATCH_INTERVAL_HOURS", "1"))
+    scheduler = BackgroundScheduler(daemon=True)
+    scheduler.add_job(
+        _run_scheduled_batch,
+        trigger="interval",
+        hours=batch_interval_hours,
+        id="pdm_batch",
+        name="PDM hourly batch prediction",
+        replace_existing=True,
+    )
+
+    if os.getenv("ENABLE_HF_WARMER", "false").lower() == "true":
+        scheduler.add_job(
+            _ping_hf_models,
+            trigger="interval",
+            minutes=7,
+            jitter=180,
+            id="hf_ping",
+            name="HF Models Keep-Warm Ping",
+            replace_existing=True,
+        )
+        log.info("HF Inference Warmer enabled (4-10 min intervals).")
+
+    scheduler.start()
+    log.info("PDM batch scheduler started — interval=%dh", batch_interval_hours)
+
+    if os.getenv("BATCH_RUN_ON_STARTUP", "false").lower() == "true":
+        import threading
+        t = threading.Thread(target=_run_startup_batch, daemon=True, name="pdm_batch_startup")
+        t.start()
+        log.info("PDM batch startup run queued (fires in 10s)")
+
     yield
+
+    if scheduler and scheduler.running:
+        scheduler.shutdown(wait=False)
+        log.info("PDM batch scheduler stopped.")
     log.info("Shutting down PredictiX API.")
 
 
 app = FastAPI(title="PredictiX API", version="1.0", lifespan=lifespan)
 
+# ── CORS ──────────────────────────────────────────────────────────────────────
+_default_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://predicti-x-frontend.vercel.app",
+    "https://predicti-x-frontend-dinusha-ekanayakes-projects.vercel.app",
+]
+_env_origins = os.getenv("ALLOWED_ORIGINS", "")
+_extra_origins = [o.strip() for o in _env_origins.split(",") if o.strip()]
+_allowed_origins = list(set(_default_origins + _extra_origins))
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3001",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -139,7 +261,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(profiles_router)
 app.include_router(users_router)
-app.include_router(user_profile_router)        # Sharada — user-role profile
+app.include_router(user_profile_router)
 
 # Organisation
 app.include_router(warehouses_router)
@@ -159,15 +281,16 @@ app.include_router(tickets_router)
 app.include_router(ticket_comments_router)
 app.include_router(ticket_attachments_router)
 app.include_router(ticket_status_history_router)
-app.include_router(user_tickets_router)        # Sharada — user-role ticket section
+app.include_router(user_tickets_router)
 
 # Predictions & ML
 app.include_router(predictions_router)
 app.include_router(vehicle_predictions_router)
+app.include_router(batch_predictions_router)
 app.include_router(prediction_explanations_router)
 app.include_router(model_registry_router)
 app.include_router(warehouse_dashboard_router)
-app.include_router(survival_predictions_router)  # Sharada — FRSO survival predictions
+app.include_router(survival_predictions_router)
 app.include_router(admin_dashboard_router)
 
 # Notifications & reports
@@ -184,6 +307,9 @@ app.include_router(faqs_router)
 
 # Diagnostics
 app.include_router(db_debug_router)
+
+# WebSockets
+app.include_router(websockets_router)
 
 
 @app.get("/", tags=["Health"])
