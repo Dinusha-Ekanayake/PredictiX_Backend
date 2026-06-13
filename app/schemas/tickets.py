@@ -38,12 +38,25 @@ class UserTicketOut(BaseModel):
     created_at: Optional[datetime] = None
 
 
+class TicketPreviewRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=255)
+    description: str = Field(..., min_length=1)
+
+
+class TicketPreviewResponse(BaseModel):
+    predicted_priority: Optional[str] = None
+    predicted_category: Optional[str] = None
+    errors: dict[str, str] = Field(default_factory=dict)
+
+
 class TicketCreate(BaseModel):
     asset_id: Optional[UUID] = None
     warehouse_id: Optional[UUID] = None
     title: str
     description: str
     priority: Optional[str] = None
+    predicted_priority: Optional[str] = None
+    predicted_category: Optional[str] = None
     created_by: UUID
 
 
