@@ -1,6 +1,5 @@
 from pydantic import BaseModel
 from typing import Optional
-from app.schemas.profile import UserSettings
 
 class UserProfileOut(BaseModel):
     """Full profile shown on /user/users page"""
@@ -19,7 +18,6 @@ class UserProfileOut(BaseModel):
     role: str
     status: str
     assignedAssetsCount: int      # COUNT of active assignments
-    settings: Optional[UserSettings] = None
 
 class UserProfileUpdate(BaseModel):
     """Only fields the user is allowed to change"""
@@ -27,7 +25,6 @@ class UserProfileUpdate(BaseModel):
     lastName: Optional[str] = None
     contactNumber: Optional[str] = None
     address: Optional[str] = None
-    settings: Optional[UserSettings] = None
 
 class UserAssignedAssetOut(BaseModel):
     """One asset card on the profile page"""
