@@ -54,9 +54,6 @@ def call_hf_inference(
         max_cold_start_wait: Max seconds we'll wait for a 503 cold-start
             retry. If HF asks for longer, we give up and raise.
     """
-    if os.getenv("DISABLE_HF_MODELS", "false").lower() == "true":
-        raise RuntimeError("HF models disabled (DISABLE_HF_MODELS=true).")
-
     url = HF_API_URL.format(repo=repo)
     headers = {
         "Authorization": f"Bearer {_token()}",
