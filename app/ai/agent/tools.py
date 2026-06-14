@@ -34,8 +34,16 @@ class ToolContext:
         return str(getattr(self.user, "role", "")).lower() == "admin"
 
     @property
+    def is_superadmin(self) -> bool:
+        return str(getattr(self.user, "role", "")).lower() == "superadmin"
+
+    @property
     def user_id(self) -> str:
         return str(getattr(self.user, "id", ""))
+
+    @property
+    def warehouse_id(self) -> str:
+        return str(getattr(self.user, "warehouse_id", ""))
 
 
 # ─── Helpers ───────────────────────────────────────────────────────────────────
@@ -99,10 +107,13 @@ def _tool_list_tickets(args: dict, ctx: ToolContext) -> dict:
     db = _require_db(ctx)
     q = db.query(Ticket)
 
-    if not ctx.is_admin:
+    if not (ctx.is_admin or ctx.is_superadmin):
         q = q.filter(
             (Ticket.created_by == ctx.user_id) | (Ticket.assigned_to == ctx.user_id)
         )
+    elif ctx.is_admin and not ctx.is_superadmin:
+        if ctx.warehouse_id and ctx.warehouse_id != "None":
+            q = q.filter(Ticket.warehouse_id == ctx.warehouse_id)
 
     status = args.get("status")
     priority = args.get("priority")
@@ -119,7 +130,7 @@ def _tool_list_tickets(args: dict, ctx: ToolContext) -> dict:
     rows = q.order_by(Ticket.created_at.desc()).limit(limit).all()
     return {
         "count": len(rows),
-        "scope": "all" if ctx.is_admin else "own",
+        "scope": "all" if ctx.is_superadmin else "warehouse" if ctx.is_admin else "own",
         "tickets": [_serialize_ticket(t) for t in rows],
     }
 
@@ -134,8 +145,11 @@ def _tool_get_ticket(args: dict, ctx: ToolContext) -> dict:
     if not t:
         return {"error": "Ticket not found"}
 
-    if not ctx.is_admin and str(t.created_by) != ctx.user_id and str(t.assigned_to) != ctx.user_id:
+    if not (ctx.is_admin or ctx.is_superadmin) and str(t.created_by) != ctx.user_id and str(t.assigned_to) != ctx.user_id:
         return {"error": "You don't have permission to view this ticket"}
+        
+    if ctx.is_admin and not ctx.is_superadmin and ctx.warehouse_id and ctx.warehouse_id != "None" and str(t.warehouse_id) != ctx.warehouse_id:
+        return {"error": "You don't have permission to view tickets outside your warehouse"}
 
     return _serialize_ticket(t)
 
@@ -143,6 +157,10 @@ def _tool_get_ticket(args: dict, ctx: ToolContext) -> dict:
 def _tool_list_assets(args: dict, ctx: ToolContext) -> dict:
     db = _require_db(ctx)
     q = db.query(Asset)
+    
+    if ctx.is_admin and not ctx.is_superadmin:
+        if ctx.warehouse_id and ctx.warehouse_id != "None":
+            q = q.filter(Asset.warehouse_id == ctx.warehouse_id)
 
     search = args.get("search")
     status = args.get("status")
@@ -191,6 +209,10 @@ def _tool_get_asset(args: dict, ctx: ToolContext) -> dict:
     a = q.first()
     if not a:
         return {"error": "Asset not found"}
+        
+    if ctx.is_admin and not ctx.is_superadmin and ctx.warehouse_id and ctx.warehouse_id != "None" and str(a.warehouse_id) != ctx.warehouse_id:
+        return {"error": "You don't have permission to view assets outside your warehouse"}
+
     return _serialize_asset(a)
 
 
@@ -205,7 +227,12 @@ def _tool_list_warehouses(args: dict, ctx: ToolContext) -> dict:
 
 def _tool_list_departments(args: dict, ctx: ToolContext) -> dict:
     db = _require_db(ctx)
-    rows = db.query(Department).order_by(Department.name.asc()).limit(50).all()
+    q = db.query(Department)
+    if ctx.is_admin and not ctx.is_superadmin:
+        if ctx.warehouse_id and ctx.warehouse_id != "None":
+            q = q.filter(Department.warehouse_id == ctx.warehouse_id)
+            
+    rows = q.order_by(Department.name.asc()).limit(50).all()
     return {
         "count": len(rows),
         "departments": [{"id": str(d.id), "name": d.name} for d in rows],
