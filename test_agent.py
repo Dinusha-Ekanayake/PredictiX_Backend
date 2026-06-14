@@ -6,7 +6,7 @@ from app.ai.agent.tools import ToolContext
 
 def test():
     db = SessionLocal()
-    user = db.query(Profile).filter(Profile.role == 'superadmin').first()
+    user = db.query(Profile).filter(Profile.role == 'admin').first()
     if not user:
         print("No superadmin found. Using any user.")
         user = db.query(Profile).first()
@@ -14,9 +14,9 @@ def test():
     ctx = ToolContext(db=db, user=user)
     print(f"Testing with user: {user.full_name} ({user.role})")
     
-    res, trace = run_agent('how many open tickets are there?', ctx)
-    print('Answer:', res)
-    print('Trace:', [t["name"] for t in trace])
+    res = run_agent('how many open tickets are there?', None, ctx)
+    print('Answer:', res["answer"])
+    print('Trace:', [t["name"] for t in res["tool_trace"]])
 
 if __name__ == "__main__":
     test()
