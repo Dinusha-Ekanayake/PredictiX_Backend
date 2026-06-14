@@ -13,7 +13,7 @@ from .tools import TOOL_HANDLERS, TOOL_SCHEMAS, ToolContext, execute_tool
 
 log = logging.getLogger("predictix.agent")
 
-DEFAULT_MODEL = "gemini-2.0-flash"
+DEFAULT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 MAX_TOOL_ITERATIONS = 6  # cap the loop so a confused model can't spin forever
 
 
@@ -60,12 +60,16 @@ Use 1-2 emojis per line max. Keep it clean and professional.
 
 
 def _get_ai_client() -> OpenAI:
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
-        raise RuntimeError("GEMINI_API_KEY is not configured")
+        raise RuntimeError("OPENROUTER_API_KEY is not configured")
     return OpenAI(
         api_key=api_key,
-        base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+        base_url="https://openrouter.ai/api/v1",
+        default_headers={
+            "HTTP-Referer": "http://localhost:3000", # Optional, for rankings on openrouter.ai
+            "X-Title": "PredictiX Chatbot", # Optional, for rankings on openrouter.ai
+        }
     )
 
 
