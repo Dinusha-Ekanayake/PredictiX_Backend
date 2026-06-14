@@ -245,6 +245,8 @@ _default_origins = [
     "http://127.0.0.1:3001",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "http://192.168.56.1:3000",
+    "http://192.168.56.1:3001",
     "https://predicti-x-frontend.vercel.app",
     "https://predicti-x-frontend-dinusha-ekanayakes-projects.vercel.app",
 ]
