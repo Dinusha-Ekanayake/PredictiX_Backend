@@ -35,3 +35,4 @@ nltk
 sentence-transformers
 langchain-groq
 langchain-core
+reportlab
