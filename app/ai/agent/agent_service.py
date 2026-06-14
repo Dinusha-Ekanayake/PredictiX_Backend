@@ -13,7 +13,7 @@ from .tools import TOOL_HANDLERS, TOOL_SCHEMAS, ToolContext, execute_tool
 
 log = logging.getLogger("predictix.agent")
 
-DEFAULT_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_MODEL = "llama3-8b-8192"
 MAX_TOOL_ITERATIONS = 6  # cap the loop so a confused model can't spin forever
 
 
