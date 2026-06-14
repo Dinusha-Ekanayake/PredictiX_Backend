@@ -7,13 +7,13 @@ import logging
 import os
 from typing import Any, Optional
 
-from groq import Groq
+from openai import OpenAI
 
 from .tools import TOOL_HANDLERS, TOOL_SCHEMAS, ToolContext, execute_tool
 
 log = logging.getLogger("predictix.agent")
 
-DEFAULT_MODEL = "llama3-8b-8192"
+DEFAULT_MODEL = "gemini-2.0-flash"
 MAX_TOOL_ITERATIONS = 6  # cap the loop so a confused model can't spin forever
 
 
@@ -59,11 +59,14 @@ Use 1-2 emojis per line max. Keep it clean and professional.
 """
 
 
-def _get_groq_client() -> Groq:
-    api_key = os.getenv("GROQ_API_KEY")
+def _get_ai_client() -> OpenAI:
+    api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        raise RuntimeError("GROQ_API_KEY is not configured")
-    return Groq(api_key=api_key)
+        raise RuntimeError("GEMINI_API_KEY is not configured")
+    return OpenAI(
+        api_key=api_key,
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+    )
 
 
 def run_agent(
@@ -78,7 +81,7 @@ def run_agent(
         question: The user's latest message.
         history: Prior conversation turns ([{role, content}]). Excludes system+current question.
         ctx: Per-request tool context (db session, current user).
-        model: Groq model id.
+        model: AI model id.
 
     Returns:
         {
@@ -87,7 +90,7 @@ def run_agent(
             "iterations": int,
         }
     """
-    client = _get_groq_client()
+    client = _get_ai_client()
 
     messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
     if history:
@@ -113,7 +116,7 @@ def run_agent(
                 temperature=0.4,
             )
         except Exception as e:
-            log.exception("Groq call failed (iteration %d)", iteration)
+            log.exception("AI call failed (iteration %d)", iteration)
             err_str = str(e).lower()
             
             # Default Technical Error Message
