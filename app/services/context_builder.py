@@ -11,6 +11,7 @@ from datetime import datetime
 from fastapi import HTTPException
 from supabase import create_client, Client
 import os
+import httpx
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
@@ -57,13 +58,19 @@ def _get_supabase() -> Client:
     return create_client(url, key)
 
 
-class AssetContextBuilder:
-    """
-    Builds the full context dict consumed by PDFRenderService.generate_pdf().
-    Uses Supabase REST API — no SQLAlchemy/psycopg2 required.
-    RLS-blocked tables return None or [] instead of raising errors.
-    """
+def _fetch_admin_summary() -> dict:
+    """Fetch fleet-level summary from the admin dashboard API."""
+    try:
+        base = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
+        resp = httpx.get(f"{base}/admin-dashboard/summary", timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception as e:
+        print(f"[context_builder] WARNING: Could not fetch admin summary: {e}")
+    return {}
 
+
+class AssetContextBuilder:
     def __init__(self, db=None):
         self.supabase: Client = _get_supabase()
 
@@ -92,6 +99,32 @@ class AssetContextBuilder:
             print(f"[context_builder] WARNING: Could not fetch from '{table}': {e}")
             return []
 
+    def _fetch_status_distribution(self) -> list:
+        """Get asset count by status."""
+        try:
+            result = self.supabase.table("assets").select("status").execute()
+            counts = {}
+            for row in (result.data or []):
+                s = (row.get("status") or "unknown").lower()
+                counts[s] = counts.get(s, 0) + 1
+            return [{"name": k.title(), "count": v} for k, v in sorted(counts.items(), key=lambda x: -x[1])]
+        except Exception as e:
+            print(f"[context_builder] WARNING: Could not fetch status distribution: {e}")
+            return []
+
+    def _fetch_vehicle_type_distribution(self) -> list:
+        """Get asset count by vehicle_type."""
+        try:
+            result = self.supabase.table("assets").select("vehicle_type").execute()
+            counts = {}
+            for row in (result.data or []):
+                vt = row.get("vehicle_type") or "Unknown"
+                counts[vt] = counts.get(vt, 0) + 1
+            return [{"name": k, "count": v} for k, v in sorted(counts.items(), key=lambda x: -x[1])[:10]]
+        except Exception as e:
+            print(f"[context_builder] WARNING: Could not fetch vehicle type distribution: {e}")
+            return []
+
     def build_context(self, asset_id: UUID) -> dict:
         asset_id_str = str(asset_id)
 
@@ -108,68 +141,66 @@ class AssetContextBuilder:
         if asset.get("department_id"):
             department = self._fetch_one("departments", {"id": asset["department_id"]}, columns="id,name")
 
-        # ── 3. Maintenance events (newest first) ───────────
+        # ── 3. Maintenance events ──────────────────────────
         maintenance = self._fetch_many(
-            "maintenance_events",
-            {"asset_id": asset_id_str},
-            order_col="performed_at",
-            order_desc=True
+            "maintenance_events", {"asset_id": asset_id_str},
+            order_col="performed_at", order_desc=True
         )
 
-        # ── 4. Tickets (newest first) ──────────────────────
+        # ── 4. Tickets ─────────────────────────────────────
         tickets = self._fetch_many(
-            "tickets",
-            {"asset_id": asset_id_str},
-            order_col="created_at",
-            order_desc=True
+            "tickets", {"asset_id": asset_id_str},
+            order_col="created_at", order_desc=True
         )
 
-        # ── 5. Latest failure prediction ───────────────────
+        # ── 5. Failure prediction ──────────────────────────
         failure_preds = self._fetch_many(
-            "asset_failure_predictions",
-            {"asset_id": asset_id_str},
-            order_col="created_at",
-            order_desc=True
+            "asset_failure_predictions", {"asset_id": asset_id_str},
+            order_col="created_at", order_desc=True
         )
         failure_pred = failure_preds[0] if failure_preds else None
 
-        # ── 6. Latest cost prediction ──────────────────────
+        # ── 6. Cost prediction ─────────────────────────────
         cost_preds = self._fetch_many(
-            "asset_cost_predictions",
-            {"asset_id": asset_id_str},
-            order_col="created_at",
-            order_desc=True
+            "asset_cost_predictions", {"asset_id": asset_id_str},
+            order_col="created_at", order_desc=True
         )
         cost_pred = cost_preds[0] if cost_preds else None
 
-        # ── 7. Latest sensor reading ───────────────────────
+        # ── 7. Sensor reading ──────────────────────────────
         sensor_readings = self._fetch_many(
-            "sensor_readings",
-            {"asset_id": asset_id_str},
-            order_col="recorded_at",
-            order_desc=True
+            "sensor_readings", {"asset_id": asset_id_str},
+            order_col="recorded_at", order_desc=True
         )
         sensor = sensor_readings[0] if sensor_readings else None
 
-        # ── 8. Aggregate maintenance metrics ──────────────
+        # ── 8. Fleet-level data ────────────────────────────
+        admin_summary   = _fetch_admin_summary()
+        kpis            = admin_summary.get("kpis", {})
+        health_dist     = admin_summary.get("healthDistribution", [])
+        top_risk        = admin_summary.get("topRiskAssets", [])
+        status_dist     = self._fetch_status_distribution()
+        vehicle_dist    = self._fetch_vehicle_type_distribution()
+
+        # ── 9. Maintenance metrics ─────────────────────────
         total_events   = len(maintenance)
         preventive     = sum(1 for m in maintenance if (m.get("event_type") or "").lower() == "preventive")
         corrective     = total_events - preventive
         total_cost     = sum(_float(m.get("cost_amount")) for m in maintenance)
         total_downtime = sum(_float(m.get("downtime_hours")) for m in maintenance)
 
-        # ── 9. Ticket metrics ─────────────────────────────
+        # ── 10. Ticket metrics ─────────────────────────────
         open_tickets   = [t for t in tickets if (t.get("status") or "").lower() in ("open", "in_progress")]
         high_priority  = [t for t in open_tickets if (t.get("priority") or "").lower() == "high"]
         closed_tickets = [t for t in tickets if (t.get("status") or "").lower() in ("closed", "resolved")]
 
-        # ── 10. AI prediction metrics ─────────────────────
-        health_score     = _float(failure_pred.get("health_score"))           if failure_pred else 100.0
-        failure_prob     = _float(failure_pred.get("failure_probability")) * 100 if failure_pred else 0.0
+        # ── 11. Prediction metrics ─────────────────────────
+        health_score     = _float(failure_pred.get("health_score"))               if failure_pred else 100.0
+        failure_prob     = _float(failure_pred.get("failure_probability")) * 100  if failure_pred else 0.0
         risk_level       = (failure_pred.get("risk_level") if failure_pred else None) or _band_risk(health_score)
-        days_until_maint = failure_pred.get("days_until_maintenance")         if failure_pred else None
-        pred_maint_date  = _date(failure_pred.get("predicted_maintenance_date")) if failure_pred else "—"
-        top_explanations = (failure_pred.get("top_explanations") or {})       if failure_pred else {}
+        days_until_maint = failure_pred.get("days_until_maintenance")             if failure_pred else None
+        pred_maint_date  = _date(failure_pred.get("predicted_maintenance_date"))  if failure_pred else "—"
+        top_explanations = (failure_pred.get("top_explanations") or {})           if failure_pred else {}
 
         est_cost = _float(cost_pred.get("estimated_cost")) if cost_pred else 0.0
         min_cost = _float(cost_pred.get("min_cost"))       if cost_pred else 0.0
@@ -179,6 +210,21 @@ class AssetContextBuilder:
         return {
             "generated_date": datetime.now().strftime("%B %d, %Y"),
             "report_id":      asset_id_str[:8].upper(),
+
+            # ── Fleet overview (page 1) ──────────────────
+            "fleet": {
+                "total_assets":         kpis.get("totalAssets", 0),
+                "fleet_health":         kpis.get("fleetHealth", 0),
+                "critical_alerts":      kpis.get("criticalAlerts", 0),
+                "open_tickets":         kpis.get("openTickets", 0),
+                "high_priority_tickets":kpis.get("highPriorityTickets", 0),
+                "predicted_failures":   kpis.get("predictedFailures", 0),
+                "est_maintenance_cost": kpis.get("estMaintenanceCost", 0),
+                "health_distribution":  health_dist,
+                "status_distribution":  status_dist,
+                "vehicle_distribution": vehicle_dist,
+                "top_risk_assets":      top_risk[:5],
+            },
 
             # ── Asset core info ──────────────────────────
             "asset": {
@@ -207,14 +253,12 @@ class AssetContextBuilder:
                 "lifetime_breakdown_count":  _str(asset.get("lifetime_breakdown_count")),
                 "description":               _str(asset.get("description")),
                 "warehouse":                 _str(warehouse.get("name") if warehouse else None),
-                "department":               _str(department.get("name") if department else None),
+                "department":                _str(department.get("name") if department else None),
             },
 
-            # ── Raw dicts (for table rendering) ─────────
             "maintenance": maintenance,
             "tickets":     tickets,
 
-            # ── Sensor snapshot ──────────────────────────
             "sensor": {
                 "recorded_at":                     _datetime(sensor.get("recorded_at")),
                 "tire_health_pct":                 _str(sensor.get("tire_health_pct")),
@@ -232,7 +276,6 @@ class AssetContextBuilder:
                 "odometer_km":                     _str(sensor.get("odometer_km")),
             } if sensor else {},
 
-            # ── Pre-computed metrics ─────────────────────
             "metrics": {
                 "total_events":               total_events,
                 "preventive_count":           preventive,
