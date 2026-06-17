@@ -154,6 +154,23 @@ def _purge_ticket(db: Session, ticket_id: str) -> None:
     db.query(Ticket).filter(Ticket.id == ticket_id).delete(synchronize_session=False)
 
 
+@router.get("/status-counts")
+def get_global_status_counts(db: Session = Depends(get_db), _: object = Depends(get_current_user)):
+    """Fetch status counts grouped by status in a single DB query."""
+    rows = (
+        db.query(Ticket.status, func.count(Ticket.id))
+        .group_by(Ticket.status)
+        .all()
+    )
+    counts = {str(s): int(c) for s, c in rows}
+    return {
+        "open": counts.get("open", 0),
+        "in-progress": counts.get("in_progress", 0),
+        "resolved": counts.get("resolved", 0),
+        "closed": counts.get("closed", 0),
+    }
+
+
 @router.get("/mine", response_model=list[UserTicketOut])
 def list_my_tickets(
     q: str | None = Query(default=None),
