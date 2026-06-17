@@ -418,85 +418,6 @@ def _tool_search_knowledge(args: dict, ctx: ToolContext) -> dict:
     return {"count": len(results), "results": results}
 
 
-def _tool_categorize_ticket(args: dict, ctx: ToolContext) -> dict:
-    from app.ai.services.ticket_categorization_service import categorize_ticket_text
-
-    title = args.get("title", "")
-    description = args.get("description", "")
-    try:
-        return categorize_ticket_text(title=title, description=description)
-    except Exception as e:
-        return {"error": str(e)}
-
-
-def _tool_classify_priority(args: dict, ctx: ToolContext) -> dict:
-    from app.ai.services.ticket_priority_service import classify_ticket_priority
-
-    text = args.get("text", "")
-    if not text:
-        return {"error": "text is required"}
-    try:
-        priority = classify_ticket_priority(text)
-        return {"priority": priority}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-def _tool_predict_failure(args: dict, ctx: ToolContext) -> dict:
-    """Run the PdM classifier on a feature dict.
-
-    The model expects numeric features matching the trained schema; pass them
-    through as-is. The agent may also call list_assets first to look them up.
-    """
-    from app import main as app_main
-
-    if app_main.clf_model is None:
-        return {"error": "PdM classifier model is not loaded"}
-
-    features = args.get("features") or {}
-    if not features:
-        return {"error": "features dict is required"}
-
-    try:
-        import pandas as pd
-
-        feature_names = app_main.clf_features or list(features.keys())
-        row = {name: features.get(name, 0) for name in feature_names}
-        df = pd.DataFrame([row])
-        pred = app_main.clf_model.predict(df)[0]
-        proba = None
-        if hasattr(app_main.clf_model, "predict_proba"):
-            probs = app_main.clf_model.predict_proba(df)[0]
-            proba = {str(c): float(p) for c, p in zip(app_main.clf_model.classes_, probs)}
-        return {"prediction": str(pred), "probabilities": proba}
-    except Exception as e:
-        log.exception("predict_failure tool failed")
-        return {"error": str(e)}
-
-
-def _tool_predict_days_to_maintenance(args: dict, ctx: ToolContext) -> dict:
-    from app import main as app_main
-
-    if app_main.reg_model is None:
-        return {"error": "PdM regressor model is not loaded"}
-
-    features = args.get("features") or {}
-    if not features:
-        return {"error": "features dict is required"}
-
-    try:
-        import pandas as pd
-
-        feature_names = app_main.reg_features or list(features.keys())
-        row = {name: features.get(name, 0) for name in feature_names}
-        df = pd.DataFrame([row])
-        pred = float(app_main.reg_model.predict(df)[0])
-        return {"days_until_maintenance": round(pred, 1)}
-    except Exception as e:
-        log.exception("predict_days_to_maintenance tool failed")
-        return {"error": str(e)}
-
-
 def _tool_whoami(args: dict, ctx: ToolContext) -> dict:
     """Return basic info about the current user — useful for the agent's reasoning."""
     return {
@@ -526,10 +447,7 @@ TOOL_HANDLERS: dict[str, Callable[[dict, ToolContext], Any]] = {
     "list_departments": _tool_list_departments,
     "list_faqs": _tool_list_faqs,
     "search_knowledge": _tool_search_knowledge,
-    "categorize_ticket": _tool_categorize_ticket,
-    "classify_priority": _tool_classify_priority,
-    "predict_failure": _tool_predict_failure,
-    "predict_days_to_maintenance": _tool_predict_days_to_maintenance,
+
 }
 
 
@@ -722,67 +640,7 @@ TOOL_SCHEMAS: list[dict] = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "categorize_ticket",
-            "description": "Run the AI ticket-categorization model on a ticket's title + description. Returns predicted category (electrical/mechanical/software) with confidence.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "title": {"type": "string"},
-                    "description": {"type": "string"},
-                },
-                "required": ["title", "description"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "classify_priority",
-            "description": "Run the AI ticket-priority XGBoost model on a ticket text. Returns Low/Medium/High.",
-            "parameters": {
-                "type": "object",
-                "properties": {"text": {"type": "string", "description": "The ticket text (title + description concatenated)."}},
-                "required": ["text"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "predict_failure",
-            "description": "Run the predictive-maintenance classifier on a feature dict. Returns failure class + class probabilities.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "features": {
-                        "type": "object",
-                        "description": "Numeric feature dict matching the trained schema (e.g. {temperature, vibration, pressure, ...}).",
-                    },
-                },
-                "required": ["features"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "predict_days_to_maintenance",
-            "description": "Run the predictive-maintenance regressor. Returns estimated days until next maintenance.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "features": {
-                        "type": "object",
-                        "description": "Numeric feature dict matching the trained regressor schema.",
-                    },
-                },
-                "required": ["features"],
-            },
-        },
-    },
+
 ]
 
 

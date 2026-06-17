@@ -7,19 +7,19 @@ import logging
 import os
 from typing import Any, Optional
 
-from openai import OpenAI
+from groq import Groq
 
 from .tools import TOOL_HANDLERS, TOOL_SCHEMAS, ToolContext, execute_tool
 
 log = logging.getLogger("predictix.agent")
 
-DEFAULT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
+DEFAULT_MODEL = "llama-3.3-70b-versatile"
 MAX_TOOL_ITERATIONS = 6  # cap the loop so a confused model can't spin forever
 
 
 SYSTEM_PROMPT = """You are PredictiX Assistant, an AI helper for a Smart Asset Management System.
 
-You have access to tools that read live data (tickets, assets, FAQs, users, notifications, maintenance events, etc) and run ML models (failure prediction, ticket categorization, priority classification).
+You have access to tools that read live data (tickets, assets, FAQs, users, notifications, maintenance events, etc).
 
 Guidelines:
 - Call tools whenever the user's question needs real data. Don't guess.
@@ -59,18 +59,11 @@ Use 1-2 emojis per line max. Keep it clean and professional.
 """
 
 
-def _get_ai_client() -> OpenAI:
-    api_key = os.getenv("OPENROUTER_API_KEY")
+def _get_groq_client() -> Groq:
+    api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
-        raise RuntimeError("OPENROUTER_API_KEY is not configured")
-    return OpenAI(
-        api_key=api_key,
-        base_url="https://openrouter.ai/api/v1",
-        default_headers={
-            "HTTP-Referer": "http://localhost:3000", # Optional, for rankings on openrouter.ai
-            "X-Title": "PredictiX Chatbot", # Optional, for rankings on openrouter.ai
-        }
-    )
+        raise RuntimeError("GROQ_API_KEY is not configured")
+    return Groq(api_key=api_key)
 
 
 def run_agent(
@@ -85,7 +78,7 @@ def run_agent(
         question: The user's latest message.
         history: Prior conversation turns ([{role, content}]). Excludes system+current question.
         ctx: Per-request tool context (db session, current user).
-        model: AI model id.
+        model: Groq model id.
 
     Returns:
         {
@@ -94,7 +87,7 @@ def run_agent(
             "iterations": int,
         }
     """
-    client = _get_ai_client()
+    client = _get_groq_client()
 
     messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
     if history:
@@ -120,7 +113,7 @@ def run_agent(
                 temperature=0.4,
             )
         except Exception as e:
-            log.exception("AI call failed (iteration %d)", iteration)
+            log.exception("Groq call failed (iteration %d)", iteration)
             err_str = str(e).lower()
             
             # Default Technical Error Message
