@@ -19,6 +19,7 @@ import os
 import uuid as _uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from sqlalchemy import String, cast
 from sqlalchemy.orm import Session
 
 from app.deps import get_current_user, get_db
@@ -74,7 +75,7 @@ def _profile_to_response(user: Profile, db: Session) -> dict:
 
     asset_count = (
         db.query(Asset)
-        .filter(Asset.assigned_to == str(user.id), Asset.status == "active")
+        .filter(Asset.assigned_to == str(user.id), cast(Asset.status, String) == "active")
         .count()
     )
 
@@ -204,7 +205,7 @@ def get_my_assets(
 
     assets = (
         db.query(Asset)
-        .filter(Asset.assigned_to == str(current_user.id), Asset.status == "active")
+        .filter(Asset.assigned_to == str(current_user.id), cast(Asset.status, String) == "active")
         .all()
     )
 
@@ -243,7 +244,7 @@ def get_my_stats(
 
     count = (
         db.query(Asset)
-        .filter(Asset.assigned_to == str(current_user.id), Asset.status == "active")
+        .filter(Asset.assigned_to == str(current_user.id), cast(Asset.status, String) == "active")
         .count()
     )
     return {"assignedAssets": count, "activeAssets": count}
