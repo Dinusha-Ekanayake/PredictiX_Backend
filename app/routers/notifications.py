@@ -39,7 +39,7 @@ def get_unread_notifications(
         db.query(Notification)
         .filter(
             (Notification.user_id == current_user.id)
-            & (Notification.status == "unread")
+            & (cast(Notification.status, String) == "unread")
         )
         .order_by(Notification.created_at.desc())
         .all()
