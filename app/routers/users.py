@@ -171,7 +171,7 @@ def list_users(db: Session = Depends(get_db)):
     asset_counts = {
         str(assigned_to): count
         for assigned_to, count in db.query(Asset.assigned_to, func.count(Asset.id))
-        .filter(Asset.assigned_to.isnot(None), Asset.status == "active")
+        .filter(Asset.assigned_to.isnot(None), cast(Asset.status, String) == "active")
         .group_by(Asset.assigned_to)
         .all()
     }
