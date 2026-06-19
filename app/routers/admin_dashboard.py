@@ -64,33 +64,49 @@ def _build_admin_summary(db: Session):
     # ── KPIs ────────────────────────────────────────────────────────────────
     total_assets = db.query(func.count(Asset.id)).scalar() or 0
 
-    # critical condition: AssetFailurePrediction.health_score < 60
-    critical_alerts = (
-        db.query(func.count(AssetFailurePrediction.id))
-        .filter(AssetFailurePrediction.health_score < 60)
-        .scalar()
-        or 0
-    )
+    from sqlalchemy import case, and_
 
-    open_tickets = (
-        db.query(func.count(Ticket.id)).filter(text("status != 'closed'")).scalar() or 0
-    )
-    high_priority_tickets = (
-        db.query(func.count(Ticket.id))
-        .filter(text("priority = 'high'"), text("status != 'closed'"))
-        .scalar()
-        or 0
-    )
+    pred_stats = db.query(
+        func.sum(case((AssetFailurePrediction.health_score < 60, 1), else_=0)),
+        func.avg(AssetFailurePrediction.health_score),
+        func.sum(case((AssetFailurePrediction.failure_probability >= 0.5, 1), else_=0)),
+        func.sum(case((AssetFailurePrediction.health_score >= 90, 1), else_=0)),
+        func.sum(case((and_(AssetFailurePrediction.health_score >= 75, AssetFailurePrediction.health_score < 90), 1), else_=0)),
+        func.sum(case((and_(AssetFailurePrediction.health_score >= 60, AssetFailurePrediction.health_score < 75), 1), else_=0)),
+        func.sum(case((and_(AssetFailurePrediction.health_score >= 40, AssetFailurePrediction.health_score < 60), 1), else_=0)),
+        func.sum(case((AssetFailurePrediction.health_score < 40, 1), else_=0))
+    ).first()
 
-    avg_health = db.query(func.avg(AssetFailurePrediction.health_score)).scalar()
+    critical_alerts = int(pred_stats[0] or 0) if pred_stats else 0
+    avg_health = pred_stats[1] if pred_stats else None
     fleet_health = int(round(float(avg_health))) if avg_health is not None else 0
+    predicted_failures = int(pred_stats[2] or 0) if pred_stats else 0
 
-    predicted_failures = (
-        db.query(func.count(AssetFailurePrediction.id))
-        .filter(AssetFailurePrediction.failure_probability >= 0.5)
-        .scalar()
-        or 0
-    )
+    band_excellent = int(pred_stats[3] or 0) if pred_stats else 0
+    band_good = int(pred_stats[4] or 0) if pred_stats else 0
+    band_moderate = int(pred_stats[5] or 0) if pred_stats else 0
+    band_poor = int(pred_stats[6] or 0) if pred_stats else 0
+    band_critical = int(pred_stats[7] or 0) if pred_stats else 0
+
+    ticket_stats = db.query(
+        func.sum(case((text("status != 'closed'"), 1), else_=0)),
+        func.sum(case((text("priority = 'high' AND status != 'closed'"), 1), else_=0)),
+        func.max(Ticket.created_at),
+        func.sum(case((text("status IN ('resolved','closed')"), 1), else_=0)),
+        func.avg(
+            case(
+                (text("closed_at IS NOT NULL AND created_at IS NOT NULL"), 
+                 func.extract("epoch", Ticket.closed_at - Ticket.created_at) / 86400.0),
+                else_=None
+            )
+        )
+    ).first()
+
+    open_tickets = int(ticket_stats[0] or 0) if ticket_stats else 0
+    high_priority_tickets = int(ticket_stats[1] or 0) if ticket_stats else 0
+    ticket_anchor_dt = ticket_stats[2] if ticket_stats and ticket_stats[2] else datetime.now()
+    tickets_resolved = int(ticket_stats[3] or 0) if ticket_stats else 0
+    avg_resolution = ticket_stats[4]
 
     est_cost = db.query(func.sum(AssetCostPrediction.estimated_cost)).scalar()
     est_maintenance_cost = int(est_cost) if est_cost else 0
@@ -110,7 +126,6 @@ def _build_admin_summary(db: Session):
     #  would produce empty trailing months and clip the real data).
     now = datetime.now()
 
-    ticket_anchor_dt = db.query(func.max(Ticket.created_at)).scalar() or now
     maint_anchor_dt = db.query(func.max(MaintenanceEvent.performed_at)).scalar() or now
 
     ticket_months = _months_ending_at(ticket_anchor_dt, 6)
@@ -158,25 +173,13 @@ def _build_admin_summary(db: Session):
         )
 
     # ── healthDistribution (best -> worst) ───────────────────────────────────
-    health_scores = (
-        db.query(AssetFailurePrediction.health_score)
-        .filter(AssetFailurePrediction.health_score.isnot(None))
-        .all()
-    )
-    bands = {"Excellent": 0, "Good": 0, "Moderate": 0, "Poor": 0, "Critical": 0}
-    for (score,) in health_scores:
-        s = float(score)
-        if s >= 90:
-            bands["Excellent"] += 1
-        elif s >= 75:
-            bands["Good"] += 1
-        elif s >= 60:
-            bands["Moderate"] += 1
-        elif s >= 40:
-            bands["Poor"] += 1
-        else:
-            bands["Critical"] += 1
-    health_distribution = [{"name": k, "count": v} for k, v in bands.items()]
+    health_distribution = [
+        {"name": "Excellent", "count": band_excellent},
+        {"name": "Good", "count": band_good},
+        {"name": "Moderate", "count": band_moderate},
+        {"name": "Poor", "count": band_poor},
+        {"name": "Critical", "count": band_critical},
+    ]
 
     # ── costTrend (trailing months ending at latest maintenance month) ───────
     # estimated = preventive (planned) maintenance cost that month
@@ -343,21 +346,6 @@ def _build_admin_summary(db: Session):
         )
 
     # ── footerStats ──────────────────────────────────────────────────────────
-    tickets_resolved = (
-        db.query(func.count(Ticket.id))
-        .filter(text("status IN ('resolved','closed')"))
-        .scalar()
-        or 0
-    )
-    avg_resolution = (
-        db.query(
-            func.avg(
-                func.extract("epoch", Ticket.closed_at - Ticket.created_at) / 86400.0
-            )
-        )
-        .filter(Ticket.closed_at.isnot(None), Ticket.created_at.isnot(None))
-        .scalar()
-    )
     avg_resolution_days = round(float(avg_resolution), 1) if avg_resolution else 0.0
 
     footer_stats = {
@@ -404,18 +392,8 @@ def _build_admin_summary(db: Session):
 
     # ── aiSummary (LLM if available, else a real KPI-derived fallback) ────────
     # Always returns a real, data-grounded string — never null and never blocks.
+    # We skip the synchronous LLM call here because it causes the dashboard to hang for 5-10s on load.
     ai_summary: str | None = None
-    try:
-        from app.agents.report_agents import run_warehouse_agent
-
-        result = run_warehouse_agent(db)
-        ai_summary = (result.get("ai_sections") or {}).get("insight_summary")
-        if ai_summary:
-            ai_summary = str(ai_summary).strip() or None
-    except Exception:
-        # No API key / network / parse error — fall through to the KPI fallback.
-        traceback.print_exc()
-        ai_summary = None
 
     if not ai_summary:
         ai_summary = (
