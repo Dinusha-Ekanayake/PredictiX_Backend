@@ -1,550 +1,731 @@
 """
 app/services/pdf_render.py
 
-Generates a multi-page PDF Asset Performance Report using ReportLab.
-Page 1: Fleet Overview with matplotlib charts
-Page 2+: Asset-specific details
+Builds the full Asset Performance Report PDF using reportlab.
+Visual style matches the PredictiX Warehouse AI Report:
+  - Teal header bar + footer on every page
+  - KPI stat cards (big teal number + muted label)
+  - Section cards with teal left-border strip
+  - Alternating-row data tables
+  - Inline horizontal bar charts (drawn via Flowable)
+  - 6 sections: Cover, Asset Overview, Sensor Health,
+    Maintenance Analysis, Ticket Management, Predictions & Conclusion
 """
 
 import os
 import uuid
 import tempfile
-import io
 from datetime import datetime
-from pathlib import Path
+from typing import Dict, Any
 
-from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import cm
+from reportlab.lib.units import mm
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-    HRFlowable, Image, PageBreak, KeepTogether,
+    PageBreak, HRFlowable, Flowable
 )
+from reportlab.pdfgen import canvas as rl_canvas
 
 from app.services.pdf_styles import (
     COLORS, get_styles, section_divider, thin_divider,
-    data_table_style, kpi_card_style, info_grid_style,
-    risk_color, risk_style_key,
+    kpi_card_style, data_table_style, info_grid_style,
+    risk_style_key, risk_color,
 )
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-import numpy as np
+PAGE_W, PAGE_H = A4
+MARGIN    = 15 * mm
+CONTENT_W = PAGE_W - 2 * MARGIN
 
 
 # ─────────────────────────────────────────────────────────
-#  Chart helpers
+#  HEADER / FOOTER CANVAS
 # ─────────────────────────────────────────────────────────
+class _HFCanvas(rl_canvas.Canvas):
+    def __init__(self, *args, **kwargs):
+        self._asset_name = kwargs.pop("asset_name", "Asset Report")
+        super().__init__(*args, **kwargs)
+        self._saved = []
 
-def _pie_chart(labels, values, colors_hex, title="", size=(3.2, 2.8)) -> Image:
-    fig, ax = plt.subplots(figsize=size, facecolor="none")
-    wedge_colors = [c for c in colors_hex]
-    wedges, texts, autotexts = ax.pie(
-        values, labels=None, colors=wedge_colors,
-        autopct=lambda p: f"{p:.0f}%" if p > 4 else "",
-        startangle=90, pctdistance=0.75,
-        wedgeprops=dict(linewidth=1.5, edgecolor="white"),
-    )
-    for at in autotexts:
-        at.set_fontsize(7)
-        at.set_color("white")
-        at.set_fontweight("bold")
-    if title:
-        ax.set_title(title, fontsize=9, fontweight="bold", color="#1e293b", pad=6)
-    ax.axis("equal")
+    def showPage(self):
+        self._saved.append(dict(self.__dict__))
+        self._startPage()
 
-    legend = ax.legend(
-        wedges, [f"{l} ({v})" for l, v in zip(labels, values)],
-        loc="lower center", bbox_to_anchor=(0.5, -0.22),
-        ncol=2, fontsize=6.5, frameon=False,
-        labelcolor="#1e293b",
-    )
+    def save(self):
+        total = len(self._saved)
+        for state in self._saved:
+            self.__dict__.update(state)
+            self._draw(total)
+            rl_canvas.Canvas.showPage(self)
+        rl_canvas.Canvas.save(self)
 
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=130, bbox_inches="tight",
-                facecolor="none", transparent=True)
-    plt.close(fig)
-    buf.seek(0)
-    img = Image(buf)
-    img.drawWidth  = size[0] * cm * 1.1
-    img.drawHeight = size[1] * cm * 1.1
-    return img
+    def _draw(self, total):
+        page = self._pageNumber
+        if page > 1:
+            # Teal header bar
+            self.setFillColor(COLORS.TEAL)
+            self.rect(0, PAGE_H - 17*mm, PAGE_W, 17*mm, fill=1, stroke=0)
+            self.setFillColor(COLORS.TEAL_MID)
+            self.rect(0, PAGE_H - 18.5*mm, PAGE_W, 1.5*mm, fill=1, stroke=0)
+            # Brand left
+            self.setFillColor(COLORS.TEXT_ON_TEAL)
+            self.setFont("Helvetica-Bold", 12)
+            self.drawString(MARGIN, PAGE_H - 10*mm, "PredictiX")
+            # Asset name right
+            self.setFont("Helvetica", 8.5)
+            self.setFillColor(colors.HexColor("#a7f3d0"))
+            self.drawRightString(PAGE_W - MARGIN, PAGE_H - 10*mm, self._asset_name)
 
-
-def _bar_chart(labels, values, color_hex="#0f766e", title="", size=(6.5, 2.8)) -> Image:
-    fig, ax = plt.subplots(figsize=size, facecolor="none")
-    x = np.arange(len(labels))
-    bars = ax.bar(x, values, color=color_hex, edgecolor="white", linewidth=0.8, width=0.6)
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=6.5, color="#1e293b")
-    ax.set_yticks([])
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.spines["left"].set_visible(False)
-    ax.tick_params(axis="x", length=0)
-    for bar in bars:
-        h = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width() / 2, h + max(values) * 0.02,
-                str(int(h)), ha="center", va="bottom", fontsize=6, color="#1e293b")
-    if title:
-        ax.set_title(title, fontsize=9, fontweight="bold", color="#1e293b", pad=6)
-    ax.set_facecolor("none")
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=130, bbox_inches="tight",
-                facecolor="none", transparent=True)
-    plt.close(fig)
-    buf.seek(0)
-    img = Image(buf)
-    img.drawWidth  = size[0] * cm
-    img.drawHeight = size[1] * cm
-    return img
-
-
-# ─────────────────────────────────────────────────────────
-#  Page header / footer callbacks
-# ─────────────────────────────────────────────────────────
-
-def _make_header_footer(asset_name: str, report_id: str, generated_date: str):
-    def on_page(canvas, doc):
-        canvas.saveState()
-        W, H = A4
-        # Header bar
-        canvas.setFillColor(COLORS.TEAL)
-        canvas.rect(0, H - 1.1 * cm, W, 1.1 * cm, fill=1, stroke=0)
-        canvas.setFillColor(COLORS.WHITE)
-        canvas.setFont("Helvetica-Bold", 9)
-        canvas.drawString(1 * cm, H - 0.75 * cm, "PredictiX — Asset Performance Report")
-        canvas.setFont("Helvetica", 8)
-        canvas.drawRightString(W - 1 * cm, H - 0.75 * cm, asset_name)
         # Footer
-        canvas.setFillColor(COLORS.TEXT_MUTED)
-        canvas.setFont("Helvetica-Oblique", 7)
-        canvas.drawString(1 * cm, 0.6 * cm,
-            f"Generated: {generated_date}  |  Report ID: {report_id}  |  Confidential — LankaLogix")
-        canvas.drawRightString(W - 1 * cm, 0.6 * cm, f"Page {doc.page}")
-        canvas.restoreState()
-    return on_page
+        self.setFillColor(COLORS.SURFACE)
+        self.rect(0, 0, PAGE_W, 11*mm, fill=1, stroke=0)
+        self.setStrokeColor(COLORS.BORDER)
+        self.setLineWidth(0.5)
+        self.line(0, 11*mm, PAGE_W, 11*mm)
+        self.setFont("Helvetica", 7.5)
+        self.setFillColor(COLORS.TEXT_MUTED)
+        self.drawString(MARGIN, 4*mm,
+                        f"Generated: {datetime.now().strftime('%B %d, %Y  %H:%M')}  |  PredictiX AI Platform")
+        self.drawRightString(PAGE_W - MARGIN, 4*mm, f"Page {page} of {total}")
+        self.setFont("Helvetica-Oblique", 7)
+        self.setFillColor(colors.HexColor("#94a3b8"))
+        self.drawCentredString(PAGE_W / 2, 4*mm, "CONFIDENTIAL — Internal Use Only")
 
 
 # ─────────────────────────────────────────────────────────
-#  Main service
+#  INLINE HORIZONTAL BAR CHART
 # ─────────────────────────────────────────────────────────
+class HBarChart(Flowable):
+    """
+    bars: list of (label, value, max_value, color)
+    Renders as an inline horizontal bar chart.
+    """
+    def __init__(self, bars, bar_h=10, gap=4, lbl_w=130):
+        super().__init__()
+        self.bars  = bars
+        self.bar_h = bar_h
+        self.gap   = gap
+        self.lbl_w = lbl_w
+        self.val_w = 50
+        self.width  = CONTENT_W
+        self.height = len(bars) * (bar_h + gap) + 8
 
+    def draw(self):
+        c       = self.canv
+        bar_area = self.width - self.lbl_w - self.val_w
+        row_h   = self.bar_h + self.gap
+        y       = self.height - row_h
+
+        for label, value, max_val, bar_color in self.bars:
+            fill_w = (float(value) / float(max_val) * bar_area) if max_val else 0
+            # Track
+            c.setFillColor(COLORS.SURFACE_ALT)
+            c.roundRect(self.lbl_w, y, bar_area, self.bar_h, 3, fill=1, stroke=0)
+            # Bar fill
+            if fill_w > 4:
+                c.setFillColor(bar_color)
+                c.roundRect(self.lbl_w, y, fill_w, self.bar_h, 3, fill=1, stroke=0)
+            # Label
+            c.setFont("Helvetica", 8)
+            c.setFillColor(COLORS.TEXT_BODY)
+            c.drawString(0, y + 3, str(label)[:24])
+            # Value
+            c.setFont("Helvetica-Bold", 8)
+            c.setFillColor(COLORS.TEAL)
+            c.drawString(self.lbl_w + bar_area + 5, y + 3, str(value))
+            y -= row_h
+
+
+# ─────────────────────────────────────────────────────────
+#  LAYOUT HELPERS
+# ─────────────────────────────────────────────────────────
+def _kpi_row(pairs: list, styles: dict) -> Table:
+    """
+    pairs: [(value_str, label_str), ...]
+    Renders a single-row KPI card table matching warehouse report style.
+    """
+    n     = len(pairs)
+    col_w = CONTENT_W / n
+    vals  = [Paragraph(str(v), styles["kpi_value"]) for v, _ in pairs]
+    lbls  = [Paragraph(l,      styles["kpi_label"])  for _, l in pairs]
+    tbl   = Table([vals, lbls], colWidths=[col_w] * n)
+    tbl.setStyle(TableStyle(kpi_card_style()))
+    return tbl
+
+
+def _section_card(elements: list) -> Table:
+    """
+    Wraps a list of flowables in a card with a teal left-border strip —
+    exactly like warehouse report section cards.
+    """
+    inner = Table([[el] for el in elements], colWidths=[CONTENT_W - 8])
+    inner.setStyle(TableStyle([
+        ("LEFTPADDING",  (0,0),(-1,-1), 14),
+        ("RIGHTPADDING", (0,0),(-1,-1), 6),
+        ("TOPPADDING",   (0,0),(-1,-1), 5),
+        ("BOTTOMPADDING",(0,0),(-1,-1), 5),
+    ]))
+    card = Table([[
+        Table([[""]], colWidths=[4],
+              style=TableStyle([
+                  ("BACKGROUND",    (0,0),(-1,-1), COLORS.TEAL),
+                  ("TOPPADDING",    (0,0),(-1,-1), 0),
+                  ("BOTTOMPADDING", (0,0),(-1,-1), 0),
+                  ("LEFTPADDING",   (0,0),(-1,-1), 0),
+                  ("RIGHTPADDING",  (0,0),(-1,-1), 0),
+              ])),
+        inner,
+    ]], colWidths=[4, CONTENT_W - 4])
+    card.setStyle(TableStyle([
+        ("BOX",          (0,0),(-1,-1), 0.5, COLORS.BORDER),
+        ("LEFTPADDING",  (0,0),(-1,-1), 0),
+        ("RIGHTPADDING", (0,0),(-1,-1), 0),
+        ("TOPPADDING",   (0,0),(-1,-1), 0),
+        ("BOTTOMPADDING",(0,0),(-1,-1), 0),
+        ("BACKGROUND",   (0,0),(-1,-1), COLORS.WHITE),
+    ]))
+    return card
+
+
+def _info_grid(fields: list, styles: dict, cols=2) -> Table:
+    """2-column label/value grid."""
+    col_w = CONTENT_W / cols
+    rows  = []
+    for i in range(0, len(fields), cols):
+        chunk = fields[i:i+cols]
+        while len(chunk) < cols:
+            chunk.append(("", ""))
+        rows.append([Paragraph(lbl,      styles["small"])      for lbl, _ in chunk])
+        rows.append([Paragraph(str(val), styles["normal_bold"]) for _, val in chunk])
+    tbl = Table(rows, colWidths=[col_w] * cols)
+    tbl.setStyle(TableStyle(info_grid_style()))
+    return tbl
+
+
+def _data_table(headers, rows, col_widths, styles, risk_col=None) -> Table:
+    hdr = [Paragraph(h, styles["table_header"]) for h in headers]
+    data = [hdr]
+    for row in rows:
+        cells = []
+        for j, cell in enumerate(row):
+            txt = str(cell) if cell is not None else "—"
+            if risk_col is not None and j == risk_col:
+                st = styles.get(risk_style_key(txt), styles["table_cell"])
+            else:
+                st = styles["table_cell"]
+            cells.append(Paragraph(txt, st))
+        data.append(cells)
+    tbl = Table(data, colWidths=col_widths, repeatRows=1)
+    tbl.setStyle(TableStyle(data_table_style()))
+    return tbl
+
+
+def _safe(d: dict, key: str, default="—") -> str:
+    v = d.get(key)
+    return str(v) if v not in (None, "", "None") else default
+
+
+# ─────────────────────────────────────────────────────────
+#  COVER PAGE
+# ─────────────────────────────────────────────────────────
+def _cover(story, ctx, styles):
+    asset   = ctx["asset"]
+    metrics = ctx["metrics"]
+
+    # Teal top band
+    band = Table(
+        [[Paragraph("PredictiX", styles["cover_brand"])]],
+        colWidths=[CONTENT_W],
+    )
+    band.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0),(-1,-1), COLORS.TEAL),
+        ("TOPPADDING",    (0,0),(-1,-1), 26),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 26),
+        ("LEFTPADDING",   (0,0),(-1,-1), 20),
+        ("RIGHTPADDING",  (0,0),(-1,-1), 20),
+    ]))
+    story.append(band)
+    story.append(Spacer(1, 8*mm))
+
+    story.append(Paragraph("Asset Performance Report", styles["cover_title"]))
+    story.append(Paragraph(_safe(asset, "asset_name"), styles["cover_subtitle"]))
+    story.append(Spacer(1, 3*mm))
+    story.append(section_divider())
+    story.append(Spacer(1, 5*mm))
+
+    story.append(Paragraph(
+        f"Report Date: {ctx['generated_date']}  |  "
+        f"Asset Code: {_safe(asset,'asset_code')}  |  "
+        f"Warehouse: {_safe(asset,'warehouse')}",
+        styles["cover_meta"]
+    ))
+    story.append(Spacer(1, 8*mm))
+
+
+# ─────────────────────────────────────────────────────────
+#  SECTION 1 — ASSET OVERVIEW
+# ─────────────────────────────────────────────────────────
+def _asset_overview(story, ctx, styles):
+    asset   = ctx["asset"]
+    metrics = ctx["metrics"]
+
+    story.append(Paragraph("Asset Overview", styles["section"]))
+    story.append(section_divider())
+
+    story.append(_info_grid([
+        ("Asset Code",           _safe(asset, "asset_code")),
+        ("Asset Name",           _safe(asset, "asset_name")),
+        ("Type / Category",      f"{_safe(asset,'asset_type')} / {_safe(asset,'category','—')}"),
+        ("Vehicle Type",         _safe(asset, "vehicle_type")),
+        ("Make",                 _safe(asset, "make")),
+        ("Model",                _safe(asset, "model")),
+        ("Manufacture Year",     _safe(asset, "manufacture_year")),
+        ("Registration No.",     _safe(asset, "registration_number")),
+        ("VIN",                  _safe(asset, "vin")),
+        ("Status",               _safe(asset, "status")),
+        ("Health Band",          _safe(asset, "health_band")),
+        ("Criticality Score",    _safe(asset, "criticality_score")),
+        ("Purchase Date",        _safe(asset, "purchase_date")),
+        ("Warranty Expiry",      _safe(asset, "warranty_expiry_date")),
+        ("Last Service Date",    _safe(asset, "last_service_date")),
+        ("Next Service Date",    _safe(asset, "next_service_date")),
+        ("Current Mileage (km)", _safe(asset, "current_mileage")),
+        ("Vehicle Age (yrs)",    _safe(asset, "vehicle_age_years")),
+        ("Payload Capacity (kg)",_safe(asset, "payload_capacity_kg")),
+        ("Vehicle Role",         _safe(asset, "vehicle_role")),
+        ("Lifetime Services",    _safe(asset, "lifetime_service_count")),
+        ("Lifetime Breakdowns",  _safe(asset, "lifetime_breakdown_count")),
+        ("Warehouse",            _safe(asset, "warehouse")),
+        ("Department",           _safe(asset, "department")),
+    ], styles, cols=2))
+
+    story.append(Spacer(1, 5*mm))
+
+    # Summary card
+    story.append(_section_card([
+        Paragraph("Asset Health Summary", styles["subsection"]),
+        _info_grid([
+            ("Health Score",           f"{metrics['health_score']}%"),
+            ("Risk Level",             str(metrics["risk_level"])),
+            ("Failure Probability",    f"{metrics['failure_probability']}%"),
+            ("Predicted Maint. Date",  str(metrics["predicted_maintenance_date"])),
+            ("Days Until Maintenance", str(metrics["days_until_maintenance"]) if metrics["days_until_maintenance"] else "—"),
+            ("Est. Repair Cost",       f"{metrics['currency']} {metrics['estimated_cost']:,.0f}"),
+        ], styles, cols=2),
+    ]))
+
+    story.append(Spacer(1, 5*mm))
+
+
+# ─────────────────────────────────────────────────────────
+#  SECTION 2 — SENSOR HEALTH SNAPSHOT
+# ─────────────────────────────────────────────────────────
+def _sensor_section(story, ctx, styles):
+    sensor  = ctx.get("sensor", {})
+    metrics = ctx["metrics"]
+
+    story.append(Paragraph("Sensor Health Snapshot", styles["section"]))
+    story.append(section_divider())
+
+    if not sensor:
+        story.append(Paragraph("No sensor data available for this asset.", styles["normal"]))
+        story.append(Spacer(1, 5*mm))
+        return
+
+    story.append(_info_grid([
+        ("Last Reading",                  _safe(sensor, "recorded_at")),
+        ("Active Fault Codes",            _safe(sensor, "active_fault_code_count")),
+        ("Days Since Last Service",       _safe(sensor, "days_since_last_service")),
+        ("Engine Hours Since Service",    _safe(sensor, "engine_hours_since_last_service")),
+        ("Odometer (km)",                 _safe(sensor, "odometer_km")),
+        ("Downtime Hours (90d)",          _safe(sensor, "downtime_hours_last_90d")),
+        ("Fuel Level",                    _safe(sensor, "fuel_level")),
+        ("Coolant Temp Max (°C)",         _safe(sensor, "coolant_temp_max_c")),
+        ("Engine Temp Avg (°C)",          _safe(sensor, "engine_temp_avg_c")),
+        ("Battery Health",                _safe(sensor, "battery_health_pct") + "%"),
+    ], styles, cols=2))
+
+    story.append(Spacer(1, 5*mm))
+
+    # Component health bars
+    def _pct(key):
+        v = sensor.get(key, "—")
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
+    bars = [
+        ("Tire Health",          _pct("tire_health_pct"),     100, COLORS.TEAL),
+        ("Brake Health",         _pct("brake_health_pct"),    100, COLORS.BLUE),
+        ("Battery Health",       _pct("battery_health_pct"),  100, COLORS.LOW),
+        ("Oil Life",             _pct("oil_life_pct"),        100, COLORS.TEAL),
+        ("Hydraulic Health",     _pct("hydraulic_health_pct"),100, COLORS.BLUE),
+    ]
+    # Only show bars that have real data
+    bars = [(l, v, m, c) for l, v, m, c in bars if v > 0]
+    if bars:
+        story.append(Paragraph("Component Health Overview", styles["subsection"]))
+        story.append(HBarChart(bars))
+
+    # AI top failure drivers
+    top_exp = metrics.get("top_explanations") or {}
+    if top_exp and isinstance(top_exp, dict):
+        story.append(Spacer(1, 5*mm))
+        story.append(Paragraph("Top AI-Identified Failure Drivers", styles["subsection"]))
+        exp_items = sorted(top_exp.items(), key=lambda x: abs(float(x[1])) if str(x[1]).replace('.','',1).lstrip('-').isdigit() else 0, reverse=True)[:8]
+        max_score = max(abs(float(v)) for _, v in exp_items) if exp_items else 1
+        exp_bars = [
+            (k.replace("_", " ").title(), round(abs(float(v)), 2), max_score, COLORS.HIGH)
+            for k, v in exp_items
+        ]
+        story.append(HBarChart(exp_bars))
+
+    story.append(PageBreak())
+
+
+# ─────────────────────────────────────────────────────────
+#  SECTION 3 — MAINTENANCE ANALYSIS
+# ─────────────────────────────────────────────────────────
+def _maintenance_section(story, ctx, insights, styles):
+    metrics     = ctx["metrics"]
+    maintenance = ctx["maintenance"]
+
+    story.append(Paragraph("Maintenance Analysis", styles["section"]))
+    story.append(section_divider())
+
+    story.append(_kpi_row([
+        (str(metrics["total_events"]),                "Total Events"),
+        (str(metrics["preventive_count"]),            "Preventive"),
+        (str(metrics["corrective_count"]),            "Corrective"),
+        (f"{metrics['currency']} {metrics['total_cost']:,.0f}", "Total Cost"),
+    ], styles))
+    story.append(Spacer(1, 5*mm))
+
+    # Breakdown bar chart
+    if metrics["total_events"]:
+        story.append(Paragraph("Maintenance Type Breakdown", styles["subsection"]))
+        story.append(HBarChart([
+            ("Preventive", metrics["preventive_count"], metrics["total_events"], COLORS.TEAL),
+            ("Corrective", metrics["corrective_count"], metrics["total_events"], COLORS.HIGH),
+        ]))
+        story.append(Spacer(1, 5*mm))
+
+    # AI cost analysis
+    cost = insights.get("cost_analysis", {})
+    if cost:
+        story.append(_section_card([
+            Paragraph("Cost Analysis", styles["subsection"]),
+            _info_grid([
+                ("Maintenance Cost (MTD)",  f"LKR {cost.get('maintenance_cost_mtd', 0):,.0f}"),
+                ("Downtime Cost (MTD)",     f"LKR {cost.get('downtime_cost_mtd', 0):,.0f}"),
+                ("Predicted Repair Cost",   f"LKR {cost.get('predicted_repair_cost', 0):,.0f}"),
+                ("Predicted Downtime",      f"{cost.get('predicted_downtime_days', 0)} days"),
+                ("Est. Cost (DB Model)",    f"{metrics['currency']} {metrics['estimated_cost']:,.0f}"),
+                ("Cost Range",             f"{metrics['currency']} {metrics['min_cost']:,.0f} – {metrics['max_cost']:,.0f}"),
+            ], styles, cols=2),
+        ]))
+        story.append(Spacer(1, 5*mm))
+
+    # Maintenance history table
+    if maintenance:
+        story.append(Paragraph("Maintenance History (Recent 3)", styles["subsection"]))
+        rows = []
+        for m in maintenance[:3]:
+            rows.append([
+                _datetime(getattr(m, "performed_at", None)) or _datetime(getattr(m, "scheduled_date", None)),
+                getattr(m, "event_type", "—") or "—",
+                getattr(m, "title", "—") or "—",
+                getattr(m, "vendor_name", "—") or "—",
+                f"LKR {float(m.cost_amount):,.0f}" if getattr(m, "cost_amount", None) else "—",
+                f"{float(m.downtime_hours):.1f}h" if getattr(m, "downtime_hours", None) else "—",
+            ])
+        story.append(_data_table(
+            ["Date", "Type", "Title", "Vendor", "Cost", "Downtime"],
+            rows,
+            [CONTENT_W*0.17, CONTENT_W*0.12, CONTENT_W*0.30,
+             CONTENT_W*0.18, CONTENT_W*0.13, CONTENT_W*0.10],
+            styles,
+        ))
+
+    story.append(Spacer(1, 5*mm))
+
+
+# ─────────────────────────────────────────────────────────
+#  SECTION 4 — TICKET MANAGEMENT
+# ─────────────────────────────────────────────────────────
+def _tickets_section(story, ctx, styles):
+    metrics = ctx["metrics"]
+    tickets = ctx["tickets"]
+
+    story.append(Paragraph("Ticket Management", styles["section"]))
+    story.append(section_divider())
+
+    story.append(_kpi_row([
+        (str(metrics["total_tickets"]),         "Total Tickets"),
+        (str(metrics["open_tickets"]),          "Open"),
+        (str(metrics["high_priority_tickets"]), "High Priority"),
+        (str(metrics["closed_tickets"]),        "Closed / Resolved"),
+    ], styles))
+    story.append(Spacer(1, 5*mm))
+
+    if tickets:
+        story.append(Paragraph("Ticket Details (Recent 3)", styles["subsection"]))
+        rows = []
+        for t in tickets[:3]:
+            rows.append([
+                str(t.ticket_number or "—"),
+                str(t.title or "—")[:55],
+                str(t.priority or "—"),
+                str(t.status or "—"),
+                str(t.final_category or t.predicted_category or "—"),
+                str(t.opened_at)[:10] if t.opened_at else "—",
+            ])
+        story.append(_data_table(
+            ["Ticket #", "Title", "Priority", "Status", "Category", "Opened"],
+            rows,
+            [CONTENT_W*0.12, CONTENT_W*0.34, CONTENT_W*0.10,
+             CONTENT_W*0.12, CONTENT_W*0.16, CONTENT_W*0.16],
+            styles,
+            risk_col=2,
+        ))
+
+    story.append(Spacer(1, 5*mm))
+
+
+# ─────────────────────────────────────────────────────────
+#  SECTION 5 — AI PREDICTIONS & RECOMMENDATIONS
+# ─────────────────────────────────────────────────────────
+def _predictions_section(story, ctx, insights, styles):
+    metrics = ctx["metrics"]
+    future  = insights.get("future_predictions", {})
+    eff     = insights.get("operational_efficiency", {})
+
+    story.append(Paragraph("AI Predictions & Recommendations", styles["section"]))
+    story.append(section_divider())
+
+    story.append(_kpi_row([
+        (f"{metrics['health_score']}%",         "Health Score"),
+        (f"{metrics['failure_probability']}%",  "Failure Probability"),
+        (str(metrics["risk_level"]),             "Risk Level"),
+        (str(metrics["days_until_maintenance"]) + " days" if metrics["days_until_maintenance"] else "N/A",
+         "Days Until Maintenance"),
+    ], styles))
+    story.append(Spacer(1, 5*mm))
+
+    # Health score bar
+    health = metrics["health_score"]
+    bar_color = COLORS.LOW if health >= 80 else COLORS.MEDIUM if health >= 60 else COLORS.CRITICAL
+    story.append(Paragraph("Asset Health Score", styles["subsection"]))
+    story.append(HBarChart([("Health Score", health, 100, bar_color)], bar_h=12))
+    story.append(Spacer(1, 5*mm))
+
+    # AI executive summary
+    summary = insights.get("executive_summary", "")
+    if summary:
+        story.append(_section_card([
+            Paragraph("AI Executive Summary", styles["subsection"]),
+            Paragraph(summary, styles["normal"]),
+        ]))
+        story.append(Spacer(1, 5*mm))
+
+    # Recommendations
+    recs = insights.get("recommendations", {})
+    if recs:
+        story.append(Paragraph("AI Recommendations", styles["subsection"]))
+        for level in ("critical", "high", "medium"):
+            items = recs.get(level, [])
+            if not items:
+                continue
+            story.append(Paragraph(level.upper(), styles["normal_bold"]))
+            for item in items:
+                story.append(Paragraph(f"• {item}", styles.get(level, styles["normal"])))
+            story.append(Spacer(1, 3*mm))
+        story.append(Spacer(1, 3*mm))
+
+    # Maintenance insights bullets
+    maint_insights = insights.get("maintenance_insights", [])
+    if maint_insights:
+        story.append(_section_card([
+            Paragraph("Maintenance Insights", styles["subsection"]),
+            *[Paragraph(f"• {i}", styles["bullet"]) for i in maint_insights],
+        ]))
+        story.append(Spacer(1, 5*mm))
+
+    # Future predictions grid
+    if future:
+        story.append(_section_card([
+            Paragraph("Future Predictions", styles["subsection"]),
+            _info_grid([
+                ("Next Failure Probability",    f"{float(future.get('next_failure_probability',0))*100:.1f}%"),
+                ("Optimal Maintenance Date",    str(future.get("optimal_maintenance_date", "—"))),
+                ("Suggested Maintenance Type",  str(future.get("suggested_maintenance_type","—"))),
+                ("Est. 6-Month Cost",           f"LKR {future.get('predicted_maintenance_cost_next_6_months', 0):,.0f}"),
+                ("Performance in 6 Months",     str(future.get("predicted_performance_in_6_months","—"))),
+                ("Est. Remaining Life",         str(future.get("estimated_remaining_life","—"))),
+            ], styles, cols=2),
+        ]))
+
+    story.append(Spacer(1, 5*mm))
+
+
+# ─────────────────────────────────────────────────────────
+#  SECTION 6 — CONCLUSION
+# ─────────────────────────────────────────────────────────
+def _conclusion(story, ctx, insights, styles):
+    story.append(Paragraph("Conclusions & Next Steps", styles["section"]))
+    story.append(section_divider())
+
+    conclusion = insights.get("conclusion") or insights.get("executive_summary", "No conclusion available.")
+    story.append(_section_card([
+        Paragraph("Executive Conclusion", styles["subsection"]),
+        Paragraph(conclusion, styles["normal"]),
+    ]))
+    story.append(Spacer(1, 6*mm))
+
+    opt = (insights.get("operational_efficiency") or {}).get("optimisation_recommendations", [])
+    if opt:
+        story.append(Paragraph("Optimisation Recommendations", styles["subsection"]))
+        for item in opt:
+            story.append(Paragraph(f"• {item}", styles["bullet"]))
+        story.append(Spacer(1, 4*mm))
+
+    story.append(thin_divider())
+    story.append(Paragraph(
+        "PredictiX AI Platform  |  Asset Management Solution  |  © 2026 All Rights Reserved",
+        styles["footer"]
+    ))
+
+
+# ─────────────────────────────────────────────────────────
+#  HELPERS (used inside sections)
+# ─────────────────────────────────────────────────────────
+def _datetime(val) -> str:
+    if val is None:
+        return "—"
+    if hasattr(val, "strftime"):
+        return val.strftime("%Y-%m-%d")
+    return str(val)[:10]
+
+
+
+# ─────────────────────────────────────────────────────────
+#  CONTEXT NORMALIZER
+#  Accepts old flat dummy shape OR new nested shape.
+# ─────────────────────────────────────────────────────────
+def _normalize_context(ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Converts the old flat dummy context (from asset_reports.py dummy endpoint)
+    to the new nested shape that all render functions expect.
+    If already in nested shape, returns as-is.
+    """
+    if "asset" in ctx and isinstance(ctx.get("asset"), dict) and "metrics" in ctx:
+        return ctx
+
+    health = float(ctx.get("health_score", 100))
+    return {
+        "generated_date": datetime.now().strftime("%B %d, %Y"),
+        "report_id":      str(ctx.get("asset_id", "DUMMY"))[:8].upper(),
+        "asset": {
+            "id":                     str(ctx.get("asset_id", "—")),
+            "asset_code":             str(ctx.get("asset_id", "—"))[:8],
+            "asset_name":             ctx.get("asset_name", "Asset Report"),
+            "asset_type":             ctx.get("asset_type", "—"),
+            "vehicle_type":           ctx.get("vehicle_type", "—"),
+            "make":                   ctx.get("make", "—"),
+            "model":                  ctx.get("model", "—"),
+            "manufacture_year":       "—",
+            "registration_number":    "—",
+            "vin":                    "—",
+            "status":                 ctx.get("status", "active"),
+            "health_band":            ctx.get("alert_level", "—"),
+            "criticality_score":      str(ctx.get("criticality", "—")),
+            "purchase_date":          ctx.get("purchase_date", "—"),
+            "warranty_expiry_date":   ctx.get("warranty_expiry_date", "—"),
+            "last_service_date":      ctx.get("last_maintenance_date", "—"),
+            "next_service_date":      ctx.get("next_maintenance_date", "—"),
+            "current_mileage":        str(ctx.get("total_runtime_hours", "—")),
+            "vehicle_age_years":      "—",
+            "payload_capacity_kg":    "—",
+            "vehicle_role":           ctx.get("functional_location", "—"),
+            "lifetime_service_count": "—",
+            "lifetime_breakdown_count":"—",
+            "description":            str(ctx.get("location", "")),
+            "warehouse":              "—",
+            "department":             ctx.get("department", "—"),
+        },
+        "maintenance": [],
+        "tickets":     [],
+        "sensor":      {},
+        "metrics": {
+            "total_events":              0,
+            "preventive_count":          0,
+            "corrective_count":          0,
+            "preventive_ratio":          0,
+            "corrective_ratio":          0,
+            "total_cost":                0.0,
+            "avg_cost_per_event":        0.0,
+            "total_downtime_hours":      0.0,
+            "total_tickets":             0,
+            "open_tickets":              0,
+            "high_priority_tickets":     0,
+            "closed_tickets":            0,
+            "health_score":              health,
+            "failure_probability":       round(float(ctx.get("failure_probability", 0)), 1),
+            "risk_level":                str(ctx.get("risk_level", "Low")),
+            "days_until_maintenance":    ctx.get("maintenance_cycle_days"),
+            "predicted_maintenance_date":ctx.get("next_maintenance_date", "—"),
+            "estimated_cost":            0.0,
+            "min_cost":                  0.0,
+            "max_cost":                  0.0,
+            "currency":                  "LKR",
+            "top_explanations":          {},
+        },
+    }
+
+# ─────────────────────────────────────────────────────────
+#  MAIN SERVICE CLASS
+# ─────────────────────────────────────────────────────────
 class PDFRenderService:
 
-    def generate_pdf(self, context: dict, insights: dict, report_id: uuid.UUID) -> str:
-        out_path = os.path.join(tempfile.gettempdir(), f"asset_report_{report_id}.pdf")
-        styles   = get_styles()
-        asset    = context.get("asset", {})
-        metrics  = context.get("metrics", {})
-        fleet    = context.get("fleet", {})
-        sensor   = context.get("sensor", {})
-        maintenance = context.get("maintenance", [])
-        tickets     = context.get("tickets", [])
-        gen_date    = context.get("generated_date", datetime.now().strftime("%B %d, %Y"))
-        rpt_id      = context.get("report_id", str(report_id)[:8].upper())
-        asset_name  = asset.get("asset_name", "Asset Report")
+    def generate_pdf(self, context: Dict[str, Any],
+                     insights: Dict[str, Any],
+                     report_id: uuid.UUID) -> str:
+        """
+        Builds the full Asset Performance PDF.
+        Returns path to a temp file — caller is responsible for deletion.
+        """
+        context    = _normalize_context(context)
+        asset_name = context["asset"].get("asset_name", "Asset Report")
+        styles     = get_styles()
+
+        fd, path = tempfile.mkstemp(suffix=".pdf")
+        os.close(fd)
 
         doc = SimpleDocTemplate(
-            out_path, pagesize=A4,
-            topMargin=1.4 * cm, bottomMargin=1.2 * cm,
-            leftMargin=1.5 * cm, rightMargin=1.5 * cm,
+            path,
+            pagesize=A4,
+            topMargin=20*mm,
+            bottomMargin=16*mm,
+            leftMargin=MARGIN,
+            rightMargin=MARGIN,
+            title=f"Asset Report — {asset_name}",
+            author="PredictiX AI Platform",
         )
 
         story = []
-        cb = _make_header_footer(asset_name, rpt_id, gen_date)
+        _cover(story, context, styles)
+        _asset_overview(story, context, styles)
+        _maintenance_section(story, context, insights, styles)
+        _predictions_section(story, context, insights, styles)
+        _conclusion(story, context, insights, styles)
 
-        # ══════════════════════════════════════════════════
-        #  PAGE 1 — Fleet Overview
-        # ══════════════════════════════════════════════════
-        story += self._fleet_page(fleet, styles, gen_date, asset_name)
-        story.append(PageBreak())
+        def _canvas_maker(filename, **kwargs):
+            kwargs.pop("pagesize", None)
+            return _HFCanvas(filename, pagesize=A4,
+                             asset_name=asset_name, **kwargs)
 
-        # ══════════════════════════════════════════════════
-        #  PAGE 2+ — Asset Details
-        # ══════════════════════════════════════════════════
-        story += self._asset_cover(asset, metrics, gen_date, rpt_id, styles)
-        story += self._section_asset_overview(asset, styles)
-        story += self._section_health_risk(metrics, styles)
-        story += self._section_sensor(sensor, styles)
-        story += self._section_maintenance(maintenance, metrics, styles)
-        story += self._section_tickets(tickets, metrics, styles)
-        story += self._section_ai_insights(insights, styles)
-
-        doc.build(story, onFirstPage=cb, onLaterPages=cb)
-        return out_path
-
-    # ─────────────────────────────────────────────────────
-    #  PAGE 1 BUILDER
-    # ─────────────────────────────────────────────────────
-    def _fleet_page(self, fleet: dict, styles: dict, gen_date: str, asset_name: str) -> list:
-        story = []
-
-        # Title
-        story.append(Spacer(1, 0.3 * cm))
-        story.append(Paragraph("Fleet Overview Dashboard", styles["cover_title"]))
-        story.append(Paragraph(f"LankaLogix · {gen_date}", styles["cover_subtitle"]))
-        story.append(section_divider())
-        story.append(Spacer(1, 0.3 * cm))
-
-        # ── KPI strip ──
-        total   = fleet.get("total_assets", 0)
-        health  = fleet.get("fleet_health", 0)
-        crit    = fleet.get("critical_alerts", 0)
-        open_t  = fleet.get("open_tickets", 0)
-        high_t  = fleet.get("high_priority_tickets", 0)
-        pred_f  = fleet.get("predicted_failures", 0)
-        est_c   = fleet.get("est_maintenance_cost", 0)
-
-        def kpi(label, value):
-            return [Paragraph(str(value), styles["kpi_value"]),
-                    Paragraph(label, styles["kpi_label"])]
-
-        kpi_data = [[
-            kpi("Total Assets",        total),
-            kpi("Fleet Health %",      f"{health}%"),
-            kpi("Critical Alerts",     crit),
-            kpi("Open Tickets",        open_t),
-            kpi("High Priority",       high_t),
-            kpi("Pred. Failures",      pred_f),
-            kpi("Est. Cost (LKR)",     f"{est_c:,.0f}"),
-        ]]
-        kpi_tbl = Table(kpi_data, colWidths=[2.4 * cm] * 7)
-        kpi_tbl.setStyle(TableStyle(kpi_card_style()))
-        story.append(kpi_tbl)
-        story.append(Spacer(1, 0.5 * cm))
-
-        # ── Charts row 1: Status Pie + Health Band Pie ──
-        status_dist = fleet.get("status_distribution", [])
-        health_dist = fleet.get("health_distribution", [])
-
-        chart_row = []
-
-        if status_dist:
-            s_labels = [d["name"] for d in status_dist]
-            s_values = [d["count"] for d in status_dist]
-            s_colors = ["#10b981", "#ef4444", "#f59e0b", "#6366f1", "#94a3b8"][:len(s_labels)]
-            chart_row.append(
-                _pie_chart(s_labels, s_values, s_colors, title="Asset Status Distribution")
-            )
-        else:
-            chart_row.append(Spacer(1, 1))
-
-        if health_dist:
-            h_labels = [d["name"] for d in health_dist]
-            h_values = [d["count"] for d in health_dist]
-            h_colors = ["#10b981", "#22d3ee", "#f59e0b", "#f97316", "#ef4444"][:len(h_labels)]
-            chart_row.append(
-                _pie_chart(h_labels, h_values, h_colors, title="Health Band Distribution")
-            )
-        else:
-            chart_row.append(Spacer(1, 1))
-
-        chart_tbl = Table([chart_row], colWidths=[8.5 * cm, 8.5 * cm])
-        chart_tbl.setStyle(TableStyle([
-            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ]))
-        story.append(chart_tbl)
-        story.append(Spacer(1, 0.4 * cm))
-
-        # ── Bar chart: Vehicle Type Distribution ──
-        vehicle_dist = fleet.get("vehicle_distribution", [])
-        if vehicle_dist:
-            v_labels = [d["name"].replace("_", " ") for d in vehicle_dist]
-            v_values = [d["count"] for d in vehicle_dist]
-            bar = _bar_chart(v_labels, v_values, color_hex="#0f766e",
-                             title="Assets by Vehicle Type", size=(15 * cm / 2.54, 2.8))
-            bar.drawWidth  = 15 * cm
-            bar.drawHeight = 5.5 * cm
-            story.append(bar)
-            story.append(Spacer(1, 0.4 * cm))
-
-        # ── Top At-Risk Assets table ──
-        top_risk = fleet.get("top_risk_assets", [])
-        if top_risk:
-            story.append(thin_divider())
-            story.append(Paragraph("Top At-Risk Assets", styles["subsection"]))
-            story.append(Spacer(1, 0.2 * cm))
-            risk_data = [[
-                Paragraph("Asset", styles["table_header"]),
-                Paragraph("Location", styles["table_header"]),
-                Paragraph("Health", styles["table_header"]),
-                Paragraph("Fail Prob.", styles["table_header"]),
-                Paragraph("Days to Maint.", styles["table_header"]),
-            ]]
-            for r in top_risk:
-                fp = r.get("failureProbability", 0)
-                hs = r.get("healthScore", 0)
-                dtm = r.get("daysToMaintenance", 0)
-                risk_data.append([
-                    Paragraph(str(r.get("name", "—")), styles["table_cell"]),
-                    Paragraph(str(r.get("location", "—")), styles["table_cell"]),
-                    Paragraph(f"{hs}%", styles[risk_style_key("critical" if hs < 30 else "high")]),
-                    Paragraph(f"{fp * 100:.1f}%", styles["table_cell"]),
-                    Paragraph(str(dtm) if dtm is not None else "—", styles["table_cell"]),
-                ])
-            risk_tbl = Table(risk_data, colWidths=[5.5 * cm, 4 * cm, 2 * cm, 2.5 * cm, 3 * cm])
-            risk_tbl.setStyle(TableStyle(data_table_style()))
-            story.append(risk_tbl)
-
-        return story
-
-    # ─────────────────────────────────────────────────────
-    #  ASSET COVER
-    # ─────────────────────────────────────────────────────
-    def _asset_cover(self, asset, metrics, gen_date, rpt_id, styles) -> list:
-        story = [Spacer(1, 0.3 * cm)]
-        story.append(Paragraph("Asset Performance Report", styles["cover_title"]))
-        story.append(Paragraph(
-            f"{asset.get('asset_name', '—')}  ·  {asset.get('asset_code', '—')}",
-            styles["cover_subtitle"],
-        ))
-        story.append(Paragraph(
-            f"Generated: {gen_date}  |  Report ID: {rpt_id}  |  Warehouse: {asset.get('warehouse', '—')}",
-            styles["cover_meta"],
-        ))
-        story.append(section_divider())
-        story.append(Spacer(1, 0.4 * cm))
-
-        # KPI strip
-        currency = metrics.get("currency", "LKR")
-        def kpi(label, value):
-            return [Paragraph(str(value), styles["kpi_value"]),
-                    Paragraph(label, styles["kpi_label"])]
-
-        kpi_data = [[
-            kpi("Health Score",         f"{metrics.get('health_score', '—')}%"),
-            kpi("Failure Prob.",        f"{metrics.get('failure_probability', '—')}%"),
-            kpi("Risk Level",           metrics.get("risk_level", "—")),
-            kpi("Open Tickets",         metrics.get("open_tickets", "—")),
-            kpi("Maint. Events",        metrics.get("total_events", "—")),
-            kpi(f"Est. Cost ({currency})", f"{metrics.get('estimated_cost', 0):,.0f}"),
-        ]]
-        kpi_tbl = Table(kpi_data, colWidths=[2.8 * cm] * 6)
-        kpi_tbl.setStyle(TableStyle(kpi_card_style()))
-        story.append(kpi_tbl)
-        story.append(Spacer(1, 0.4 * cm))
-        return story
-
-    # ─────────────────────────────────────────────────────
-    #  SECTION: Asset Overview
-    # ─────────────────────────────────────────────────────
-    def _section_asset_overview(self, asset, styles) -> list:
-        story = [Paragraph("1. Asset Overview", styles["section"]), section_divider()]
-        left = [
-            ["Asset Name",    asset.get("asset_name", "—")],
-            ["Asset Code",    asset.get("asset_code", "—")],
-            ["Type",          f"{asset.get('asset_type','—')} · {asset.get('vehicle_type','—')}"],
-            ["Make / Model",  f"{asset.get('make','—')} {asset.get('model','—')} {asset.get('manufacture_year','—')}"],
-            ["Status",        asset.get("status", "—")],
-            ["Health Band",   asset.get("health_band", "—")],
-        ]
-        right = [
-            ["Registration",  asset.get("registration_number", "—")],
-            ["VIN",           asset.get("vin", "—")],
-            ["Purchase Date", asset.get("purchase_date", "—")],
-            ["Warranty Exp.", asset.get("warranty_expiry_date", "—")],
-            ["Last Service",  asset.get("last_service_date", "—")],
-            ["Next Service",  asset.get("next_service_date", "—")],
-        ]
-        rows = max(len(left), len(right))
-        tbl_data = []
-        for i in range(rows):
-            l = left[i]  if i < len(left)  else ["", ""]
-            r = right[i] if i < len(right) else ["", ""]
-            tbl_data.append([
-                Paragraph(l[0], styles["small"]),
-                Paragraph(str(l[1]), styles["normal_bold"]),
-                Paragraph(r[0], styles["small"]),
-                Paragraph(str(r[1]), styles["normal_bold"]),
-            ])
-        tbl = Table(tbl_data, colWidths=[3.5 * cm, 5 * cm, 3.5 * cm, 5 * cm])
-        tbl.setStyle(TableStyle(info_grid_style()))
-        story += [tbl, Spacer(1, 0.5 * cm)]
-        return story
-
-    # ─────────────────────────────────────────────────────
-    #  SECTION: Health & Risk
-    # ─────────────────────────────────────────────────────
-    def _section_health_risk(self, metrics, styles) -> list:
-        story = [Paragraph("2. Health & Risk Analysis", styles["section"]), section_divider()]
-        hs  = metrics.get("health_score", 0)
-        fp  = metrics.get("failure_probability", 0)
-        rl  = metrics.get("risk_level", "—")
-        dtm = metrics.get("days_until_maintenance")
-        pmd = metrics.get("predicted_maintenance_date", "—")
-
-        data = [
-            ["Health Score",             f"{hs}%"],
-            ["Failure Probability",      f"{fp}%"],
-            ["Risk Level",               rl],
-            ["Days Until Maintenance",   str(dtm) if dtm is not None else "—"],
-            ["Predicted Maint. Date",    pmd],
-        ]
-        tbl_data = [[
-            Paragraph(r[0], styles["small"]),
-            Paragraph(r[1], styles[risk_style_key(rl.lower()) if r[0] == "Risk Level" else "normal_bold"]),
-        ] for r in data]
-        tbl = Table(tbl_data, colWidths=[6 * cm, 11 * cm])
-        tbl.setStyle(TableStyle(info_grid_style()))
-        story += [tbl, Spacer(1, 0.5 * cm)]
-        return story
-
-    # ─────────────────────────────────────────────────────
-    #  SECTION: Sensor Data
-    # ─────────────────────────────────────────────────────
-    def _section_sensor(self, sensor, styles) -> list:
-        if not sensor:
-            return []
-        story = [Paragraph("3. Latest Sensor Snapshot", styles["section"]), section_divider()]
-        fields = [
-            ("Recorded At",             sensor.get("recorded_at")),
-            ("Tire Health",             f"{sensor.get('tire_health_pct','—')}%"),
-            ("Brake Health",            f"{sensor.get('brake_health_pct','—')}%"),
-            ("Battery Health",          f"{sensor.get('battery_health_pct','—')}%"),
-            ("Oil Life",                f"{sensor.get('oil_life_pct','—')}%"),
-            ("Hydraulic Health",        f"{sensor.get('hydraulic_health_pct','—')}%"),
-            ("Coolant Temp Max (°C)",   sensor.get("coolant_temp_max_c")),
-            ("Engine Temp Avg (°C)",    sensor.get("engine_temp_avg_c")),
-            ("Active Fault Codes",      sensor.get("active_fault_code_count")),
-            ("Days Since Service",      sensor.get("days_since_last_service")),
-            ("Engine Hours",            sensor.get("engine_hours_since_last_service")),
-            ("Downtime Last 90d (h)",   sensor.get("downtime_hours_last_90d")),
-            ("Fuel Level",              f"{sensor.get('fuel_level','—')}%"),
-            ("Odometer (km)",           sensor.get("odometer_km")),
-        ]
-        left  = fields[:7]
-        right = fields[7:]
-        rows  = max(len(left), len(right))
-        tbl_data = []
-        for i in range(rows):
-            l = left[i]  if i < len(left)  else ("", "")
-            r = right[i] if i < len(right) else ("", "")
-            tbl_data.append([
-                Paragraph(l[0], styles["small"]),
-                Paragraph(str(l[1] or "—"), styles["normal_bold"]),
-                Paragraph(r[0], styles["small"]),
-                Paragraph(str(r[1] or "—"), styles["normal_bold"]),
-            ])
-        tbl = Table(tbl_data, colWidths=[3.5 * cm, 5 * cm, 3.5 * cm, 5 * cm])
-        tbl.setStyle(TableStyle(info_grid_style()))
-        story += [tbl, Spacer(1, 0.5 * cm)]
-        return story
-
-    # ─────────────────────────────────────────────────────
-    #  SECTION: Maintenance
-    # ─────────────────────────────────────────────────────
-    def _section_maintenance(self, maintenance, metrics, styles) -> list:
-        story = [Paragraph("4. Maintenance Summary", styles["section"]), section_divider()]
-        currency = metrics.get("currency", "LKR")
-        summary_data = [
-            ["Total Events",        str(metrics.get("total_events", 0))],
-            ["Preventive",          f"{metrics.get('preventive_count',0)} ({metrics.get('preventive_ratio',0)}%)"],
-            ["Corrective",          f"{metrics.get('corrective_count',0)} ({metrics.get('corrective_ratio',0)}%)"],
-            ["Total Cost",          f"{currency} {metrics.get('total_cost',0):,.0f}"],
-            ["Avg Cost/Event",      f"{currency} {metrics.get('avg_cost_per_event',0):,.0f}"],
-            ["Total Downtime (h)",  str(metrics.get("total_downtime_hours", 0))],
-        ]
-        tbl_data = [[Paragraph(r[0], styles["small"]), Paragraph(r[1], styles["normal_bold"])]
-                    for r in summary_data]
-        tbl = Table(tbl_data, colWidths=[6 * cm, 11 * cm])
-        tbl.setStyle(TableStyle(info_grid_style()))
-        story.append(tbl)
-
-        if maintenance:
-            story.append(Spacer(1, 0.3 * cm))
-            story.append(Paragraph("Recent Maintenance Events", styles["subsection"]))
-            rows = [[
-                Paragraph("Date",        styles["table_header"]),
-                Paragraph("Type",        styles["table_header"]),
-                Paragraph("Description", styles["table_header"]),
-                Paragraph("Cost (LKR)",  styles["table_header"]),
-                Paragraph("Downtime",    styles["table_header"]),
-            ]]
-            for m in maintenance[:8]:
-                rows.append([
-                    Paragraph(str(m.get("performed_at","—"))[:10], styles["table_cell"]),
-                    Paragraph(str(m.get("event_type","—")),         styles["table_cell"]),
-                    Paragraph(str(m.get("description","—"))[:60],   styles["table_cell"]),
-                    Paragraph(f"{m.get('cost_amount',0):,.0f}",      styles["table_cell"]),
-                    Paragraph(f"{m.get('downtime_hours','—')}h",     styles["table_cell"]),
-                ])
-            mt = Table(rows, colWidths=[2.5*cm, 2.5*cm, 6*cm, 2.5*cm, 2*cm])
-            mt.setStyle(TableStyle(data_table_style()))
-            story.append(mt)
-
-        story.append(Spacer(1, 0.5 * cm))
-        return story
-
-    # ─────────────────────────────────────────────────────
-    #  SECTION: Tickets
-    # ─────────────────────────────────────────────────────
-    def _section_tickets(self, tickets, metrics, styles) -> list:
-        story = [Paragraph("5. Ticket Summary", styles["section"]), section_divider()]
-        summary = [
-            ["Total Tickets",   str(metrics.get("total_tickets", 0))],
-            ["Open",            str(metrics.get("open_tickets", 0))],
-            ["High Priority",   str(metrics.get("high_priority_tickets", 0))],
-            ["Closed",          str(metrics.get("closed_tickets", 0))],
-        ]
-        tbl_data = [[Paragraph(r[0], styles["small"]), Paragraph(r[1], styles["normal_bold"])]
-                    for r in summary]
-        tbl = Table(tbl_data, colWidths=[6 * cm, 11 * cm])
-        tbl.setStyle(TableStyle(info_grid_style()))
-        story.append(tbl)
-
-        if tickets:
-            story.append(Spacer(1, 0.3 * cm))
-            story.append(Paragraph("Recent Tickets", styles["subsection"]))
-            rows = [[
-                Paragraph("ID",       styles["table_header"]),
-                Paragraph("Title",    styles["table_header"]),
-                Paragraph("Priority", styles["table_header"]),
-                Paragraph("Status",   styles["table_header"]),
-                Paragraph("Created",  styles["table_header"]),
-            ]]
-            for t in tickets[:8]:
-                pri = str(t.get("priority","—")).lower()
-                rows.append([
-                    Paragraph(str(t.get("ticket_number","—")),    styles["table_cell"]),
-                    Paragraph(str(t.get("title","—"))[:55],        styles["table_cell"]),
-                    Paragraph(str(t.get("priority","—")).title(),  styles[risk_style_key(pri)]),
-                    Paragraph(str(t.get("status","—")).title(),    styles["table_cell"]),
-                    Paragraph(str(t.get("created_at","—"))[:10],   styles["table_cell"]),
-                ])
-            tt = Table(rows, colWidths=[2.5*cm, 6.5*cm, 2.2*cm, 2.3*cm, 2.5*cm])
-            tt.setStyle(TableStyle(data_table_style()))
-            story.append(tt)
-
-        story.append(Spacer(1, 0.5 * cm))
-        return story
-
-    # ─────────────────────────────────────────────────────
-    #  SECTION: AI Insights
-    # ─────────────────────────────────────────────────────
-    def _section_ai_insights(self, insights, styles) -> list:
-        story = [Paragraph("6. AI Insights & Recommendations", styles["section"]), section_divider()]
-
-        if insights.get("executive_summary"):
-            story.append(Paragraph("Executive Summary", styles["subsection"]))
-            story.append(Paragraph(insights["executive_summary"], styles["normal"]))
-            story.append(Spacer(1, 0.3 * cm))
-
-        recs = insights.get("recommendations", {})
-        for level in ("critical", "high", "medium"):
-            items = recs.get(level, [])
-            if items:
-                story.append(Paragraph(f"{level.title()} Recommendations", styles["subsection"]))
-                for item in items:
-                    story.append(Paragraph(f"• {item}", styles["bullet"]))
-                story.append(Spacer(1, 0.2 * cm))
-
-        if insights.get("conclusion"):
-            story.append(thin_divider())
-            story.append(Paragraph("Conclusion", styles["subsection"]))
-            story.append(Paragraph(insights["conclusion"], styles["normal"]))
-
-        return story
+        doc.build(story, canvasmaker=_canvas_maker)
+        return path
+    
