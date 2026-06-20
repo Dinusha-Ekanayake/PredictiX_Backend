@@ -75,6 +75,85 @@ def _get_llm(temperature: float = 0.3) -> ChatGroq:
 # FULL DATA INJECTION — PostgreSQL → LLM Context (RAG Layer)
 # ═══════════════════════════════════════════════════════════════
 
+def _build_survival_summary(db: Session, critical_assets: list, max_assets: int = 12) -> dict | None:
+    """FRSO survival aggregation over the report's critical assets.
+
+    Runs the per-component Weibull AFT models on each critical asset and
+    aggregates into (a) a per-component RUL summary and (b) a soonest-failing
+    watchlist. Returns None on any failure so report generation never blocks.
+    """
+    try:
+        from app.ai.services import survival_service
+
+        components = ("brake", "tire", "battery", "oil", "hydraulic")
+        codes = [a.get("code") for a in (critical_assets or [])[:max_assets] if a.get("code")]
+        if not codes:
+            return None
+
+        code_to_id = {
+            c: str(i)
+            for c, i in db.query(Asset.asset_code, Asset.id).filter(Asset.asset_code.in_(codes)).all()
+        }
+
+        comp_rul: dict[str, list] = {c: [] for c in components}
+        comp_30 = {c: 0 for c in components}
+        comp_90 = {c: 0 for c in components}
+        watchlist: list = []
+        analyzed = 0
+
+        for a in (critical_assets or [])[:max_assets]:
+            aid = code_to_id.get(a.get("code"))
+            if not aid:
+                continue
+            try:
+                res = survival_service.predict_all_components(db, aid, horizon_days=180, step_days=14)
+            except Exception:
+                continue
+            analyzed += 1
+            for comp in res.get("components", []):
+                if "error" in comp:
+                    continue
+                c = comp["component"]
+                md = comp["median_days"]
+                comp_rul[c].append(md)
+                if md <= 30:
+                    comp_30[c] += 1
+                if md <= 90:
+                    comp_90[c] += 1
+            sc, sm = res.get("soonest_component"), res.get("soonest_median_days")
+            if sc and sm is not None:
+                watchlist.append({
+                    "asset": a.get("code"),
+                    "component": sc.title(),
+                    "rul_days": round(float(sm), 1),
+                    "risk": "High" if sm <= 45 else "Medium" if sm <= 90 else "Low",
+                })
+
+        if analyzed == 0:
+            return None
+
+        component_summary = [
+            {
+                "component": c.title(),
+                "avg_rul_days": round(sum(v) / len(v), 1) if v else None,
+                "at_risk_30d": comp_30[c],
+                "at_risk_90d": comp_90[c],
+                "assets_scored": len(v),
+            }
+            for c, v in comp_rul.items()
+        ]
+        watchlist.sort(key=lambda w: w["rul_days"])
+
+        return {
+            "assets_analyzed": analyzed,
+            "horizon_days": 180,
+            "component_summary": component_summary,
+            "watchlist": watchlist[:15],
+        }
+    except Exception:
+        return None
+
+
 def build_warehouse_context(db: Session) -> dict[str, Any]:
     """
     Queries ALL relevant PostgreSQL tables and builds a comprehensive
@@ -587,6 +666,8 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
         "soon_maintenance_count": soon_maintenance,
         "avg_days_to_maintenance": avg_days_to_maintenance,
         "critical_assets": critical_assets_list,
+        # FRSO survival analysis (Weibull AFT) aggregated over critical assets
+        "survival_summary": _build_survival_summary(db, critical_assets_list),
 
         # Cost
         "total_estimated_cost": int(total_estimated_cost),
