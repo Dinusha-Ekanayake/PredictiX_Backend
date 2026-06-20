@@ -238,12 +238,16 @@ def fleet_survival_summary(
     db: Session,
     max_assets: int = 12,
     horizon_days: int = 180,
+    asset_codes: list[str] | None = None,
 ) -> dict[str, Any]:
     """
     Fleet-level survival aggregation over the warehouse's most at-risk assets.
 
-    Picks the `max_assets` lowest-health assets (by latest failure-prediction
-    health score), runs all 5 component models on each, and aggregates into:
+    When `asset_codes` is given, those exact assets are scored (used by the
+    warehouse report so the §4.8 page matches its critical-asset list). Otherwise
+    the `max_assets` lowest-health assets (by latest failure-prediction health
+    score) are picked. For each asset all 5 component models are run and
+    aggregated into:
       - component_summary: per-component avg median RUL + at-risk (≤30d / ≤90d) counts
       - watchlist:         each asset's soonest-failing component, sorted by RUL
 
@@ -252,14 +256,21 @@ def fleet_survival_summary(
     """
     from app.models import Asset, AssetFailurePrediction
 
-    rows = (
-        db.query(Asset.asset_code, Asset.id)
-        .join(AssetFailurePrediction, Asset.id == AssetFailurePrediction.asset_id)
-        .filter(AssetFailurePrediction.health_score.isnot(None))
-        .order_by(AssetFailurePrediction.health_score.asc())
-        .limit(max_assets)
-        .all()
-    )
+    if asset_codes:
+        rows = (
+            db.query(Asset.asset_code, Asset.id)
+            .filter(Asset.asset_code.in_(asset_codes[:max_assets]))
+            .all()
+        )
+    else:
+        rows = (
+            db.query(Asset.asset_code, Asset.id)
+            .join(AssetFailurePrediction, Asset.id == AssetFailurePrediction.asset_id)
+            .filter(AssetFailurePrediction.health_score.isnot(None))
+            .order_by(AssetFailurePrediction.health_score.asc())
+            .limit(max_assets)
+            .all()
+        )
 
     comp_rul: dict[str, list] = {c: [] for c in COMPONENTS}
     comp_30 = {c: 0 for c in COMPONENTS}
