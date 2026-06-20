@@ -80,7 +80,17 @@ def _profile_to_response(user: Profile, db: Session) -> dict:
     )
 
     first_name, last_name = _split_name(user.full_name)
-    address = user.meta.get("address") if isinstance(user.meta, dict) else None
+    meta = user.meta if isinstance(user.meta, dict) else {}
+    address = meta.get("address")
+    # Preference toggles live in meta['settings']; default sensibly when unset
+    # so the Settings page renders consistent values for first-time users.
+    saved_settings = meta.get("settings") or {}
+    settings = {
+        "emailNotifications": saved_settings.get("emailNotifications", True),
+        "criticalAlerts": saved_settings.get("criticalAlerts", True),
+        "maintenanceAlerts": saved_settings.get("maintenanceAlerts", True),
+        "compactView": saved_settings.get("compactView", False),
+    }
 
     return {
         "id": str(user.id),
@@ -99,6 +109,7 @@ def _profile_to_response(user: Profile, db: Session) -> dict:
         "status": user.status or "",
         "assignedAssetsCount": asset_count,
         "avatar_url": user.avatar_url or None,
+        "settings": settings,
     }
 
 
