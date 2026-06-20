@@ -30,12 +30,15 @@ class EmailConfig:
     SENDER_EMAIL = os.getenv("SENDER_EMAIL", "noreply@predictix.lk")
     SENDER_PASSWORD = os.getenv("SENDER_PASSWORD", "")
     USE_TLS = os.getenv("USE_TLS", "true").lower() == "true"
-    
+
     # EmailJS Configuration
     EMAILJS_SERVICE_ID = os.getenv("EMAILJS_SERVICE_ID", "")
     EMAILJS_TEMPLATE_ID = os.getenv("EMAILJS_TEMPLATE_ID", "")
     EMAILJS_PUBLIC_KEY = os.getenv("EMAILJS_PUBLIC_KEY", "")
     EMAILJS_PRIVATE_KEY = os.getenv("EMAILJS_PRIVATE_KEY", "")
+
+    # Brevo Configuration
+    BREVO_API_KEY = os.getenv("BREVO_API_KEY", "")
     
 
 class EmailTemplates:
@@ -206,21 +209,26 @@ class NotificationService:
     def send_email(to_emails: List[str], subject: str, html_body: str, template_params: Optional[dict] = None) -> bool:
         """
         Send email to one or more recipients
-        
+        Priority: Brevo > EmailJS > SMTP
+
         Args:
             to_emails: List of recipient email addresses
             subject: Email subject
             html_body: HTML body of the email
-            template_params: Optional dict for EmailJS placeholders
-            
+            template_params: Optional dict for template placeholders
+
         Returns:
             True if email sent successfully, False otherwise
         """
         try:
+            # Check if Brevo is configured (PRIMARY)
+            if EmailConfig.BREVO_API_KEY:
+                return NotificationService._send_via_brevo(to_emails, subject, html_body)
+
             # Check if EmailJS is configured
             if EmailConfig.EMAILJS_SERVICE_ID and EmailConfig.EMAILJS_TEMPLATE_ID and EmailConfig.EMAILJS_PUBLIC_KEY:
                 import requests
-                
+
                 success = True
                 for email in to_emails:
                     # Construct template params matching the user's template placeholders
@@ -231,13 +239,13 @@ class NotificationService:
                         "message": html_body,
                         "email": email
                     }
-                    
+
                     if template_params:
                         params.update(template_params)
-                        
+
                     # Ensure the email parameter maps to the actual recipient
                     params["email"] = email
-                    
+
                     payload = {
                         "service_id": EmailConfig.EMAILJS_SERVICE_ID,
                         "template_id": EmailConfig.EMAILJS_TEMPLATE_ID,
@@ -246,49 +254,106 @@ class NotificationService:
                     }
                     if EmailConfig.EMAILJS_PRIVATE_KEY:
                         payload["accessToken"] = EmailConfig.EMAILJS_PRIVATE_KEY
-                        
+
                     print(f"[NOTIFICATION] Sending via EmailJS to {email} with parameters: {params}", flush=True)
                     resp = requests.post(
                         "https://api.emailjs.com/api/v1.0/email/send",
                         json=payload,
                         headers={"Content-Type": "application/json"}
                     )
-                    
+
                     if resp.status_code == 200:
                         print(f"[NOTIFICATION] EmailJS sent email successfully to {email}", flush=True)
                     else:
                         print(f"[NOTIFICATION-ERROR] EmailJS failed for {email}: {resp.status_code} - {resp.text}", flush=True)
                         success = False
-                        
+
                 return success
 
             # --- Fallback to SMTP ---
             if not EmailConfig.SENDER_PASSWORD:
-                print("[NOTIFICATION] Email service disabled - SENDER_PASSWORD and EmailJS not configured")
+                print("[NOTIFICATION] Email service disabled - no service configured (Brevo, EmailJS, or SMTP)")
                 return False
-            
+
             # Create message
             message = MIMEMultipart("alternative")
             message["Subject"] = subject
             message["From"] = EmailConfig.SENDER_EMAIL
             message["To"] = ", ".join(to_emails)
-            
+
             # Attach HTML content
             message.attach(MIMEText(html_body, "html"))
-            
+
             # Send email
             with smtplib.SMTP(EmailConfig.SMTP_SERVER, EmailConfig.SMTP_PORT) as server:
                 if EmailConfig.USE_TLS:
                     server.starttls()
-                
+
                 server.login(EmailConfig.SENDER_EMAIL, EmailConfig.SENDER_PASSWORD)
                 server.sendmail(EmailConfig.SENDER_EMAIL, to_emails, message.as_string())
-            
+
             print(f"[NOTIFICATION] Email sent successfully to {len(to_emails)} recipient(s) via SMTP")
             return True
-            
+
         except Exception as e:
             print(f"[NOTIFICATION-ERROR] Failed to send email: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    @staticmethod
+    def _send_via_brevo(to_emails: List[str], subject: str, html_body: str) -> bool:
+        """
+        Send email via Brevo (SIB) API
+        https://www.brevo.com/
+
+        Args:
+            to_emails: List of recipient email addresses
+            subject: Email subject
+            html_body: HTML body of the email
+
+        Returns:
+            True if all emails sent successfully, False otherwise
+        """
+        try:
+            import requests
+
+            brevo_url = "https://api.brevo.com/v3/smtp/email"
+            headers = {
+                "accept": "application/json",
+                "content-type": "application/json",
+                "api-key": EmailConfig.BREVO_API_KEY
+            }
+
+            success = True
+            for email in to_emails:
+                payload = {
+                    "sender": {
+                        "name": EmailConfig.BREVO_SENDER_NAME,
+                        "email": EmailConfig.BREVO_SENDER_EMAIL
+                    },
+                    "to": [{"email": email}],
+                    "subject": subject,
+                    "htmlContent": html_body,
+                    "replyTo": {
+                        "email": EmailConfig.BREVO_SENDER_EMAIL,
+                        "name": EmailConfig.BREVO_SENDER_NAME
+                    }
+                }
+
+                print(f"[NOTIFICATION] Sending via Brevo to {email}", flush=True)
+                resp = requests.post(brevo_url, json=payload, headers=headers)
+
+                if resp.status_code in [200, 201]:
+                    print(f"[NOTIFICATION] Brevo sent email successfully to {email}", flush=True)
+                else:
+                    print(f"[NOTIFICATION-ERROR] Brevo failed for {email}: {resp.status_code} - {resp.text}", flush=True)
+                    success = False
+
+            return success
+
+        except Exception as e:
+            print(f"[NOTIFICATION-ERROR] Brevo email service failed: {str(e)}", flush=True)
             import traceback
             traceback.print_exc()
             return False
