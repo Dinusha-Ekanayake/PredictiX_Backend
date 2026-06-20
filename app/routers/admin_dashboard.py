@@ -29,8 +29,11 @@ from ..models import (
     Ticket,
     Warehouse,
 )
+from ..services.dashboard_cache import DashboardCache
 
 admin_dashboard_router = APIRouter(prefix="/admin-dashboard", tags=["Admin Dashboard"])
+
+_cache = DashboardCache("admin", ttl=int(__import__("os").getenv("ADMIN_DASHBOARD_TTL", "60")))
 
 
 def _months_ending_at(anchor: datetime, n: int) -> list[tuple[int, int, str]]:
@@ -49,12 +52,12 @@ def _months_ending_at(anchor: datetime, n: int) -> list[tuple[int, int, str]]:
 
 @admin_dashboard_router.get("/summary")
 def get_admin_summary(db: Session = Depends(get_db)):
-    """Unified summary data for the Admin Dashboard (real DB data)."""
+    """Unified summary data for the Admin Dashboard (real DB data, cached)."""
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     try:
-        return _build_admin_summary(db)
+        return _cache.get_or_refresh(db, _build_admin_summary)
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Admin dashboard failed: {e}")
