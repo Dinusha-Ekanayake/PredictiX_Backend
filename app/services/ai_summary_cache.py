@@ -59,6 +59,7 @@ def maybe_refresh() -> None:
 def _refresh_worker() -> None:
     global _summary, _fetched_at, _refreshing
     new_summary: Optional[str] = None
+    backoff = 60  # default retry backoff seconds
     try:
         from app.db.session import SessionLocal
         from app.agents.report_agents import run_warehouse_agent
@@ -70,16 +71,24 @@ def _refresh_worker() -> None:
             new_summary = str(text).strip() if text else None
         finally:
             db.close()
-    except Exception:
-        # No API key / network / parse error — keep the previous value (if any).
-        log.warning("Admin AI summary refresh failed (non-fatal).", exc_info=True)
+    except Exception as exc:
+        exc_str = str(exc)
+        # Rate-limit: log a terse warning and back off for the retry window
+        # reported in the error (default 90 min) rather than hammering Groq.
+        if "rate_limit" in exc_str.lower() or "429" in exc_str:
+            backoff = 5400  # 90 min — matches Groq free-tier daily TPD window
+            log.warning("Admin AI summary: Groq rate limit hit — retry in ~90 min.")
+        elif "api_key" in exc_str.lower() or "GROQ_API_KEY" in exc_str:
+            backoff = TTL_SECONDS  # key missing — no point retrying until restart
+            log.warning("Admin AI summary: GROQ_API_KEY not set — skipping LLM refresh.")
+        else:
+            log.warning("Admin AI summary refresh failed (non-fatal): %s", exc, exc_info=True)
     finally:
         with _lock:
             if new_summary:
                 _summary = new_summary
                 _fetched_at = time.monotonic()
             else:
-                # Don't pin _fetched_at on failure so we retry on the next call,
-                # but back off a little to avoid hammering a down LLM.
-                _fetched_at = time.monotonic() - TTL_SECONDS + 60
+                # Schedule next retry at now + backoff (by backdating _fetched_at).
+                _fetched_at = time.monotonic() - TTL_SECONDS + backoff
             _refreshing = False

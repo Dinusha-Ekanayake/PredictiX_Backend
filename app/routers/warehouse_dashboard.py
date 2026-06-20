@@ -7,16 +7,17 @@ from datetime import datetime, timedelta
 from ..deps import get_db, get_current_user
 from ..models import Asset, Ticket, AssetFailurePrediction, MaintenanceEvent, AssetCostPrediction, Profile
 from fastapi import BackgroundTasks
+from ..services.dashboard_cache import DashboardCache
 
 warehouse_dashboard_router = APIRouter(prefix="/warehouse-dashboard", tags=["Warehouse Dashboard"])
+
+_cache = DashboardCache("warehouse", ttl=int(__import__("os").getenv("WAREHOUSE_DASHBOARD_TTL", "60")))
 
 @warehouse_dashboard_router.get("/summary")
 def get_warehouse_summary(db: Session = Depends(get_db)):
     """
-    Returns unified summary data for the Warehouse Dashboard.
-    Fetches all data directly from PostgreSQL database.
+    Returns unified summary data for the Warehouse Dashboard (cached).
     """
-    # If database is not available, surface a clear 503 instead of a bare 500
     if db is None:
         raise HTTPException(
             status_code=503,
@@ -24,7 +25,7 @@ def get_warehouse_summary(db: Session = Depends(get_db)):
         )
 
     try:
-        return _build_warehouse_summary(db)
+        return _cache.get_or_refresh(db, _build_warehouse_summary)
     except Exception as e:
         import traceback
         traceback.print_exc()
