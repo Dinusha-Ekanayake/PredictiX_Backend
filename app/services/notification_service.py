@@ -209,7 +209,53 @@ class EmailTemplates:
 
 class NotificationService:
     """Service to send email notifications using PostgreSQL database data"""
-    
+
+    @staticmethod
+    def _send_via_brevo(to_emails: List[str], subject: str, html_body: str) -> bool:
+        """Send email via Brevo SMTP API"""
+        try:
+            import requests
+
+            brevo_url = "https://api.brevo.com/v3/smtp/email"
+            headers = {
+                "accept": "application/json",
+                "content-type": "application/json",
+                "api-key": EmailConfig.BREVO_API_KEY
+            }
+
+            success = True
+            for email in to_emails:
+                payload = {
+                    "sender": {
+                        "name": EmailConfig.BREVO_SENDER_NAME,
+                        "email": EmailConfig.BREVO_SENDER_EMAIL
+                    },
+                    "to": [{"email": email}],
+                    "subject": subject,
+                    "htmlContent": html_body,
+                    "replyTo": {
+                        "email": EmailConfig.BREVO_SENDER_EMAIL,
+                        "name": EmailConfig.BREVO_SENDER_NAME
+                    }
+                }
+
+                print(f"[NOTIFICATION] Sending via Brevo to {email}", flush=True)
+                resp = requests.post(brevo_url, json=payload, headers=headers)
+
+                if resp.status_code in [200, 201]:
+                    print(f"[NOTIFICATION] Brevo sent email successfully to {email}", flush=True)
+                else:
+                    print(f"[NOTIFICATION-ERROR] Brevo failed for {email}: {resp.status_code} - {resp.text}", flush=True)
+                    success = False
+
+            return success
+
+        except Exception as e:
+            print(f"[NOTIFICATION-ERROR] Brevo email service failed: {str(e)}", flush=True)
+            import traceback
+            traceback.print_exc()
+            return False
+
     @staticmethod
     def send_email(to_emails: List[str], subject: str, html_body: str, template_params: Optional[dict] = None) -> bool:
         """
