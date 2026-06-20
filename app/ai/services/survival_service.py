@@ -232,3 +232,80 @@ def predict_all_components(
         "soonest_median_days": round(soonest_median, 2) if soonest_component else None,
         "components":         components_out,
     }
+
+
+def fleet_survival_summary(
+    db: Session,
+    max_assets: int = 12,
+    horizon_days: int = 180,
+) -> dict[str, Any]:
+    """
+    Fleet-level survival aggregation over the warehouse's most at-risk assets.
+
+    Picks the `max_assets` lowest-health assets (by latest failure-prediction
+    health score), runs all 5 component models on each, and aggregates into:
+      - component_summary: per-component avg median RUL + at-risk (≤30d / ≤90d) counts
+      - watchlist:         each asset's soonest-failing component, sorted by RUL
+
+    Drives both the warehouse report's §4.8 page and the
+    GET /survival/warehouse/summary endpoint.
+    """
+    from app.models import Asset, AssetFailurePrediction
+
+    rows = (
+        db.query(Asset.asset_code, Asset.id)
+        .join(AssetFailurePrediction, Asset.id == AssetFailurePrediction.asset_id)
+        .filter(AssetFailurePrediction.health_score.isnot(None))
+        .order_by(AssetFailurePrediction.health_score.asc())
+        .limit(max_assets)
+        .all()
+    )
+
+    comp_rul: dict[str, list] = {c: [] for c in COMPONENTS}
+    comp_30 = {c: 0 for c in COMPONENTS}
+    comp_90 = {c: 0 for c in COMPONENTS}
+    watchlist: list = []
+    analyzed = 0
+
+    for code, aid in rows:
+        try:
+            res = predict_all_components(db, str(aid), horizon_days=horizon_days, step_days=14)
+        except Exception:
+            continue
+        analyzed += 1
+        for comp in res.get("components", []):
+            if "error" in comp:
+                continue
+            c, md = comp["component"], comp["median_days"]
+            comp_rul[c].append(md)
+            if md <= 30:
+                comp_30[c] += 1
+            if md <= 90:
+                comp_90[c] += 1
+        sc, sm = res.get("soonest_component"), res.get("soonest_median_days")
+        if sc and sm is not None:
+            watchlist.append({
+                "asset": code,
+                "component": sc.title(),
+                "rul_days": round(float(sm), 1),
+                "risk": "High" if sm <= 45 else "Medium" if sm <= 90 else "Low",
+            })
+
+    component_summary = [
+        {
+            "component": c.title(),
+            "avg_rul_days": round(sum(v) / len(v), 1) if v else None,
+            "at_risk_30d": comp_30[c],
+            "at_risk_90d": comp_90[c],
+            "assets_scored": len(v),
+        }
+        for c, v in comp_rul.items()
+    ]
+    watchlist.sort(key=lambda w: w["rul_days"])
+
+    return {
+        "assets_analyzed": analyzed,
+        "horizon_days": horizon_days,
+        "component_summary": component_summary,
+        "watchlist": watchlist[:15],
+    }
