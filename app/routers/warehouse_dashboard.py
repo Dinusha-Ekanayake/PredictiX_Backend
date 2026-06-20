@@ -418,6 +418,8 @@ def get_survival_analysis(db: Session = Depends(get_db)):
             "status": "success",
             "survival_summary": summary,
             "critical_assets": critical_assets,
+            # ISO-8601 UTC timestamp so the dashboard can show when this was scored.
+            "generated_at": datetime.utcnow().isoformat() + "Z",
         }
     except Exception as e:
         import traceback
