@@ -75,16 +75,23 @@ def _get_llm(temperature: float = 0.3) -> ChatGroq:
 # FULL DATA INJECTION — PostgreSQL → LLM Context (RAG Layer)
 # ═══════════════════════════════════════════════════════════════
 
-def _build_survival_summary(db: Session, critical_assets: list, max_assets: int = 12) -> dict | None:
+def _build_survival_summary(critical_assets: list, max_assets: int = 12) -> dict | None:
     """FRSO survival aggregation over the report's critical assets.
 
     Runs the per-component Weibull AFT models on each critical asset and
     aggregates into (a) a per-component RUL summary and (b) a soonest-failing
     watchlist. Returns None on any failure so report generation never blocks.
+
+    Uses its OWN DB session: build_warehouse_context's session may already be in
+    an aborted-transaction state from an earlier swallowed query error, which
+    would otherwise fail every query here.
     """
+    db = None
     try:
         from app.ai.services import survival_service
+        from app.db.session import SessionLocal
 
+        db = SessionLocal()
         components = ("brake", "tire", "battery", "oil", "hydraulic")
         codes = [a.get("code") for a in (critical_assets or [])[:max_assets] if a.get("code")]
         if not codes:
@@ -152,6 +159,9 @@ def _build_survival_summary(db: Session, critical_assets: list, max_assets: int 
         }
     except Exception:
         return None
+    finally:
+        if db is not None:
+            db.close()
 
 
 def build_warehouse_context(db: Session) -> dict[str, Any]:
@@ -667,7 +677,7 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
         "avg_days_to_maintenance": avg_days_to_maintenance,
         "critical_assets": critical_assets_list,
         # FRSO survival analysis (Weibull AFT) aggregated over critical assets
-        "survival_summary": _build_survival_summary(db, critical_assets_list),
+        "survival_summary": _build_survival_summary(critical_assets_list),
 
         # Cost
         "total_estimated_cost": int(total_estimated_cost),
