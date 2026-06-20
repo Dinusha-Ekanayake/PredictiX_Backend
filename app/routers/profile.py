@@ -142,6 +142,16 @@ def update_my_profile(
         meta["address"] = payload.address
         current_user.meta = meta
 
+    if payload.settings is not None:
+        meta = dict(current_user.meta or {})
+        existing = dict(meta.get("settings") or {})
+        # Merge only the keys the client actually sent (exclude unset/None) so a
+        # partial settings update doesn't wipe other toggles.
+        incoming = payload.settings.model_dump(exclude_none=True)
+        existing.update(incoming)
+        meta["settings"] = existing
+        current_user.meta = meta
+
     if db and hasattr(current_user, "__table__"):
         try:
             db.commit()
