@@ -7,8 +7,5 @@ __pycache__/
 
 alembic/
 
-# Runtime server log — should not be versioned
-uvicorn.log
-
 # Transformer/sentence-transformer model weights — too large for GitHub
 *.safetensors

@@ -19,20 +19,12 @@ class UserProfileOut(BaseModel):
     status: str
     assignedAssetsCount: int      # COUNT of active assignments
 
-class UserSettings(BaseModel):
-    """User preference toggles persisted in Profile.meta['settings']."""
-    emailNotifications: Optional[bool] = None
-    criticalAlerts: Optional[bool] = None
-    maintenanceAlerts: Optional[bool] = None
-    compactView: Optional[bool] = None
-
 class UserProfileUpdate(BaseModel):
     """Only fields the user is allowed to change"""
     firstName: Optional[str] = None
     lastName: Optional[str] = None
     contactNumber: Optional[str] = None
     address: Optional[str] = None
-    settings: Optional[UserSettings] = None
 
 class UserAssignedAssetOut(BaseModel):
     """One asset card on the profile page"""

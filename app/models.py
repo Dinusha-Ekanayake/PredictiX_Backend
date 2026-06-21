@@ -1,7 +1,5 @@
 from sqlalchemy import Column, String, Text, Integer, Boolean, Date, DateTime, ForeignKey, Numeric
 from sqlalchemy.dialects.postgresql import ENUM, UUID, JSONB
-from sqlalchemy import Boolean, Column, Date, DateTime, ForeignKey, Integer, String, Text, func
-from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 from app.db import Base
 import uuid
@@ -500,37 +498,3 @@ class PdmBatchPrediction(Base):
     run_duration_ms = Column(Integer)
     error_message = Column(Text)
     status = Column(Text, nullable=False, default="ok")
-    
-
-class ServiceReminderLog(Base):
-    """One row per service-reminder email send attempt."""
-    __tablename__ = "service_reminder_log"
-
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-
-    asset_id = Column(
-        UUID(as_uuid=True),
-        ForeignKey("assets.id", ondelete="CASCADE"),
-        nullable=False, index=True,
-    )
-    user_id = Column(
-        UUID(as_uuid=True),
-        ForeignKey("profiles.id", ondelete="CASCADE"),
-        nullable=False, index=True,
-    )
-
-    service_date = Column(Date, nullable=False)
-    reminder_offset_days = Column(Integer, nullable=False)
-
-    trigger = Column(String, nullable=False)
-    sent_by = Column(
-        UUID(as_uuid=True),
-        ForeignKey("profiles.id", ondelete="SET NULL"),
-        nullable=True,
-    )
-
-    email_to = Column(String, nullable=False)
-    success = Column(Boolean, nullable=False, default=True)
-    error_message = Column(Text, nullable=True)
-
-    sent_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
