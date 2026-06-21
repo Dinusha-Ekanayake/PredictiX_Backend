@@ -923,6 +923,12 @@ def run_warehouse_agent(db: Session) -> dict:
     ctx = build_warehouse_context(db)
     context_text = _context_to_prompt_text(ctx)
 
+    # ── Step 1b: FRSO survival aggregation (real Weibull AFT models over the
+    # report's critical assets) → drives the §4.8 page in the PDF. Computed AFTER
+    # the prompt text so it stays out of the LLM context — the PDF renders these
+    # tables deterministically from live model output, no LLM/mocks involved.
+    ctx["survival_summary"] = _build_survival_summary(ctx.get("critical_assets", []))
+
     # ── Step 2: KB Vector Store retrieval ─────────────────────
     kb_store = get_kb_store()
     # Inject the FULL source-grouped KB. The curated corpus (26 chunks spanning
