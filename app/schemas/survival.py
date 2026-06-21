@@ -38,27 +38,3 @@ class AssetSurvivalResponse(BaseModel):
     )
     soonest_median_days: float | None
     components: list[ComponentSurvivalResponse | ComponentSurvivalError]
-
-
-# ── Fleet-level (warehouse) aggregation ───────────────────────────────────────
-
-class FleetComponentStat(BaseModel):
-    component: str = Field(..., description="Component name (title-cased)")
-    avg_rul_days: float | None = Field(None, description="Average median RUL across scored assets")
-    at_risk_30d: int = Field(..., description="Assets with median RUL ≤ 30 days")
-    at_risk_90d: int = Field(..., description="Assets with median RUL ≤ 90 days")
-    assets_scored: int = Field(..., description="Assets successfully scored for this component")
-
-
-class FleetWatchlistItem(BaseModel):
-    asset: str = Field(..., description="Asset code")
-    component: str = Field(..., description="Soonest-failing component")
-    rul_days: float = Field(..., description="Median RUL of the soonest component")
-    risk: str = Field(..., description="High / Medium / Low band")
-
-
-class FleetSurvivalSummary(BaseModel):
-    assets_analyzed: int
-    horizon_days: int
-    component_summary: list[FleetComponentStat]
-    watchlist: list[FleetWatchlistItem]
