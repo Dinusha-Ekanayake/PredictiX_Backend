@@ -7,16 +7,17 @@ from datetime import datetime, timedelta
 from ..deps import get_db, get_current_user
 from ..models import Asset, Ticket, AssetFailurePrediction, MaintenanceEvent, AssetCostPrediction, Profile
 from fastapi import BackgroundTasks
+from ..services.dashboard_cache import DashboardCache
 
 warehouse_dashboard_router = APIRouter(prefix="/warehouse-dashboard", tags=["Warehouse Dashboard"])
+
+_cache = DashboardCache("warehouse", ttl=int(__import__("os").getenv("WAREHOUSE_DASHBOARD_TTL", "60")))
 
 @warehouse_dashboard_router.get("/summary")
 def get_warehouse_summary(db: Session = Depends(get_db)):
     """
-    Returns unified summary data for the Warehouse Dashboard.
-    Fetches all data directly from PostgreSQL database.
+    Returns unified summary data for the Warehouse Dashboard (cached).
     """
-    # If database is not available, surface a clear 503 instead of a bare 500
     if db is None:
         raise HTTPException(
             status_code=503,
@@ -24,7 +25,7 @@ def get_warehouse_summary(db: Session = Depends(get_db)):
         )
 
     try:
-        return _build_warehouse_summary(db)
+        return _cache.get_or_refresh(db, _build_warehouse_summary)
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -32,111 +33,80 @@ def get_warehouse_summary(db: Session = Depends(get_db)):
 
 
 def _build_warehouse_summary(db: Session):
-    # 1. Row 1: WarehouseOverviewCards
-    active_tickets_count = db.query(Ticket.id).filter(text("status != 'closed'")).count()
-    total_tickets_count = db.query(Ticket.id).count()
-    
-    avg_health_score = db.query(func.avg(AssetFailurePrediction.health_score)).scalar() or 0
-    avg_health_pct = f"{int(avg_health_score)}%" if avg_health_score else "N/A"
-    
-    healthy_assets = db.query(AssetFailurePrediction.id).filter(AssetFailurePrediction.health_score >= 80).count()
-    at_risk_assets = db.query(AssetFailurePrediction.id).filter(AssetFailurePrediction.health_score < 60).count()
+    # ── Query 1: all scalar KPIs from predictions + tickets + assets in one shot
+    kpi_row = db.execute(text("""
+        SELECT
+            (SELECT ROUND(AVG(health_score)::numeric, 1)
+             FROM asset_failure_predictions)                                      AS avg_health,
+            (SELECT COUNT(*) FROM asset_failure_predictions
+             WHERE health_score >= 80)                                            AS healthy_assets,
+            (SELECT COUNT(*) FROM asset_failure_predictions
+             WHERE health_score < 60)                                             AS at_risk_assets,
+            (SELECT COUNT(*) FROM assets)                                         AS total_assets,
+            (SELECT COUNT(*) FROM tickets WHERE status != 'closed')               AS active_tickets,
+            (SELECT COUNT(*) FROM tickets)                                        AS total_tickets,
+            (SELECT COALESCE(SUM(estimated_cost), 0) FROM asset_cost_predictions) AS total_cost
+    """)).fetchone()
 
-    total_assets = db.query(Asset.id).count()
+    avg_health_score     = float(kpi_row[0] or 0)
+    healthy_assets       = int(kpi_row[1] or 0)
+    at_risk_assets       = int(kpi_row[2] or 0)
+    total_assets         = int(kpi_row[3] or 0)
+    active_tickets_count = int(kpi_row[4] or 0)
+    total_tickets_count  = int(kpi_row[5] or 0)
+    total_cost           = int(kpi_row[6] or 0)
+
+    avg_health_pct   = f"{int(avg_health_score)}%" if avg_health_score else "N/A"
     total_assets_str = f"{healthy_assets} of {total_assets} total" if total_assets else "0 of 0 total"
+    formatted_cost   = f"Rs.{total_cost:,}"
 
     kpis = [
-        {
-            "label": "Average Health",
-            "value": avg_health_pct,
-            "sub": "Across all assets",
-            "icon": "Activity",
-        },
-        {
-            "label": "Healthy Assets",
-            "value": str(healthy_assets),
-            "sub": total_assets_str,
-            "icon": "ShieldCheck",
-        },
-        {
-            "label": "At Risk",
-            "value": str(at_risk_assets),
-            "sub": "Require attention",
-            "icon": "AlertTriangle",
-        },
-        {
-            "label": "Active Tickets",
-            "value": str(active_tickets_count),
-            "sub": f"Of {total_tickets_count} total",
-            "icon": "Ticket",
-        },
+        {"label": "Average Health",  "value": avg_health_pct,            "sub": "Across all assets",          "icon": "Activity"},
+        {"label": "Healthy Assets",  "value": str(healthy_assets),        "sub": total_assets_str,             "icon": "ShieldCheck"},
+        {"label": "At Risk",         "value": str(at_risk_assets),        "sub": "Require attention",          "icon": "AlertTriangle"},
+        {"label": "Active Tickets",  "value": str(active_tickets_count),  "sub": f"Of {total_tickets_count} total", "icon": "Ticket"},
     ]
-
-    cost_query = db.query(func.sum(AssetCostPrediction.estimated_cost)).scalar()
-    
-    total_cost = int(cost_query) if cost_query else 0
-    formatted_cost = f"Rs.{total_cost:,}"
-
-    # Row 2: WarehouseKPIGrid
-    total_vehicles_count = total_assets
-    critical_assets_count = at_risk_assets
     kpi_grid = [
-        {
-            "title": "Total Vehicles",
-            "value": str(total_vehicles_count),
-            "subtitle": "Across all warehouse operations",
-        },
-        {
-            "title": "Critical Assets",
-            "value": str(critical_assets_count),
-            "subtitle": "Require immediate attention",
-        },
-        {
-            "title": "Avg Component Health",
-            "value": avg_health_pct,
-            "subtitle": "Overall fleet component health",
-        },
-        {
-            "title": "Monthly Maintenance Cost",
-            "value": formatted_cost,
-            "subtitle": "Estimated current month cost",
-        },
+        {"title": "Total Vehicles",           "value": str(total_assets),    "subtitle": "Across all warehouse operations"},
+        {"title": "Critical Assets",          "value": str(at_risk_assets),  "subtitle": "Require immediate attention"},
+        {"title": "Avg Component Health",     "value": avg_health_pct,       "subtitle": "Overall fleet component health"},
+        {"title": "Monthly Maintenance Cost", "value": formatted_cost,       "subtitle": "Estimated current month cost"},
     ]
 
-    # 2. Asset Status Distribution
-    status_counts = db.query(Asset.status, func.count(Asset.id)).group_by(Asset.status).all()
-    asset_status = [{"name": s.title() if s else "Unknown", "value": c} for s, c in status_counts]
+    # ── Query 2: asset status, type, ticket priority+category — all GROUP BYs ─
+    # Run as four cheap grouped queries (all indexed scans, tiny result sets).
+    status_counts    = db.query(Asset.status, func.count(Asset.id)).group_by(Asset.status).all()
+    priority_counts  = db.query(Ticket.priority, func.count(Ticket.id)).group_by(Ticket.priority).all()
+    category_counts  = db.query(Ticket.final_category, func.count(Ticket.id)).group_by(Ticket.final_category).all()
+    type_counts      = db.query(Asset.vehicle_type, func.count(Asset.id)).group_by(Asset.vehicle_type).all()
 
-    # 3. Tickets by Priority
-    priority_counts = db.query(Ticket.priority, func.count(Ticket.id)).group_by(Ticket.priority).all()
-    ticket_priority = [{"name": p.title() if p else "Unassigned", "value": c} for p, c in priority_counts]
+    asset_status       = [{"name": s.title() if s else "Unknown",                                "value": c} for s, c in status_counts]
+    ticket_priority    = [{"name": p.title() if p else "Unassigned",                             "value": c} for p, c in priority_counts]
+    tickets_by_category = [{"category": c.title() if c else "General",                           "count": cnt} for c, cnt in category_counts]
+    assets_by_type     = [{"type": str(t).replace("_", " ").title() if t else "Other",           "count": c} for t, c in type_counts]
 
-    # 4. Tickets by Category
-    category_counts = db.query(Ticket.final_category, func.count(Ticket.id)).group_by(Ticket.final_category).all()
-    tickets_by_category = [{"category": c.title() if c else "General", "count": count} for c, count in category_counts]
-
-    # 5. Assets by Type (Specialized)
-    type_counts = db.query(Asset.vehicle_type, func.count(Asset.id)).group_by(Asset.vehicle_type).all()
-    assets_by_type = [{"type": str(t).replace("_", " ").title() if t else "Other", "count": c} for t, c in type_counts]
-
-    # 6. Health Score Distribution
-    health_scores = db.query(AssetFailurePrediction.health_score).filter(AssetFailurePrediction.health_score.isnot(None)).all()
+    # 6. Health Score Distribution — bucketed in SQL (no full-table fetch into Python)
+    bucket_rows = db.query(
+        func.width_bucket(AssetFailurePrediction.health_score, 60, 100, 4).label("b"),
+        func.count(AssetFailurePrediction.id),
+    ).filter(AssetFailurePrediction.health_score.isnot(None)).group_by("b").all()
+    # width_bucket(score, 60, 100, 4) → 0:<60, 1:60–69, 2:70–79, 3:80–89, 4&5:90–100
     buckets = {"90–100%": 0, "80–89%": 0, "70–79%": 0, "60–69%": 0, "< 60%": 0}
-    for (score,) in health_scores:
-        if score >= 90: buckets["90–100%"] += 1
-        elif score >= 80: buckets["80–89%"] += 1
-        elif score >= 70: buckets["70–79%"] += 1
-        elif score >= 60: buckets["60–69%"] += 1
-        else: buckets["< 60%"] += 1
+    _bucket_map = {0: "< 60%", 1: "60–69%", 2: "70–79%", 3: "80–89%", 4: "90–100%", 5: "90–100%"}
+    for b, c in bucket_rows:
+        buckets[_bucket_map.get(b, "< 60%")] += c
     health_score_dist = [{"bucket": k, "count": v} for k, v in buckets.items()]
 
     # 7. Monthly Ticket Volume & Health/Maintenance Trends
-    tickets = db.query(Ticket.created_at).filter(Ticket.created_at.isnot(None)).all()
+    # Ticket counts per month — aggregated in SQL instead of pulling every row.
+    ticket_month_rows = db.query(
+        extract("month", Ticket.created_at).label("m"),
+        func.count(Ticket.id),
+    ).filter(Ticket.created_at.isnot(None)).group_by("m").all()
     months_dict = {m: 0 for m in calendar.month_abbr[1:]}
-    for (created_at,) in tickets:
-        month_name = calendar.month_abbr[created_at.month]
-        months_dict[month_name] += 1
-    
+    for m_num, cnt in ticket_month_rows:
+        months_dict[calendar.month_abbr[int(m_num)]] += cnt
+
     current_month = datetime.now().month
     recent_months = []
     for i in range(5, -1, -1):
@@ -144,16 +114,20 @@ def _build_warehouse_summary(db: Session):
         if m <= 0:
             m += 12
         recent_months.append(calendar.month_abbr[m])
-        
+
     monthly_ticket_volume = [{"month": m, "total": months_dict.get(m, 0)} for m in recent_months]
-    
+
     current_avg_health = int(avg_health_score) if avg_health_score else 0
+    # Per-month avg health in ONE grouped query instead of one query per month.
+    health_month_rows = db.query(
+        extract("month", AssetFailurePrediction.created_at).label("m"),
+        func.avg(AssetFailurePrediction.health_score),
+    ).filter(AssetFailurePrediction.created_at.isnot(None)).group_by("m").all()
+    avg_health_by_month = {int(m_num): avg_h for m_num, avg_h in health_month_rows}
     health_trends = []
     for m in recent_months:
         month_num = list(calendar.month_abbr).index(m)
-        avg_h = db.query(func.avg(AssetFailurePrediction.health_score)).filter(
-            extract('month', AssetFailurePrediction.created_at) == month_num
-        ).scalar()
+        avg_h = avg_health_by_month.get(month_num)
         health_trends.append({
             "month": m,
             "avgHealth": int(avg_h) if avg_h else current_avg_health,

@@ -73,6 +73,12 @@ class UserTicketCommentCreate(BaseModel):
     comment: str = Field(..., min_length=1)
 
 
+class UserTicketAttachmentCreate(BaseModel):
+    file_path: str
+    mime_type: Optional[str] = None
+    original_filename: Optional[str] = None
+
+
 # ---------------------------------------------------------------------------
 # Outputs
 # ---------------------------------------------------------------------------
