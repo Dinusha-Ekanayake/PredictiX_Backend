@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 from app.services.context_builder import AssetContextBuilder
-from app.services.ai_insight import AIInsightService
+from app.services.ai_insights import AIInsightService
 from app.services.pdf_render import PDFRenderService
 from app.core.storage import supabase_storage
 

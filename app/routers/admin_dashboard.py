@@ -29,8 +29,11 @@ from ..models import (
     Ticket,
     Warehouse,
 )
+from ..services.dashboard_cache import DashboardCache
 
 admin_dashboard_router = APIRouter(prefix="/admin-dashboard", tags=["Admin Dashboard"])
+
+_cache = DashboardCache("admin", ttl=int(__import__("os").getenv("ADMIN_DASHBOARD_TTL", "60")))
 
 
 def _months_ending_at(anchor: datetime, n: int) -> list[tuple[int, int, str]]:
@@ -49,96 +52,106 @@ def _months_ending_at(anchor: datetime, n: int) -> list[tuple[int, int, str]]:
 
 @admin_dashboard_router.get("/summary")
 def get_admin_summary(db: Session = Depends(get_db)):
-    """Unified summary data for the Admin Dashboard (real DB data)."""
+    """Unified summary data for the Admin Dashboard (real DB data, cached)."""
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     try:
-        return _build_admin_summary(db)
+        return _cache.get_or_refresh(db, _build_admin_summary)
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Admin dashboard failed: {e}")
 
 
 def _build_admin_summary(db: Session):
-    # ── KPIs ────────────────────────────────────────────────────────────────
-    total_assets = db.query(func.count(Asset.id)).scalar() or 0
+    now = datetime.now()
 
-    from sqlalchemy import case, and_
+    # ── Query 1: all asset_failure_predictions aggregates in one pass ─────────
+    pred_agg = db.execute(text("""
+        SELECT
+            COUNT(*)                                                        AS total_preds,
+            COUNT(*) FILTER (WHERE health_score < 60)                       AS critical_alerts,
+            ROUND(AVG(health_score)::numeric, 2)                            AS avg_health,
+            COUNT(*) FILTER (WHERE failure_probability >= 0.5)              AS predicted_failures,
+            -- health distribution bands (Excellent/Good/Moderate/Poor/Critical)
+            COUNT(*) FILTER (WHERE health_score >= 90)                      AS h_excellent,
+            COUNT(*) FILTER (WHERE health_score >= 75 AND health_score < 90) AS h_good,
+            COUNT(*) FILTER (WHERE health_score >= 60 AND health_score < 75) AS h_moderate,
+            COUNT(*) FILTER (WHERE health_score >= 40 AND health_score < 60) AS h_poor,
+            COUNT(*) FILTER (WHERE health_score < 40)                       AS h_critical
+        FROM asset_failure_predictions
+        WHERE health_score IS NOT NULL
+    """)).fetchone()
 
-    pred_stats = db.query(
-        func.sum(case((AssetFailurePrediction.health_score < 60, 1), else_=0)),
-        func.avg(AssetFailurePrediction.health_score),
-        func.sum(case((AssetFailurePrediction.failure_probability >= 0.5, 1), else_=0)),
-        func.sum(case((AssetFailurePrediction.health_score >= 90, 1), else_=0)),
-        func.sum(case((and_(AssetFailurePrediction.health_score >= 75, AssetFailurePrediction.health_score < 90), 1), else_=0)),
-        func.sum(case((and_(AssetFailurePrediction.health_score >= 60, AssetFailurePrediction.health_score < 75), 1), else_=0)),
-        func.sum(case((and_(AssetFailurePrediction.health_score >= 40, AssetFailurePrediction.health_score < 60), 1), else_=0)),
-        func.sum(case((AssetFailurePrediction.health_score < 40, 1), else_=0))
-    ).first()
+    critical_alerts     = int(pred_agg[1] or 0)
+    avg_health_raw      = pred_agg[2]
+    fleet_health        = int(round(float(avg_health_raw))) if avg_health_raw is not None else 0
+    predicted_failures  = int(pred_agg[3] or 0)
+    health_distribution = [
+        {"name": "Excellent", "count": int(pred_agg[4] or 0)},
+        {"name": "Good",      "count": int(pred_agg[5] or 0)},
+        {"name": "Moderate",  "count": int(pred_agg[6] or 0)},
+        {"name": "Poor",      "count": int(pred_agg[7] or 0)},
+        {"name": "Critical",  "count": int(pred_agg[8] or 0)},
+    ]
 
-    critical_alerts = int(pred_stats[0] or 0) if pred_stats else 0
-    avg_health = pred_stats[1] if pred_stats else None
-    fleet_health = int(round(float(avg_health))) if avg_health is not None else 0
-    predicted_failures = int(pred_stats[2] or 0) if pred_stats else 0
+    # ── Query 2: all ticket aggregates + anchors in one pass ──────────────────
+    ticket_agg = db.execute(text("""
+        SELECT
+            COUNT(*) FILTER (WHERE status != 'closed')                          AS open_tickets,
+            COUNT(*) FILTER (WHERE priority = 'high' AND status != 'closed')    AS high_priority,
+            COUNT(*) FILTER (WHERE status IN ('resolved','closed'))              AS tickets_resolved,
+            ROUND(AVG(
+                CASE WHEN closed_at IS NOT NULL AND created_at IS NOT NULL
+                     THEN EXTRACT(EPOCH FROM (closed_at - created_at)) / 86400.0
+                END
+            )::numeric, 1)                                                       AS avg_resolution_days,
+            MAX(created_at)                                                      AS max_created_at
+        FROM tickets
+    """)).fetchone()
 
-    band_excellent = int(pred_stats[3] or 0) if pred_stats else 0
-    band_good = int(pred_stats[4] or 0) if pred_stats else 0
-    band_moderate = int(pred_stats[5] or 0) if pred_stats else 0
-    band_poor = int(pred_stats[6] or 0) if pred_stats else 0
-    band_critical = int(pred_stats[7] or 0) if pred_stats else 0
+    open_tickets       = int(ticket_agg[0] or 0)
+    high_priority_tickets = int(ticket_agg[1] or 0)
+    tickets_resolved   = int(ticket_agg[2] or 0)
+    avg_resolution_days = float(ticket_agg[3] or 0)
+    ticket_anchor_dt   = ticket_agg[4] or now
 
-    ticket_stats = db.query(
-        func.sum(case((text("status != 'closed'"), 1), else_=0)),
-        func.sum(case((text("priority = 'high' AND status != 'closed'"), 1), else_=0)),
-        func.max(Ticket.created_at),
-        func.sum(case((text("status IN ('resolved','closed')"), 1), else_=0)),
-        func.avg(
-            case(
-                (text("closed_at IS NOT NULL AND created_at IS NOT NULL"), 
-                 func.extract("epoch", Ticket.closed_at - Ticket.created_at) / 86400.0),
-                else_=None
-            )
-        )
-    ).first()
+    # ── Query 3: assets total + maintenance anchor + cost ─────────────────────
+    misc_agg = db.execute(text("""
+        SELECT
+            (SELECT COUNT(*) FROM assets)                              AS total_assets,
+            (SELECT MAX(performed_at) FROM maintenance_events)        AS max_maint_at,
+            (SELECT COALESCE(SUM(estimated_cost), 0)
+             FROM asset_cost_predictions)                             AS est_cost
+    """)).fetchone()
 
-    open_tickets = int(ticket_stats[0] or 0) if ticket_stats else 0
-    high_priority_tickets = int(ticket_stats[1] or 0) if ticket_stats else 0
-    ticket_anchor_dt = ticket_stats[2] if ticket_stats and ticket_stats[2] else datetime.now()
-    tickets_resolved = int(ticket_stats[3] or 0) if ticket_stats else 0
-    avg_resolution = ticket_stats[4]
-
-    est_cost = db.query(func.sum(AssetCostPrediction.estimated_cost)).scalar()
-    est_maintenance_cost = int(est_cost) if est_cost else 0
+    total_assets          = int(misc_agg[0] or 0)
+    maint_anchor_dt       = misc_agg[1] or now
+    est_maintenance_cost  = int(misc_agg[2] or 0)
 
     kpis = {
-        "totalAssets": int(total_assets),
-        "criticalAlerts": int(critical_alerts),
-        "openTickets": int(open_tickets),
-        "highPriorityTickets": int(high_priority_tickets),
-        "fleetHealth": fleet_health,
-        "predictedFailures": int(predicted_failures),
+        "totalAssets":        total_assets,
+        "criticalAlerts":     critical_alerts,
+        "openTickets":        open_tickets,
+        "highPriorityTickets": high_priority_tickets,
+        "fleetHealth":        fleet_health,
+        "predictedFailures":  predicted_failures,
         "estMaintenanceCost": est_maintenance_cost,
+    }
+    footer_stats = {
+        "avgHealthScore":    fleet_health,
+        "ticketsResolved":   tickets_resolved,
+        "avgResolutionDays": avg_resolution_days,
     }
 
     # ── Anchor windows to the LATEST month that actually has data ─────────────
-    # (the newest real data is months behind server "now", so anchoring to now()
-    #  would produce empty trailing months and clip the real data).
-    now = datetime.now()
-
-    maint_anchor_dt = db.query(func.max(MaintenanceEvent.performed_at)).scalar() or now
-
     ticket_months = _months_ending_at(ticket_anchor_dt, 6)
-    cost_months = _months_ending_at(maint_anchor_dt, 6)
+    cost_months   = _months_ending_at(maint_anchor_dt, 6)
 
-    # ── healthTrend (anchored to the maintenance window) ──────────────────────
-    # No historical health snapshots in DB (predictions are single-dated);
-    # using real current fleet average as the baseline.
-    health_trend = []
-    for (_, _, abbr) in cost_months:
-        health_trend.append({"month": abbr, "avgHealth": int(fleet_health)})
+    # ── healthTrend ───────────────────────────────────────────────────────────
+    health_trend = [{"month": abbr, "avgHealth": fleet_health} for (_, _, abbr) in cost_months]
 
-    # ── ticketTrend (grouped by month of created_at) ──────────────────────────
+    # ── Query 4: ticket trend grouped by month×status ─────────────────────────
     ticket_rows = (
         db.query(
             func.to_char(Ticket.created_at, "YYYY-MM").label("ym"),
@@ -149,41 +162,27 @@ def _build_admin_summary(db: Session):
         .group_by("ym", Ticket.status)
         .all()
     )
-    # ym -> {opened, inProgress, resolved}
     ticket_by_ym: dict[str, dict[str, int]] = {}
     for ym, status, cnt in ticket_rows:
-        bucket = ticket_by_ym.setdefault(ym, {"opened": 0, "inProgress": 0, "resolved": 0})
-        bucket["opened"] += cnt
+        b = ticket_by_ym.setdefault(ym, {"opened": 0, "inProgress": 0, "resolved": 0})
+        b["opened"] += cnt
         if status == "in_progress":
-            bucket["inProgress"] += cnt
+            b["inProgress"] += cnt
         if status in ("resolved", "closed"):
-            bucket["resolved"] += cnt
+            b["resolved"] += cnt
 
     ticket_trend = []
     for y, m, abbr in ticket_months:
         ym = f"{y:04d}-{m:02d}"
         b = ticket_by_ym.get(ym, {"opened": 0, "inProgress": 0, "resolved": 0})
-        ticket_trend.append(
-            {
-                "period": abbr,
-                "opened": int(b["opened"]),
-                "inProgress": int(b["inProgress"]),
-                "resolved": int(b["resolved"]),
-            }
-        )
+        ticket_trend.append({
+            "period":     abbr,
+            "opened":     int(b["opened"]),
+            "inProgress": int(b["inProgress"]),
+            "resolved":   int(b["resolved"]),
+        })
 
-    # ── healthDistribution (best -> worst) ───────────────────────────────────
-    health_distribution = [
-        {"name": "Excellent", "count": band_excellent},
-        {"name": "Good", "count": band_good},
-        {"name": "Moderate", "count": band_moderate},
-        {"name": "Poor", "count": band_poor},
-        {"name": "Critical", "count": band_critical},
-    ]
-
-    # ── costTrend (trailing months ending at latest maintenance month) ───────
-    # estimated = preventive (planned) maintenance cost that month
-    # actual    = total real maintenance cost that month (null for current month)
+    # ── Query 5: cost trend grouped by month (total + preventive) ────────────
     cost_rows = (
         db.query(
             func.to_char(MaintenanceEvent.performed_at, "YYYY-MM").label("ym"),
@@ -212,7 +211,7 @@ def _build_admin_summary(db: Session):
         actual = None if ym == current_ym else (int(total) if total else 0)
         cost_trend.append({"month": abbr, "estimated": estimated, "actual": actual})
 
-    # ── downtimeByWarehouse (planned=preventive, unplanned=repair) ───────────
+    # ── Query 6: downtime by warehouse (planned vs unplanned) ────────────────
     downtime_rows = (
         db.query(
             Warehouse.name,
@@ -237,7 +236,7 @@ def _build_admin_summary(db: Session):
         for name, v in dt_by_wh.items()
     ]
 
-    # ── topRiskAssets (worst health first; one prediction per asset in DB) ────
+    # ── Query 7: top 8 risk assets (worst health first) ───────────────────────
     risk_rows = (
         db.query(Asset, AssetFailurePrediction, Warehouse.name)
         .join(AssetFailurePrediction, Asset.id == AssetFailurePrediction.asset_id)
@@ -246,26 +245,20 @@ def _build_admin_summary(db: Session):
         .limit(8)
         .all()
     )
-    today = datetime.now().date()
+    today = now.date()
     top_risk_assets = []
     for asset, pred, wh_name in risk_rows:
-        days_to_maint = None
-        if asset.next_service_date:
-            days_to_maint = (asset.next_service_date - today).days
-        top_risk_assets.append(
-            {
-                "id": asset.asset_code or str(asset.id),
-                "name": asset.asset_name or asset.model or "Asset",
-                "location": wh_name or "Unknown",
-                "healthScore": int(round(float(pred.health_score))) if pred.health_score is not None else 0,
-                "failureProbability": float(pred.failure_probability) if pred.failure_probability is not None else 0.0,
-                "daysToMaintenance": days_to_maint,
-            }
-        )
+        days_to_maint = (asset.next_service_date - today).days if asset.next_service_date else None
+        top_risk_assets.append({
+            "id":               asset.asset_code or str(asset.id),
+            "name":             asset.asset_name or asset.model or "Asset",
+            "location":         wh_name or "Unknown",
+            "healthScore":      int(round(float(pred.health_score))) if pred.health_score is not None else 0,
+            "failureProbability": float(pred.failure_probability) if pred.failure_probability is not None else 0.0,
+            "daysToMaintenance": days_to_maint,
+        })
 
-    # ── recentAlerts (latest 5 notifications) ────────────────────────────────
-    # Explicit columns only (the full Notification entity is risky if the ORM and
-    # DB schema drift). Severity is derived from the notification type/status.
+    # ── Query 8: recent alerts (latest 5 notifications) ───────────────────────
     def _severity_for(ntype: str | None, nstatus: str | None) -> str:
         t = f"{ntype or ''} {nstatus or ''}".lower()
         if any(k in t for k in ("alert", "critical", "failure", "high_risk", "urgent")):
@@ -291,21 +284,19 @@ def _build_admin_summary(db: Session):
         .limit(5)
         .all()
     )
-    recent_alerts = []
-    for nid, ntype, nstatus, ntitle, nmessage, ncreated, asset_name, wh_name in notif_rows:
-        recent_alerts.append(
-            {
-                "id": str(nid),
-                "severity": _severity_for(ntype, nstatus),
-                # Real value either way: asset name when linked, else the title.
-                "asset": asset_name or ntitle or "System",
-                "location": (wh_name or "Unknown") if asset_name else "Fleet-wide",
-                "message": nmessage or ntitle or "",
-                "createdAt": ncreated.isoformat() if ncreated else None,
-            }
-        )
+    recent_alerts = [
+        {
+            "id":       str(nid),
+            "severity": _severity_for(ntype, nstatus),
+            "asset":    asset_name or ntitle or "System",
+            "location": (wh_name or "Unknown") if asset_name else "Fleet-wide",
+            "message":  nmessage or ntitle or "",
+            "createdAt": ncreated.isoformat() if ncreated else None,
+        }
+        for nid, ntype, nstatus, ntitle, nmessage, ncreated, asset_name, wh_name in notif_rows
+    ]
 
-    # ── latestTickets (latest 5 by created_at) ───────────────────────────────
+    # ── Query 9: latest 5 tickets ─────────────────────────────────────────────
     assignee = Profile.__table__.alias("assignee")
     ticket_list_rows = (
         db.query(
@@ -325,34 +316,19 @@ def _build_admin_summary(db: Session):
         .all()
     )
     valid_priorities = {"critical", "high", "medium", "low"}
-    valid_statuses = {"open", "in_progress", "resolved", "closed"}
+    valid_statuses   = {"open", "in_progress", "resolved", "closed"}
     latest_tickets = []
     for tid, tnum, ttitle, tprio, tfprio, tstatus, asset_name, assignee_name in ticket_list_rows:
-        prio = (tfprio or tprio or "medium").lower()
-        if prio not in valid_priorities:
-            prio = "medium"
+        prio   = (tfprio or tprio or "medium").lower()
         status = (tstatus or "open").lower()
-        if status not in valid_statuses:
-            status = "open"
-        latest_tickets.append(
-            {
-                "id": tnum or str(tid)[:8],
-                "title": ttitle or "Untitled",
-                "asset": asset_name or "—",
-                "priority": prio,
-                "status": status,
-                "assignedTo": assignee_name or "—",
-            }
-        )
-
-    # ── footerStats ──────────────────────────────────────────────────────────
-    avg_resolution_days = round(float(avg_resolution), 1) if avg_resolution else 0.0
-
-    footer_stats = {
-        "avgHealthScore": fleet_health,
-        "ticketsResolved": int(tickets_resolved),
-        "avgResolutionDays": avg_resolution_days,
-    }
+        latest_tickets.append({
+            "id":         tnum or str(tid)[:8],
+            "title":      ttitle or "Untitled",
+            "asset":      asset_name or "—",
+            "priority":   prio   if prio   in valid_priorities else "medium",
+            "status":     status if status in valid_statuses   else "open",
+            "assignedTo": assignee_name or "—",
+        })
 
     # ── aiInsights (rule-based, derived from the numbers) ─────────────────────
     ai_insights = []
@@ -390,10 +366,17 @@ def _build_admin_summary(db: Session):
         )
     ai_insights = ai_insights[:4]
 
-    # ── aiSummary (LLM if available, else a real KPI-derived fallback) ────────
-    # Always returns a real, data-grounded string — never null and never blocks.
-    # We skip the synchronous LLM call here because it causes the dashboard to hang for 5-10s on load.
-    ai_summary: str | None = None
+    # ── aiSummary (cached LLM, never blocks) ──────────────────────────────────
+    # The LLM (run_warehouse_agent → Groq, 3–10s + ~50 DB queries) is NEVER
+    # called inline here. Instead we serve the most recent LLM summary from a
+    # short-TTL in-memory cache and kick off a background refresh when it goes
+    # stale. Until the first refresh lands (or if the LLM is unavailable) we fall
+    # back to the instant, data-grounded KPI summary below — so the dashboard is
+    # always sub-second and the AI text appears automatically once ready.
+    from app.services.ai_summary_cache import get_cached_summary, maybe_refresh
+
+    maybe_refresh()  # non-blocking; no-op if fresh or already running
+    ai_summary = get_cached_summary()
 
     if not ai_summary:
         ai_summary = (

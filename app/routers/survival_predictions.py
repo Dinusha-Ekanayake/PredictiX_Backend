@@ -15,33 +15,10 @@ from app.ai.services import survival_service
 from app.schemas.survival import (
     AssetSurvivalResponse,
     ComponentSurvivalResponse,
-    FleetSurvivalSummary,
 )
 
 
 router = APIRouter(prefix="/survival", tags=["FRSO Survival"])
-
-
-# NOTE: this static route must be declared BEFORE the /{asset_id} routes below,
-# otherwise "warehouse" would be captured as an asset_id.
-@router.get("/warehouse/summary", response_model=FleetSurvivalSummary)
-def get_fleet_survival_summary(
-    max_assets:   int = Query(12,  ge=1,  le=50),
-    horizon_days: int = Query(180, ge=14, le=720),
-    db: Session = Depends(get_db),
-):
-    """Fleet-level survival summary over the warehouse's most at-risk assets:
-    per-component RUL stats + a soonest-failing watchlist."""
-    try:
-        return survival_service.fleet_survival_summary(
-            db=db,
-            max_assets=max_assets,
-            horizon_days=horizon_days,
-        )
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=503, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Fleet survival summary failed: {e}")
 
 
 @router.get("/{asset_id}/{component}", response_model=ComponentSurvivalResponse)
