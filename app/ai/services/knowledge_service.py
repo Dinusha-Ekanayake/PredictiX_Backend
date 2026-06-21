@@ -1,10 +1,10 @@
 from functools import lru_cache
-from sentence_transformers import SentenceTransformer
 from app.db.supabase_client import supabase
 
 
 @lru_cache(maxsize=1)
-def _get_model() -> SentenceTransformer:
+def _get_model():
+    from sentence_transformers import SentenceTransformer  # noqa: PLC0415
     return SentenceTransformer('all-MiniLM-L6-v2')
 
 
