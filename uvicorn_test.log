@@ -1,0 +1,8 @@
+INFO:     Started server process [27372]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+Asset summary model loaded locally from: Dinusha-Ekanayake/predictix-asset_summarization_model
+Asset summary model warmed up successfully
+INFO:     127.0.0.1:7110 - "GET /openapi.json HTTP/1.1" 200 OK
+INFO:     127.0.0.1:14124 - "GET /warehouse-dashboard/survival HTTP/1.1" 200 OK
