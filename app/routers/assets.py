@@ -7,11 +7,6 @@ from app.deps import get_db
 from app.models import Asset
 from app.schemas.asset import AssetCreate, AssetOut, AssetUpdate
 
-from uuid import UUID 
-from app.deps import get_db, get_current_user
-from app.models import Asset, Profile
-from app.services.service_reminder_service import send_manual_reminder
-
 router = APIRouter(prefix="/assets", tags=["Assets"])
 
 
@@ -304,37 +299,3 @@ def delete_asset(asset_id: str, db: Session = Depends(get_db)):
     db.delete(obj)
     db.commit()
     return {"message": "Asset deleted successfully"}
-
-
-@router.post(
-    "/{asset_id}/send-service-reminder",
-    summary="Send a service reminder email to the assigned user (admin only)",
-)
-def send_service_reminder_endpoint(
-    asset_id: str,
-    db: Session = Depends(get_db),
-    current_user: Profile = Depends(get_current_user),
-):
-    """Admin-triggered manual send. Re-uses the same code path as the daily sweep."""
-    if getattr(current_user, "role", None) != "admin":
-        raise HTTPException(status_code=403, detail="Admins only")
-
-    try:
-        asset_uuid = UUID(asset_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid asset id")
-
-    try:
-        result = send_manual_reminder(
-            db, asset_id=asset_uuid, sent_by=current_user.id
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-    if not result["sent"]:
-        raise HTTPException(
-            status_code=502,
-            detail=result.get("error") or "Email send failed",
-        )
-
-    return result

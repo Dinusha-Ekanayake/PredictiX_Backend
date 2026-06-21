@@ -255,14 +255,6 @@ PredictiX_backend/
 | GET/POST | `/report-sources` | Report data lineage |
 | GET | `/warehouse-dashboard/summary` | Aggregated KPIs (health, tickets, costs, status breakdown) |
 
-### FRSO Survival (Weibull AFT)
-
-| Method | Path | Description |
-|---|---|---|
-| GET | `/survival/{asset_id}/{component}` | Survival curve + RUL for one component of one asset |
-| GET | `/survival/{asset_id}` | Survival for all 5 components of one asset |
-| GET | `/survival/warehouse/summary` | Fleet-level summary: per-component RUL stats + soonest-failing watchlist |
-
 ### Health
 
 | Method | Path | Description |
