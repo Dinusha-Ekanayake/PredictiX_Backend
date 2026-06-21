@@ -350,6 +350,57 @@ class ChatRequest(BaseModel):
     asset_id: str | None = None
 
 
+@warehouse_dashboard_router.get("/survival")
+def get_survival_analysis(db: Session = Depends(get_db)):
+    """
+    FRSO Component Survival Analysis (Weibull AFT) for the dashboard.
+
+    Pure model inference over the fleet's lowest-health assets — NO LLM call,
+    so it is fast and never rate-limited. Returns per-component RUL summary plus
+    a soonest-failing watchlist for live display on the Warehouse page.
+    """
+    try:
+        # Lowest-health assets (latest prediction per asset, deduped) — the same
+        # cohort the PDF report scores, so the page and PDF agree.
+        critical_rows = db.execute(text("""
+            SELECT * FROM (
+                SELECT DISTINCT ON (p.asset_id)
+                    a.asset_code, a.asset_name, a.vehicle_type, p.health_score
+                FROM asset_failure_predictions p
+                JOIN assets a ON a.id = p.asset_id
+                ORDER BY p.asset_id, p.created_at DESC
+            ) latest
+            WHERE latest.health_score < 60
+            ORDER BY latest.health_score ASC
+            LIMIT 12
+        """)).fetchall()
+
+        critical_assets = [
+            {
+                "code": r[0],
+                "name": r[1] or "Vehicle",
+                "type": str(r[2]).replace("_", " ").title() if r[2] else "Unknown",
+                "health_score": int(r[3]) if r[3] is not None else None,
+            }
+            for r in critical_rows
+        ]
+
+        from app.agents.report_agents import _build_survival_summary
+        summary = _build_survival_summary(critical_assets)
+
+        return {
+            "status": "success",
+            "survival_summary": summary,
+            "critical_assets": critical_assets,
+            # ISO-8601 UTC timestamp so the dashboard can show when this was scored.
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Survival analysis failed: {str(e)}")
+
+
 @warehouse_dashboard_router.get("/generate-report")
 def generate_warehouse_report(db: Session = Depends(get_db)):
     """

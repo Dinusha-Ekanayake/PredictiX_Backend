@@ -71,6 +71,38 @@ def _get_llm(temperature: float = 0.3) -> ChatGroq:
     )
 
 
+def _build_survival_summary(critical_assets: list, max_assets: int = 12) -> dict | None:
+    """FRSO survival aggregation over the report's critical assets.
+
+    Runs the per-component Weibull AFT models on each critical asset and
+    aggregates into (a) a per-component RUL summary and (b) a soonest-failing
+    watchlist. Returns None on any failure so report generation never blocks.
+
+    Uses its OWN DB session: build_warehouse_context's session may already be in
+    an aborted-transaction state from an earlier swallowed query error, which
+    would otherwise fail every query here.
+    """
+    db = None
+    try:
+        from app.ai.services import survival_service
+        from app.db.session import SessionLocal
+
+        codes = [a.get("code") for a in (critical_assets or [])[:max_assets] if a.get("code")]
+        if not codes:
+            return None
+
+        db = SessionLocal()
+        result = survival_service.fleet_survival_summary(
+            db, max_assets=max_assets, horizon_days=180, asset_codes=codes
+        )
+        return result if result and result.get("assets_analyzed") else None
+    except Exception:
+        return None
+    finally:
+        if db is not None:
+            db.close()
+
+
 # ═══════════════════════════════════════════════════════════════
 # FULL DATA INJECTION — PostgreSQL → LLM Context (RAG Layer)
 # ═══════════════════════════════════════════════════════════════
