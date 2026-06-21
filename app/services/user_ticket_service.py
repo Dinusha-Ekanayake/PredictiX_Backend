@@ -464,3 +464,19 @@ def add_user_comment(
     db.commit()
     db.refresh(obj)
     return obj
+
+
+def add_user_attachment(
+    db: Session, *, ticket_id: UUID, user_id: UUID, file_path: str, mime_type: Optional[str] = None, original_filename: Optional[str] = None
+) -> TicketAttachment:
+    obj = TicketAttachment(
+        ticket_id=ticket_id,
+        file_path=file_path,
+        mime_type=mime_type,
+        original_filename=original_filename,
+        uploaded_by=user_id,
+    )
+    db.add(obj)
+    db.commit()
+    db.refresh(obj)
+    return obj
