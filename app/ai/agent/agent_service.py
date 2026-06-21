@@ -23,13 +23,34 @@ You have access to tools that read live data (tickets, assets, FAQs, knowledge b
 
 Guidelines:
 - Call tools whenever the user's question needs real data. Don't guess.
-- Prefer specific tools (list_tickets, get_asset) over generic ones (search_knowledge) when the question is concrete.
-- For "how do I..." questions, try list_faqs or search_knowledge first.
-- Non-admin users only see their own tickets — don't promise data you can't return.
-- When you receive tool results, summarise them in plain language. Don't dump raw JSON at the user.
-- If a tool returns an error, explain it briefly and suggest a next step.
-- Keep replies concise (2-5 sentences) unless the user asks for detail.
-- Never invent ticket IDs, asset codes, or numeric values. If you don't have data, say so.
+═══════════════════════════════════════════════════════════════════
+RESPONSE FORMAT & CONVERSATIONAL RULES:
+═══════════════════════════════════════════════════════════════════
+- After tool results, summarise in plain English (2-5 sentences).
+- Quote exact numbers from the tool output. Do not round unless asked.
+- Non-admin users only see their own tickets. If scope="own", say so.
+- Never dump raw JSON. Never expose UUIDs unless the user asked for them.
+- If a tool returned an "error" field, briefly explain and stop.
+- If you cannot comprehend the user's intent or receive an unrecognized command, respond with: "I’m still learning and didn't quite catch that! Could you rephrase your question, or try typing 'menu' to see all the ways I can help?"
+- If you have too much text or too many options to present, do not dump it all at once. Instead, break it down and ask: "That was a lot of info at once! Let's break this down. Do you want to try [Option A] or [Option B] first?"
+
+═══════════════════════════════════════════════════════════════════
+EMOJI FORMATTING (use sparingly and professionally):
+═══════════════════════════════════════════════════════════════════
+- 📊 for statistics/summary headings
+- ✅ for positive status (resolved, active, healthy, completed)
+- ❌ for negative status (failed, critical, cancelled)
+- 🎫 for ticket references
+- ⚙️ for asset/equipment references
+- 👥 for user/team references
+- 🏭 for warehouse references
+- 🔴 for high priority or critical alerts
+- 🟡 for medium priority or warnings
+- 🟢 for low priority or healthy status
+- 🔧 for maintenance references
+- ⚠️ for important warnings
+- ℹ️ for informational notes
+Use 1-2 emojis per line max. Keep it clean and professional.
 """
 
 
@@ -88,8 +109,18 @@ def run_agent(
             )
         except Exception as e:
             log.exception("Groq call failed (iteration %d)", iteration)
+            err_str = str(e).lower()
+            
+            # Default Technical Error Message
+            friendly = "Oops! My apologies, but it looks like I’m having a little trouble connecting to our systems right now. Please try again in a few minutes, or contact our support team at support@company.com."
+            
+            if "rate limit reached" in err_str or "rate_limit_exceeded" in err_str or "429" in err_str:
+                friendly = "I've reached my daily token limit! 🛑 Please try again in a little while when the tokens reset."
+            elif "timeout" in err_str or "timed out" in err_str:
+                friendly = "Oops! My apologies, but the request timed out. Please try again in a few minutes."
+
             return {
-                "answer": f"Sorry — the AI service returned an error: {e}",
+                "answer": friendly,
                 "tool_trace": tool_trace,
                 "iterations": iteration,
             }
@@ -157,10 +188,7 @@ def run_agent(
 
     # Hit the iteration cap without a final answer
     return {
-        "answer": (
-            "I gathered some information but couldn't finalise a response within the allowed steps. "
-            "Try asking a more specific question."
-        ),
+        "answer": "It looks like I might not be the best bot for this specific request. Let me connect you with a live human support agent who can help you out.",
         "tool_trace": tool_trace,
         "iterations": MAX_TOOL_ITERATIONS,
     }
