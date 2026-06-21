@@ -15,7 +15,7 @@ import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func
+from sqlalchemy import String, cast, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -155,7 +155,7 @@ def _user_to_item(user: Profile, db: Session) -> UserItemOut:
             warehouse_names[user.warehouse_id] = name
     assigned = (
         db.query(func.count(Asset.id))
-        .filter(Asset.assigned_to == str(user.id), Asset.status == "active")
+        .filter(Asset.assigned_to == str(user.id), cast(Asset.status, String) == "active")
         .scalar()
         or 0
     )
@@ -171,7 +171,7 @@ def list_users(db: Session = Depends(get_db)):
     asset_counts = {
         str(assigned_to): count
         for assigned_to, count in db.query(Asset.assigned_to, func.count(Asset.id))
-        .filter(Asset.assigned_to.isnot(None), Asset.status == "active")
+        .filter(Asset.assigned_to.isnot(None), cast(Asset.status, String) == "active")
         .group_by(Asset.assigned_to)
         .all()
     }
@@ -332,7 +332,7 @@ def delete_user(user_id: str, db: Session = Depends(get_db)):
 def list_user_assets(user_id: str, db: Session = Depends(get_db)):
     assets = (
         db.query(Asset)
-        .filter(Asset.assigned_to == user_id, Asset.status == "active")
+        .filter(Asset.assigned_to == user_id, cast(Asset.status, String) == "active")
         .all()
     )
 
