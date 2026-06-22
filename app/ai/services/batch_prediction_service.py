@@ -18,7 +18,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import String, cast, text
 from sqlalchemy.orm import Session
 
 from app.models import Asset, PdmBatchPrediction
@@ -537,7 +537,7 @@ def run_batch_for_all_assets(
 
     assets = (
         db.query(Asset)
-        .filter(Asset.status == "active")
+        .filter(cast(Asset.status, String) == "active")
         .order_by(Asset.asset_code)
         .all()
     )
