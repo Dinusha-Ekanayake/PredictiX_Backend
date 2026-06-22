@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import String, cast
 from sqlalchemy.orm import Session
 from uuid import UUID
 
@@ -23,7 +24,7 @@ def list_user_notifications(
     q = db.query(Notification).filter(Notification.user_id == current_user.id)
     
     if status:
-        q = q.filter(Notification.status == status)
+        q = q.filter(cast(Notification.status, String) == status)
     
     return q.order_by(Notification.created_at.desc()).all()
 
@@ -38,7 +39,7 @@ def get_unread_notifications(
         db.query(Notification)
         .filter(
             (Notification.user_id == current_user.id)
-            & (Notification.status == "unread")
+            & (cast(Notification.status, String) == "unread")
         )
         .order_by(Notification.created_at.desc())
         .all()
@@ -101,7 +102,7 @@ def mark_all_notifications_read(
     """Mark all notifications as read for current user"""
     db.query(Notification).filter(
         (Notification.user_id == current_user.id)
-        & (Notification.status == "unread")
+        & (cast(Notification.status, String) == "unread")
     ).update({"status": "read"}, synchronize_session=False)
     
     db.commit()
