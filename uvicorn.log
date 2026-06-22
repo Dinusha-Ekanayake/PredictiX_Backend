@@ -1,0 +1,520 @@
+INFO:     Started server process [15676]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+Asset summary model loaded locally from: Dinusha-Ekanayake/predictix-asset_summarization_model
+Asset summary model warmed up successfully
+INFO:     127.0.0.1:5531 - "GET /docs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:5532 - "POST /auth/login HTTP/1.1" 200 OK
+INFO:     127.0.0.1:5534 - "GET /profiles/me HTTP/1.1" 200 OK
+[NOTIFICATION] Processing profile update notification for: Nuwan Gunasekara
+[NOTIFICATION] Notifying 6 admin(s) of profile update from database
+[NOTIFICATION] Email sent successfully to 6 recipient(s) via SMTP
+[NOTIFICATION] Profile update notification processed for Nuwan Gunasekara
+INFO:     127.0.0.1:5535 - "PUT /profiles/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:7186 - "GET /profiles/me HTTP/1.1" 200 OK
+INFO:     ::1:0 - "GET /notifications HTTP/1.1" 307 Temporary Redirect
+DEBUG: list_user_notifications called with status=None
+INFO:     ::1:0 - "GET /notifications/ HTTP/1.1" 200 OK
+INFO:     ::1:0 - "GET /notifications HTTP/1.1" 307 Temporary Redirect
+INFO:     ::1:0 - "GET /profiles/me HTTP/1.1" 200 OK
+INFO:     ::1:0 - "GET /profiles/me HTTP/1.1" 200 OK
+DEBUG: list_user_notifications called with status=None
+INFO:     ::1:0 - "GET /notifications/ HTTP/1.1" 200 OK
+INFO:     ::1:0 - "GET /profiles/me HTTP/1.1" 200 OK
+INFO:     ::1:0 - "GET /profiles/me HTTP/1.1" 200 OK
+INFO:     ::1:0 - "GET /profiles/me HTTP/1.1" 200 OK
+INFO:     ::1:0 - "GET /profiles/me HTTP/1.1" 200 OK
+Service reminder sweep failed
+Traceback (most recent call last):
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 1311, in _checkout
+    raise exc.InvalidatePoolError()
+sqlalchemy.exc.InvalidatePoolError: ()
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 143, in __init__
+    self._dbapi_connection = engine.raw_connection()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 3309, in raw_connection
+    return self.pool.connect()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 447, in connect
+    return _ConnectionFairy._checkout(self)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 1345, in _checkout
+    with util.safe_reraise():
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\util\langhelpers.py", line 224, in __exit__
+    raise exc_value.with_traceback(exc_tb)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 1342, in _checkout
+    fairy._connection_record.get_connection()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 836, in get_connection
+    self.__connect()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 899, in __connect
+    with util.safe_reraise():
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\util\langhelpers.py", line 224, in __exit__
+    raise exc_value.with_traceback(exc_tb)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 895, in __connect
+    self.dbapi_connection = connection = pool._invoke_creator(self)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\create.py", line 661, in connect
+    return dialect.connect(*cargs, **cparams)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\default.py", line 630, in connect
+    return self.loaded_dbapi.connect(*cargs, **cparams)  # type: ignore[no-any-return]  # NOQA: E501
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\psycopg\connection.py", line 100, in connect
+    attempts = conninfo_attempts(params)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\psycopg\_conninfo_attempts.py", line 55, in conninfo_attempts
+    raise last_exc
+psycopg.OperationalError: failed to resolve host 'aws-1-ap-southeast-2.pooler.supabase.com': [Errno 11001] getaddrinfo failed
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "D:\Project\sharada-user-section-backend\app\main.py", line 149, in _run_service_reminder_job
+    run_auto_reminder_sweep(db)
+  File "D:\Project\sharada-user-section-backend\app\services\service_reminder_service.py", line 168, in run_auto_reminder_sweep
+    .all()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\query.py", line 2704, in all
+    return self._iter().all()  # type: ignore
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\query.py", line 2857, in _iter
+    result: Union[ScalarResult[_T], Result[_T]] = self.session.execute(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\session.py", line 2351, in execute
+    return self._execute_internal(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\session.py", line 2239, in _execute_internal
+    conn = self._connection_for_bind(bind)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\session.py", line 2108, in _connection_for_bind
+    return trans._connection_for_bind(engine, execution_options)
+  File "<string>", line 2, in _connection_for_bind
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\state_changes.py", line 137, in _go
+    ret_value = fn(self, *arg, **kw)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\session.py", line 1187, in _connection_for_bind
+    conn = bind.connect()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 3285, in connect
+    return self._connection_cls(self)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 145, in __init__
+    Connection._handle_dbapi_exception_noconnection(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 2448, in _handle_dbapi_exception_noconnection
+    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 143, in __init__
+    self._dbapi_connection = engine.raw_connection()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 3309, in raw_connection
+    return self.pool.connect()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 447, in connect
+    return _ConnectionFairy._checkout(self)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 1345, in _checkout
+    with util.safe_reraise():
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\util\langhelpers.py", line 224, in __exit__
+    raise exc_value.with_traceback(exc_tb)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 1342, in _checkout
+    fairy._connection_record.get_connection()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 836, in get_connection
+    self.__connect()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 899, in __connect
+    with util.safe_reraise():
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\util\langhelpers.py", line 224, in __exit__
+    raise exc_value.with_traceback(exc_tb)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 895, in __connect
+    self.dbapi_connection = connection = pool._invoke_creator(self)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\create.py", line 661, in connect
+    return dialect.connect(*cargs, **cparams)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\default.py", line 630, in connect
+    return self.loaded_dbapi.connect(*cargs, **cparams)  # type: ignore[no-any-return]  # NOQA: E501
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\psycopg\connection.py", line 100, in connect
+    attempts = conninfo_attempts(params)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\psycopg\_conninfo_attempts.py", line 55, in conninfo_attempts
+    raise last_exc
+sqlalchemy.exc.OperationalError: (psycopg.OperationalError) failed to resolve host 'aws-1-ap-southeast-2.pooler.supabase.com': [Errno 11001] getaddrinfo failed
+(Background on this error at: https://sqlalche.me/e/20/e3q8)
+Run time of job "PDM hourly batch prediction (trigger: interval[1:00:00], next run at: 2026-06-20 16:36:42 +0530)" was missed by 0:46:39.048063
+Batch prediction run failed
+Traceback (most recent call last):
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 143, in __init__
+    self._dbapi_connection = engine.raw_connection()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 3309, in raw_connection
+    return self.pool.connect()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 447, in connect
+    return _ConnectionFairy._checkout(self)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 1264, in _checkout
+    fairy = _ConnectionRecord.checkout(pool)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 716, in checkout
+    with util.safe_reraise():
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\util\langhelpers.py", line 224, in __exit__
+    raise exc_value.with_traceback(exc_tb)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 714, in checkout
+    dbapi_connection = rec.get_connection()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 865, in get_connection
+    self.__connect()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 899, in __connect
+    with util.safe_reraise():
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\util\langhelpers.py", line 224, in __exit__
+    raise exc_value.with_traceback(exc_tb)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 895, in __connect
+    self.dbapi_connection = connection = pool._invoke_creator(self)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\create.py", line 661, in connect
+    return dialect.connect(*cargs, **cparams)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\default.py", line 630, in connect
+    return self.loaded_dbapi.connect(*cargs, **cparams)  # type: ignore[no-any-return]  # NOQA: E501
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\psycopg\connection.py", line 100, in connect
+    attempts = conninfo_attempts(params)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\psycopg\_conninfo_attempts.py", line 55, in conninfo_attempts
+    raise last_exc
+psycopg.OperationalError: failed to resolve host 'aws-1-ap-southeast-2.pooler.supabase.com': [Errno 11001] getaddrinfo failed
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "D:\Project\sharada-user-section-backend\app\main.py", line 127, in _run_scheduled_batch
+    run_batch_for_all_assets(
+  File "D:\Project\sharada-user-section-backend\app\ai\services\batch_prediction_service.py", line 542, in run_batch_for_all_assets
+    .all()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\query.py", line 2704, in all
+    return self._iter().all()  # type: ignore
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\query.py", line 2857, in _iter
+    result: Union[ScalarResult[_T], Result[_T]] = self.session.execute(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\session.py", line 2351, in execute
+    return self._execute_internal(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\session.py", line 2239, in _execute_internal
+    conn = self._connection_for_bind(bind)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\session.py", line 2108, in _connection_for_bind
+    return trans._connection_for_bind(engine, execution_options)
+  File "<string>", line 2, in _connection_for_bind
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\state_changes.py", line 137, in _go
+    ret_value = fn(self, *arg, **kw)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\session.py", line 1187, in _connection_for_bind
+    conn = bind.connect()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 3285, in connect
+    return self._connection_cls(self)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 145, in __init__
+    Connection._handle_dbapi_exception_noconnection(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 2448, in _handle_dbapi_exception_noconnection
+    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 143, in __init__
+    self._dbapi_connection = engine.raw_connection()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 3309, in raw_connection
+    return self.pool.connect()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 447, in connect
+    return _ConnectionFairy._checkout(self)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 1264, in _checkout
+    fairy = _ConnectionRecord.checkout(pool)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 716, in checkout
+    with util.safe_reraise():
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\util\langhelpers.py", line 224, in __exit__
+    raise exc_value.with_traceback(exc_tb)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 714, in checkout
+    dbapi_connection = rec.get_connection()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 865, in get_connection
+    self.__connect()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 899, in __connect
+    with util.safe_reraise():
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\util\langhelpers.py", line 224, in __exit__
+    raise exc_value.with_traceback(exc_tb)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 895, in __connect
+    self.dbapi_connection = connection = pool._invoke_creator(self)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\create.py", line 661, in connect
+    return dialect.connect(*cargs, **cparams)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\default.py", line 630, in connect
+    return self.loaded_dbapi.connect(*cargs, **cparams)  # type: ignore[no-any-return]  # NOQA: E501
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\psycopg\connection.py", line 100, in connect
+    attempts = conninfo_attempts(params)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\psycopg\_conninfo_attempts.py", line 55, in conninfo_attempts
+    raise last_exc
+sqlalchemy.exc.OperationalError: (psycopg.OperationalError) failed to resolve host 'aws-1-ap-southeast-2.pooler.supabase.com': [Errno 11001] getaddrinfo failed
+(Background on this error at: https://sqlalche.me/e/20/e3q8)
+INFO:     127.0.0.1:9439 - "HEAD /docs HTTP/1.1" 200 OK
+INFO:     ::1:0 - "GET /notifications HTTP/1.1" 307 Temporary Redirect
+DEBUG: list_user_notifications called with status=None
+INFO:     ::1:0 - "GET /notifications/ HTTP/1.1" 200 OK
+INFO:     ::1:0 - "GET /notifications HTTP/1.1" 307 Temporary Redirect
+INFO:     ::1:0 - "GET /profiles/me HTTP/1.1" 200 OK
+DEBUG: list_user_notifications called with status=None
+INFO:     ::1:0 - "GET /profiles/me HTTP/1.1" 200 OK
+INFO:     ::1:0 - "GET /notifications/ HTTP/1.1" 200 OK
+INFO:     ::1:0 - "GET /profiles/me HTTP/1.1" 200 OK
+INFO:     ::1:0 - "GET /profiles/me HTTP/1.1" 200 OK
+INFO:     ::1:0 - "GET /warehouses HTTP/1.1" 307 Temporary Redirect
+INFO:     ::1:0 - "GET /warehouses/ HTTP/1.1" 200 OK
+Run time of job "PDM hourly batch prediction (trigger: interval[1:00:00], next run at: 2026-06-20 21:36:42 +0530)" was missed by 0:48:55.009739
+Batch prediction run failed
+Traceback (most recent call last):
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 1967, in _exec_single_context
+    self.dialect.do_execute(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\default.py", line 952, in do_execute
+    cursor.execute(statement, parameters)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\psycopg\cursor.py", line 117, in execute
+    raise ex.with_traceback(None)
+psycopg.errors.UndefinedFunction: operator does not exist: asset_status = character varying
+LINE 3: WHERE assets.status = $1::VARCHAR ORDER BY assets.asset_code
+                            ^
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "D:\Project\sharada-user-section-backend\app\main.py", line 127, in _run_scheduled_batch
+    run_batch_for_all_assets(
+  File "D:\Project\sharada-user-section-backend\app\ai\services\batch_prediction_service.py", line 542, in run_batch_for_all_assets
+    .all()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\query.py", line 2704, in all
+    return self._iter().all()  # type: ignore
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\query.py", line 2857, in _iter
+    result: Union[ScalarResult[_T], Result[_T]] = self.session.execute(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\session.py", line 2351, in execute
+    return self._execute_internal(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\session.py", line 2249, in _execute_internal
+    result: Result[Any] = compile_state_cls.orm_execute_statement(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\context.py", line 306, in orm_execute_statement
+    result = conn.execute(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 1419, in execute
+    return meth(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\sql\elements.py", line 527, in _execute_on_connection
+    return connection._execute_clauseelement(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 1641, in _execute_clauseelement
+    ret = self._execute_context(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 1846, in _execute_context
+    return self._exec_single_context(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 1986, in _exec_single_context
+    self._handle_dbapi_exception(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 2363, in _handle_dbapi_exception
+    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 1967, in _exec_single_context
+    self.dialect.do_execute(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\default.py", line 952, in do_execute
+    cursor.execute(statement, parameters)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\psycopg\cursor.py", line 117, in execute
+    raise ex.with_traceback(None)
+sqlalchemy.exc.ProgrammingError: (psycopg.errors.UndefinedFunction) operator does not exist: asset_status = character varying
+LINE 3: WHERE assets.status = $1::VARCHAR ORDER BY assets.asset_code
+                            ^
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
+[SQL: SELECT assets.id AS assets_id, assets.asset_code AS assets_asset_code, assets.warehouse_id AS assets_warehouse_id, assets.department_id AS assets_department_id, assets.asset_name AS assets_asset_name, assets.asset_type AS assets_asset_type, assets.category AS assets_category, assets.vehicle_type AS assets_vehicle_type, assets.make AS assets_make, assets.model AS assets_model, assets.manufacture_year AS assets_manufacture_year, assets.registration_number AS assets_registration_number, assets.vin AS assets_vin, assets.status AS assets_status, assets.health_band AS assets_health_band, assets.criticality_score AS assets_criticality_score, assets.purchase_date AS assets_purchase_date, assets.warranty_expiry_date AS assets_warranty_expiry_date, assets.assigned_to AS assets_assigned_to, assets.current_mileage AS assets_current_mileage, assets.last_service_date AS assets_last_service_date, assets.next_service_date AS assets_next_service_date, assets.description AS assets_description, assets.fuel_type AS assets_fuel_type, assets.transmission AS assets_transmission, assets.make_model AS assets_make_model, assets.maintenance_priority AS assets_maintenance_priority, assets.service_provider_type AS assets_service_provider_type, assets.metadata AS assets_metadata, assets.created_by AS assets_created_by, assets.vehicle_role AS assets_vehicle_role, assets.payload_capacity_kg AS assets_payload_capacity_kg, assets.vehicle_age_years AS assets_vehicle_age_years, assets.lifetime_service_count AS assets_lifetime_service_count, assets.lifetime_breakdown_count AS assets_lifetime_breakdown_count, assets.created_at AS assets_created_at, assets.updated_at AS assets_updated_at 
+FROM assets 
+WHERE assets.status = %(status_1)s::VARCHAR ORDER BY assets.asset_code]
+[parameters: {'status_1': 'active'}]
+(Background on this error at: https://sqlalche.me/e/20/f405)
+Batch prediction run failed
+Traceback (most recent call last):
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 1311, in _checkout
+    raise exc.InvalidatePoolError()
+sqlalchemy.exc.InvalidatePoolError: ()
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 143, in __init__
+    self._dbapi_connection = engine.raw_connection()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 3309, in raw_connection
+    return self.pool.connect()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 447, in connect
+    return _ConnectionFairy._checkout(self)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 1345, in _checkout
+    with util.safe_reraise():
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\util\langhelpers.py", line 224, in __exit__
+    raise exc_value.with_traceback(exc_tb)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 1342, in _checkout
+    fairy._connection_record.get_connection()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 836, in get_connection
+    self.__connect()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 899, in __connect
+    with util.safe_reraise():
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\util\langhelpers.py", line 224, in __exit__
+    raise exc_value.with_traceback(exc_tb)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 895, in __connect
+    self.dbapi_connection = connection = pool._invoke_creator(self)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\create.py", line 661, in connect
+    return dialect.connect(*cargs, **cparams)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\default.py", line 630, in connect
+    return self.loaded_dbapi.connect(*cargs, **cparams)  # type: ignore[no-any-return]  # NOQA: E501
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\psycopg\connection.py", line 100, in connect
+    attempts = conninfo_attempts(params)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\psycopg\_conninfo_attempts.py", line 55, in conninfo_attempts
+    raise last_exc
+psycopg.OperationalError: failed to resolve host 'aws-1-ap-southeast-2.pooler.supabase.com': [Errno 11001] getaddrinfo failed
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "D:\Project\sharada-user-section-backend\app\main.py", line 127, in _run_scheduled_batch
+    run_batch_for_all_assets(
+  File "D:\Project\sharada-user-section-backend\app\ai\services\batch_prediction_service.py", line 542, in run_batch_for_all_assets
+    .all()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\query.py", line 2704, in all
+    return self._iter().all()  # type: ignore
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\query.py", line 2857, in _iter
+    result: Union[ScalarResult[_T], Result[_T]] = self.session.execute(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\session.py", line 2351, in execute
+    return self._execute_internal(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\session.py", line 2239, in _execute_internal
+    conn = self._connection_for_bind(bind)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\session.py", line 2108, in _connection_for_bind
+    return trans._connection_for_bind(engine, execution_options)
+  File "<string>", line 2, in _connection_for_bind
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\state_changes.py", line 137, in _go
+    ret_value = fn(self, *arg, **kw)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\session.py", line 1187, in _connection_for_bind
+    conn = bind.connect()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 3285, in connect
+    return self._connection_cls(self)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 145, in __init__
+    Connection._handle_dbapi_exception_noconnection(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 2448, in _handle_dbapi_exception_noconnection
+    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 143, in __init__
+    self._dbapi_connection = engine.raw_connection()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 3309, in raw_connection
+    return self.pool.connect()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 447, in connect
+    return _ConnectionFairy._checkout(self)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 1345, in _checkout
+    with util.safe_reraise():
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\util\langhelpers.py", line 224, in __exit__
+    raise exc_value.with_traceback(exc_tb)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 1342, in _checkout
+    fairy._connection_record.get_connection()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 836, in get_connection
+    self.__connect()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 899, in __connect
+    with util.safe_reraise():
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\util\langhelpers.py", line 224, in __exit__
+    raise exc_value.with_traceback(exc_tb)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\pool\base.py", line 895, in __connect
+    self.dbapi_connection = connection = pool._invoke_creator(self)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\create.py", line 661, in connect
+    return dialect.connect(*cargs, **cparams)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\default.py", line 630, in connect
+    return self.loaded_dbapi.connect(*cargs, **cparams)  # type: ignore[no-any-return]  # NOQA: E501
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\psycopg\connection.py", line 100, in connect
+    attempts = conninfo_attempts(params)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\psycopg\_conninfo_attempts.py", line 55, in conninfo_attempts
+    raise last_exc
+sqlalchemy.exc.OperationalError: (psycopg.OperationalError) failed to resolve host 'aws-1-ap-southeast-2.pooler.supabase.com': [Errno 11001] getaddrinfo failed
+(Background on this error at: https://sqlalche.me/e/20/e3q8)
+INFO:     ::1:0 - "GET /notifications HTTP/1.1" 307 Temporary Redirect
+DEBUG: list_user_notifications called with status=None
+INFO:     ::1:0 - "GET /profiles/me/stats HTTP/1.1" 200 OK
+INFO:     ::1:0 - "GET /notifications/ HTTP/1.1" 200 OK
+INFO:     ::1:0 - "GET /notifications HTTP/1.1" 307 Temporary Redirect
+INFO:     ::1:0 - "GET /profiles/me HTTP/1.1" 200 OK
+DEBUG: list_user_notifications called with status=None
+INFO:     ::1:0 - "GET /profiles/me/assets HTTP/1.1" 200 OK
+INFO:     ::1:0 - "GET /notifications/ HTTP/1.1" 200 OK
+INFO:     ::1:0 - "GET /profiles/me/stats HTTP/1.1" 200 OK
+INFO:     ::1:0 - "GET /profiles/me HTTP/1.1" 200 OK
+INFO:     ::1:0 - "GET /profiles/me/assets HTTP/1.1" 200 OK
+INFO:     ::1:0 - "GET /profiles/me HTTP/1.1" 200 OK
+INFO:     ::1:0 - "GET /profiles/me HTTP/1.1" 200 OK
+INFO:     ::1:0 - "GET /profiles/me/colleagues HTTP/1.1" 200 OK
+INFO:     ::1:0 - "GET /profiles/me/colleagues HTTP/1.1" 200 OK
+Run time of job "PDM hourly batch prediction (trigger: interval[1:00:00], next run at: 2026-06-21 15:36:42 +0530)" was missed by 0:43:19.112080
+Run time of job "Daily service reminder email sweep (trigger: cron[hour='9', minute='0'], next run at: 2026-06-21 09:00:00 +0530)" was missed by 6:20:01.195023
+Batch prediction run failed
+Traceback (most recent call last):
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 1967, in _exec_single_context
+    self.dialect.do_execute(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\default.py", line 952, in do_execute
+    cursor.execute(statement, parameters)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\psycopg\cursor.py", line 117, in execute
+    raise ex.with_traceback(None)
+psycopg.errors.UndefinedFunction: operator does not exist: asset_status = character varying
+LINE 3: WHERE assets.status = $1::VARCHAR ORDER BY assets.asset_code
+                            ^
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "D:\Project\sharada-user-section-backend\app\main.py", line 127, in _run_scheduled_batch
+    run_batch_for_all_assets(
+  File "D:\Project\sharada-user-section-backend\app\ai\services\batch_prediction_service.py", line 542, in run_batch_for_all_assets
+    .all()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\query.py", line 2704, in all
+    return self._iter().all()  # type: ignore
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\query.py", line 2857, in _iter
+    result: Union[ScalarResult[_T], Result[_T]] = self.session.execute(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\session.py", line 2351, in execute
+    return self._execute_internal(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\session.py", line 2249, in _execute_internal
+    result: Result[Any] = compile_state_cls.orm_execute_statement(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\context.py", line 306, in orm_execute_statement
+    result = conn.execute(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 1419, in execute
+    return meth(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\sql\elements.py", line 527, in _execute_on_connection
+    return connection._execute_clauseelement(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 1641, in _execute_clauseelement
+    ret = self._execute_context(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 1846, in _execute_context
+    return self._exec_single_context(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 1986, in _exec_single_context
+    self._handle_dbapi_exception(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 2363, in _handle_dbapi_exception
+    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 1967, in _exec_single_context
+    self.dialect.do_execute(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\default.py", line 952, in do_execute
+    cursor.execute(statement, parameters)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\psycopg\cursor.py", line 117, in execute
+    raise ex.with_traceback(None)
+sqlalchemy.exc.ProgrammingError: (psycopg.errors.UndefinedFunction) operator does not exist: asset_status = character varying
+LINE 3: WHERE assets.status = $1::VARCHAR ORDER BY assets.asset_code
+                            ^
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
+[SQL: SELECT assets.id AS assets_id, assets.asset_code AS assets_asset_code, assets.warehouse_id AS assets_warehouse_id, assets.department_id AS assets_department_id, assets.asset_name AS assets_asset_name, assets.asset_type AS assets_asset_type, assets.category AS assets_category, assets.vehicle_type AS assets_vehicle_type, assets.make AS assets_make, assets.model AS assets_model, assets.manufacture_year AS assets_manufacture_year, assets.registration_number AS assets_registration_number, assets.vin AS assets_vin, assets.status AS assets_status, assets.health_band AS assets_health_band, assets.criticality_score AS assets_criticality_score, assets.purchase_date AS assets_purchase_date, assets.warranty_expiry_date AS assets_warranty_expiry_date, assets.assigned_to AS assets_assigned_to, assets.current_mileage AS assets_current_mileage, assets.last_service_date AS assets_last_service_date, assets.next_service_date AS assets_next_service_date, assets.description AS assets_description, assets.fuel_type AS assets_fuel_type, assets.transmission AS assets_transmission, assets.make_model AS assets_make_model, assets.maintenance_priority AS assets_maintenance_priority, assets.service_provider_type AS assets_service_provider_type, assets.metadata AS assets_metadata, assets.created_by AS assets_created_by, assets.vehicle_role AS assets_vehicle_role, assets.payload_capacity_kg AS assets_payload_capacity_kg, assets.vehicle_age_years AS assets_vehicle_age_years, assets.lifetime_service_count AS assets_lifetime_service_count, assets.lifetime_breakdown_count AS assets_lifetime_breakdown_count, assets.created_at AS assets_created_at, assets.updated_at AS assets_updated_at 
+FROM assets 
+WHERE assets.status = %(status_1)s::VARCHAR ORDER BY assets.asset_code]
+[parameters: {'status_1': 'active'}]
+(Background on this error at: https://sqlalche.me/e/20/f405)
+Run time of job "PDM hourly batch prediction (trigger: interval[1:00:00], next run at: 2026-06-21 17:36:42 +0530)" was missed by 0:24:19.724043
+Batch prediction run failed
+Traceback (most recent call last):
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 1967, in _exec_single_context
+    self.dialect.do_execute(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\default.py", line 952, in do_execute
+    cursor.execute(statement, parameters)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\psycopg\cursor.py", line 117, in execute
+    raise ex.with_traceback(None)
+psycopg.errors.UndefinedFunction: operator does not exist: asset_status = character varying
+LINE 3: WHERE assets.status = $1::VARCHAR ORDER BY assets.asset_code
+                            ^
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "D:\Project\sharada-user-section-backend\app\main.py", line 127, in _run_scheduled_batch
+    clf_model=clf_model,
+  File "D:\Project\sharada-user-section-backend\app\ai\services\batch_prediction_service.py", line 542, in run_batch_for_all_assets
+    .all()
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\query.py", line 2704, in all
+    return self._iter().all()  # type: ignore
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\query.py", line 2857, in _iter
+    result: Union[ScalarResult[_T], Result[_T]] = self.session.execute(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\session.py", line 2351, in execute
+    return self._execute_internal(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\session.py", line 2249, in _execute_internal
+    result: Result[Any] = compile_state_cls.orm_execute_statement(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\orm\context.py", line 306, in orm_execute_statement
+    result = conn.execute(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 1419, in execute
+    return meth(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\sql\elements.py", line 527, in _execute_on_connection
+    return connection._execute_clauseelement(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 1641, in _execute_clauseelement
+    ret = self._execute_context(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 1846, in _execute_context
+    return self._exec_single_context(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 1986, in _exec_single_context
+    self._handle_dbapi_exception(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 2363, in _handle_dbapi_exception
+    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\base.py", line 1967, in _exec_single_context
+    self.dialect.do_execute(
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\sqlalchemy\engine\default.py", line 952, in do_execute
+    cursor.execute(statement, parameters)
+  File "C:\Users\Lenovo LOQ\AppData\Local\Programs\Python\Python310\lib\site-packages\psycopg\cursor.py", line 117, in execute
+    raise ex.with_traceback(None)
+sqlalchemy.exc.ProgrammingError: (psycopg.errors.UndefinedFunction) operator does not exist: asset_status = character varying
+LINE 3: WHERE assets.status = $1::VARCHAR ORDER BY assets.asset_code
+                            ^
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
+[SQL: SELECT assets.id AS assets_id, assets.asset_code AS assets_asset_code, assets.warehouse_id AS assets_warehouse_id, assets.department_id AS assets_department_id, assets.asset_name AS assets_asset_name, assets.asset_type AS assets_asset_type, assets.category AS assets_category, assets.vehicle_type AS assets_vehicle_type, assets.make AS assets_make, assets.model AS assets_model, assets.manufacture_year AS assets_manufacture_year, assets.registration_number AS assets_registration_number, assets.vin AS assets_vin, assets.status AS assets_status, assets.health_band AS assets_health_band, assets.criticality_score AS assets_criticality_score, assets.purchase_date AS assets_purchase_date, assets.warranty_expiry_date AS assets_warranty_expiry_date, assets.assigned_to AS assets_assigned_to, assets.current_mileage AS assets_current_mileage, assets.last_service_date AS assets_last_service_date, assets.next_service_date AS assets_next_service_date, assets.description AS assets_description, assets.fuel_type AS assets_fuel_type, assets.transmission AS assets_transmission, assets.make_model AS assets_make_model, assets.maintenance_priority AS assets_maintenance_priority, assets.service_provider_type AS assets_service_provider_type, assets.metadata AS assets_metadata, assets.created_by AS assets_created_by, assets.vehicle_role AS assets_vehicle_role, assets.payload_capacity_kg AS assets_payload_capacity_kg, assets.vehicle_age_years AS assets_vehicle_age_years, assets.lifetime_service_count AS assets_lifetime_service_count, assets.lifetime_breakdown_count AS assets_lifetime_breakdown_count, assets.created_at AS assets_created_at, assets.updated_at AS assets_updated_at 
+FROM assets 
+WHERE assets.status = %(status_1)s::VARCHAR ORDER BY assets.asset_code]
+[parameters: {'status_1': 'active'}]
+(Background on this error at: https://sqlalche.me/e/20/f405)
