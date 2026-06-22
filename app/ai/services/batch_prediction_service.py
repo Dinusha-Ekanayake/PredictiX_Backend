@@ -181,24 +181,13 @@ def _run_classifier(fd: dict, clf_model, clf_features: list[str], clf_threshold:
 
 
 
-def _run_regressor(fd: dict, reg_model, reg_features: list[str], snapshot_date: date) -> tuple[int, date, list[dict]]:
-    """Returns (days_until_maintenance, predicted_date, top_explanations).
-
-    CatBoost categorical features must be strings (not numeric).  We detect
-    them from the model's stored cat_feature_indices and ensure the right
-    columns are str before building the Pool.
-    """
+def _run_regressor(fd: dict, reg_model, reg_features: list[str], reg_categorical_cols: list[str], snapshot_date: date) -> tuple[int, date, list[dict]]:
+    """Returns (days_until_maintenance, predicted_date, top_explanations)."""
     import numpy as np
     import pandas as pd
     from catboost import Pool
 
-    # Determine which of the reg_features are categoricals from the model
-    try:
-        cat_indices_from_model = reg_model.get_cat_feature_indices() or []
-    except Exception:
-        cat_indices_from_model = []
-
-    cat_feature_names = {reg_features[i] for i in cat_indices_from_model if i < len(reg_features)}
+    cat_feature_names = set(reg_categorical_cols or [])
 
     row = {f: fd.get(f, "") if f in cat_feature_names else fd.get(f, 0)
            for f in reg_features}
@@ -385,6 +374,7 @@ def run_batch_for_asset(
     clf_categorical_cols: list[str],
     reg_model,
     reg_features: list[str],
+    reg_categorical_cols: list[str] = [],
 ) -> dict:
     """Run the full PDM pipeline for a single asset and upsert the result.
 
@@ -435,7 +425,7 @@ def run_batch_for_asset(
             fd, clf_model, clf_features, clf_threshold, clf_categorical_cols
         )
         days_until, pred_date, top_explanations = _run_regressor(
-            fd, reg_model, reg_features, today
+            fd, reg_model, reg_features, reg_categorical_cols, today
         )
         health_score, health_status = _compute_health_score(fd, failure_probability, days_until)
         contributing_factors = _compute_contributing_factors(fd, failure_probability)
@@ -522,6 +512,7 @@ def run_batch_for_all_assets(
     clf_categorical_cols: list[str],
     reg_model,
     reg_features: list[str],
+    reg_categorical_cols: list[str] = [],
 ) -> dict:
     """Run the full PDM batch for every active asset.
 
@@ -555,6 +546,7 @@ def run_batch_for_all_assets(
             clf_categorical_cols=clf_categorical_cols,
             reg_model=reg_model,
             reg_features=reg_features,
+            reg_categorical_cols=reg_categorical_cols,
         )
         s = result.get("status")
         if s == "ok":
