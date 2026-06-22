@@ -64,9 +64,9 @@ log = logging.getLogger("predictix")
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_DIR = BASE_DIR / "ai" / "models"
 
-CLF_MODEL_PATH    = MODEL_DIR / "pdm_classifier_model" / "predictive_maintenance_model.pkl"
+CLF_MODEL_PATH    = MODEL_DIR / "pdm_classifier_model" / "predictix_xgboost_classifier_v6.pkl"
 CLF_FEATURES_PATH = MODEL_DIR / "pdm_classifier_model" / "maintenance_classifier_features.pkl"
-REG_MODEL_PATH    = MODEL_DIR / "pdm_regressor_model"  / "days_until_next_maintenance_regressor.pkl"
+REG_MODEL_PATH    = MODEL_DIR / "pdm_regressor_model"  / "predictix_pm_model_v5.pkl"
 REG_FEATURES_PATH = MODEL_DIR / "pdm_regressor_model"  / "regression_selected_features.pkl"
 
 clf_model = None
