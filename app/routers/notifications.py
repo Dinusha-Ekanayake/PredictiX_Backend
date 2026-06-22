@@ -133,3 +133,27 @@ def delete_notification(
     db.commit()
     
     return {"message": "Notification deleted"}
+
+
+@router.post("/", response_model=NotificationOut)
+def create_notification(
+    data: NotificationCreate,
+    current_user: Profile = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Create a notification (e.g. from frontend toast events)"""
+    from ..services.in_app_notification_service import InAppNotificationService
+    
+    notification = InAppNotificationService.notify_user(
+        db=db,
+        user_id=current_user.id,
+        title=data.title,
+        message=data.message,
+        priority=data.priority or "low",
+        notification_type=data.type or "system_toast",
+        link_url=data.link_url,
+        meta=data.meta
+    )
+    if not notification:
+        raise HTTPException(status_code=500, detail="Failed to create notification")
+    return notification
