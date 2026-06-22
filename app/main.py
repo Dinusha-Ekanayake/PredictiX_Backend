@@ -75,6 +75,7 @@ clf_threshold: float = 0.5
 clf_categorical_cols: list = []
 reg_model = None
 reg_features: list = []
+reg_categorical_cols: list = []
 
 scheduler: BackgroundScheduler | None = None
 _model_load_lock = __import__('threading').Lock()
@@ -90,7 +91,8 @@ def _load_pickle(path: Path):
 
 def _load_pdm_models():
     """Lazily load heavy PdM models (thread-safe, idempotent)."""
-    global clf_model, clf_features, clf_threshold, clf_categorical_cols, reg_model, reg_features
+    global clf_model, clf_features, clf_threshold, clf_categorical_cols, \
+           reg_model, reg_features, reg_categorical_cols
     if clf_model is not None and reg_model is not None:
         return
 
@@ -98,20 +100,31 @@ def _load_pdm_models():
         if clf_model is not None and reg_model is not None:
             return
         try:
-            clf_model    = _load_pickle(CLF_MODEL_PATH)
-            clf_features = _load_pickle(CLF_FEATURES_PATH)
-            if getattr(clf_model, "feature_names_", None):
-                clf_features = list(clf_model.feature_names_)
+            # ── Classifier bundle (pickle) ──────────────────────────────
+            clf_bundle = _load_pickle(CLF_MODEL_PATH)
+            if isinstance(clf_bundle, dict):
+                clf_model            = clf_bundle["model"]
+                clf_features         = list(clf_bundle.get("feature_cols", []))
+                clf_threshold        = float(clf_bundle.get("threshold", 0.5))
+                clf_categorical_cols = list(clf_bundle.get("categorical_cols", []))
+            else:
+                clf_model    = clf_bundle
+                clf_features = _load_pickle(CLF_FEATURES_PATH)
 
+            # ── Regressor bundle (joblib) ───────────────────────────────
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                reg_model = _load_pickle(REG_MODEL_PATH)
-            reg_features = _load_pickle(REG_FEATURES_PATH)
-            if getattr(reg_model, "feature_names_", None):
-                reg_features = list(reg_model.feature_names_)
+                reg_bundle = _load_pickle(REG_MODEL_PATH)
+            if isinstance(reg_bundle, dict):
+                reg_model            = reg_bundle["explainer_model"]
+                reg_features         = list(reg_bundle.get("feature_cols", []))
+                reg_categorical_cols = list(reg_bundle.get("categorical_cols", []))
+            else:
+                reg_model    = reg_bundle
+                reg_features = _load_pickle(REG_FEATURES_PATH)
 
             log.info("PdM models loaded — clf: %d features, reg: %d features",
-                     len(clf_features or []), len(reg_features or []))
+                     len(clf_features), len(reg_features))
         except Exception as exc:
             log.warning("Local PdM model loading failed (non-fatal): %s", exc)
 
@@ -133,6 +146,7 @@ def _run_scheduled_batch() -> None:
             clf_categorical_cols=clf_categorical_cols,
             reg_model=reg_model,
             reg_features=reg_features,
+            reg_categorical_cols=reg_categorical_cols,
         )
     except Exception:
         log.exception("Batch prediction run failed")
