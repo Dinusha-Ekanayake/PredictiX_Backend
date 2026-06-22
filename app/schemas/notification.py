@@ -5,8 +5,8 @@ from datetime import datetime
 
 
 class NotificationCreate(BaseModel):
-    user_id: UUID
-    type: str
+    user_id: Optional[UUID] = None
+    type: Optional[str] = "system"
     channel: str = "in_app"
     title: str
     message: str
@@ -14,6 +14,9 @@ class NotificationCreate(BaseModel):
     related_asset_id: Optional[UUID] = None
     related_ticket_id: Optional[UUID] = None
     related_report_id: Optional[UUID] = None
+    link_url: Optional[str] = None
+    priority: Optional[str] = "low"
+    meta: Optional[dict] = None
 
 
 class NotificationUpdate(BaseModel):
@@ -30,6 +33,8 @@ class NotificationOut(BaseModel):
     title: str
     message: str
     status: str
+    created_at: Optional[datetime] = None
+    meta: Optional[dict] = None
 
     class Config:
         from_attributes = True
