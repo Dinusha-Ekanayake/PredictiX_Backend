@@ -81,8 +81,11 @@ _model_load_lock = __import__('threading').Lock()
 
 
 def _load_pickle(path: Path):
-    with open(path, "rb") as fh:
-        return pickle.load(fh)
+    try:
+        with open(path, "rb") as fh:
+            return pickle.load(fh)
+    except Exception:
+        return joblib.load(path)
 
 
 def _load_pdm_models():
