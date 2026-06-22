@@ -68,6 +68,7 @@ class LoginResponse(BaseModel):
     full_name: Optional[str] = None
     warehouse_id: Optional[str] = None
     warehouse_name: Optional[str] = None
+    avatar_url: Optional[str] = None
     # Set only for super_admin — frontend shows the warehouse picker.
     requires_warehouse_selection: bool = False
     selection_token: Optional[str] = None   # short-lived token for step 2
@@ -76,6 +77,9 @@ class LoginResponse(BaseModel):
 class WarehouseSelectRequest(BaseModel):
     selection_token: str   # from step 1
     warehouse_id: str
+
+class GoogleLoginRequest(BaseModel):
+    token: str
 
 # ─── demo fallback accounts (no DB row) ──────────────────────────────────────
 
@@ -255,6 +259,7 @@ def _authenticate_profile(profile, email: str, password: str) -> LoginResponse:
             full_name=full_name,
             warehouse_id=wh_id,
             warehouse_name=wh_name,
+            avatar_url=profile.avatar_url,
         )
 
     # ── user: token issued immediately ────────────────────────────────────────
@@ -266,6 +271,7 @@ def _authenticate_profile(profile, email: str, password: str) -> LoginResponse:
         email=email,
         role=role,
         full_name=full_name,
+        avatar_url=profile.avatar_url,
     )
 
 
@@ -283,10 +289,11 @@ def _authenticate_demo(email: str, password: str) -> LoginResponse:
     full_name = demo["full_name"]
 
     wh_id, wh_name = None, None
-    if role == "admin":
-        # Try to get warehouse from DB even for demo accounts.
-        profile = _lookup_profile(email)
-        if profile and profile.warehouse_id:
+    avatar_url = None
+    profile = _lookup_profile(email)
+    if profile:
+        avatar_url = profile.avatar_url
+        if role == "admin" and profile.warehouse_id:
             wh_id = str(profile.warehouse_id)
             wh_name = _warehouse_name(wh_id)
 
@@ -300,6 +307,7 @@ def _authenticate_demo(email: str, password: str) -> LoginResponse:
         full_name=full_name,
         warehouse_id=wh_id,
         warehouse_name=wh_name,
+        avatar_url=avatar_url,
     )
 
 
@@ -400,3 +408,155 @@ def _create_selection_token(user_id: str, email: str, full_name: str) -> str:
         "exp": datetime.utcnow() + timedelta(minutes=5),
     }
     return jwt.encode(payload, _secret(), algorithm=_algorithm())
+
+
+# ─── POST /auth/google-login ─────────────────────────────────────────────────
+
+@router.post("/google-login", response_model=LoginResponse)
+def post_google_login(request: GoogleLoginRequest):
+    """Google login verification endpoint.
+    Verifies the Supabase JWT token, extracts user email, checks Profile,
+    and returns a PredictiX JWT or warehouse selection info.
+    """
+    token = request.token.strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Token is required.")
+
+    # Initialize Supabase client
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_KEY")
+    if not supabase_url or not supabase_key:
+        raise HTTPException(status_code=500, detail="Supabase not configured on backend.")
+
+    try:
+        from supabase import create_client
+        supabase_client = create_client(supabase_url, supabase_key)
+        user_resp = supabase_client.auth.get_user(token)
+    except Exception as e:
+        log.warning("[GOOGLE-LOGIN] Supabase verification failed: %s", e)
+        raise HTTPException(status_code=401, detail="Invalid Google session.")
+
+    if not user_resp or not user_resp.user:
+        raise HTTPException(status_code=401, detail="Invalid Google session.")
+
+    email = (user_resp.user.email or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="Google session contains no email.")
+
+    # Get avatar url from Google metadata
+    google_avatar = None
+    if user_resp.user.user_metadata:
+        google_avatar = user_resp.user.user_metadata.get("avatar_url") or user_resp.user.user_metadata.get("picture")
+
+    # Check if this email exists as a Profile in our database.
+    profile = _lookup_profile(email)
+    if profile is not None:
+        role = (profile.role or "").strip().lower()
+        status = (profile.status or "").strip().lower()
+        full_name = profile.full_name or "Unknown"
+
+        if status != "active":
+            log.info("[GOOGLE-LOGIN] ✗ %s | inactive account", email)
+            raise HTTPException(status_code=401, detail="This account is inactive.")
+
+        user_id = str(profile.id)
+
+        # Update avatar_url in database to keep it sync'd with Google
+        avatar_url = profile.avatar_url
+        if google_avatar and profile.avatar_url != google_avatar:
+            try:
+                from app.db import SessionLocal
+                from app.models import Profile
+                db = SessionLocal()
+                try:
+                    db_profile = db.query(Profile).filter(Profile.id == profile.id).first()
+                    if db_profile:
+                        db_profile.avatar_url = google_avatar
+                        db.commit()
+                        avatar_url = google_avatar
+                        log.info("[GOOGLE-LOGIN] Updated avatar URL in DB for %s", email)
+                finally:
+                    db.close()
+            except Exception as e:
+                log.warning("[GOOGLE-LOGIN] Failed to update avatar_url in DB: %s", e)
+
+        # fallback if DB write failed or didn't run
+        if not avatar_url:
+            avatar_url = google_avatar
+
+        if role == "super_admin":
+            warehouses = _fetch_all_warehouses()
+            selection_token = _create_selection_token(user_id, email, full_name)
+            log.info("[GOOGLE-LOGIN] ✓ super_admin %s — awaiting warehouse selection", email)
+            return LoginResponse(
+                requires_warehouse_selection=True,
+                selection_token=selection_token,
+                user_id=user_id,
+                email=email,
+                role="super_admin",
+                full_name=full_name,
+                warehouses=warehouses,
+                avatar_url=avatar_url,
+            )
+
+        if role == "admin":
+            wh_id = str(profile.warehouse_id) if profile.warehouse_id else None
+            wh_name = _warehouse_name(wh_id)
+            jwt_token = _create_token(user_id, email, role, warehouse_id=wh_id)
+            log.info("[GOOGLE-LOGIN] ✓ admin %s | warehouse=%s | id=%s", email, wh_name, user_id[:8])
+            return LoginResponse(
+                access_token=jwt_token,
+                user_id=user_id,
+                email=email,
+                role=role,
+                full_name=full_name,
+                warehouse_id=wh_id,
+                warehouse_name=wh_name,
+                avatar_url=avatar_url,
+            )
+
+        jwt_token = _create_token(user_id, email, role)
+        log.info("[GOOGLE-LOGIN] ✓ user %s | id=%s", email, user_id[:8])
+        return LoginResponse(
+            access_token=jwt_token,
+            user_id=user_id,
+            email=email,
+            role=role,
+            full_name=full_name,
+            avatar_url=avatar_url,
+        )
+
+    # Fallback to demo users check
+    if email in _DEMO_USERS:
+        demo = _DEMO_USERS[email]
+        user_id = _resolve_user_id(email)
+        role = demo["role"]
+        full_name = demo["full_name"]
+
+        wh_id, wh_name = None, None
+        avatar_url = google_avatar
+        profile = _lookup_profile(email)
+        if profile:
+            avatar_url = profile.avatar_url or google_avatar
+            if role == "admin" and profile.warehouse_id:
+                wh_id = str(profile.warehouse_id)
+                wh_name = _warehouse_name(wh_id)
+
+        jwt_token = _create_token(user_id, email, role, warehouse_id=wh_id)
+        log.info("[GOOGLE-LOGIN] ✓ (demo) %s | role=%s", email, role)
+        return LoginResponse(
+            access_token=jwt_token,
+            user_id=user_id,
+            email=email,
+            role=role,
+            full_name=full_name,
+            warehouse_id=wh_id,
+            warehouse_name=wh_name,
+            avatar_url=avatar_url,
+        )
+
+    log.info("[GOOGLE-LOGIN] ✗ %s | no profile found", email)
+    raise HTTPException(
+        status_code=404,
+        detail="No profile found for this Google email. Please contact an admin."
+    )
