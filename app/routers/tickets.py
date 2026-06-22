@@ -90,6 +90,35 @@ def create_ticket(payload: TicketCreate, db: Session = Depends(get_db), _: objec
     return obj
 
 
+@router.get("/status-counts", response_model=dict[str, int])
+def get_ticket_status_counts(
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
+    """Aggregate ticket counts by status for dashboards.
+    Admins see counts for all tickets.
+    Users see counts for tickets assigned to them or created by them.
+    """
+    counts = {"open": 0, "in-progress": 0, "resolved": 0, "closed": 0}
+    q = db.query(Ticket.status, func.count(Ticket.id)).group_by(Ticket.status)
+
+    if str(current_user.role).lower() != "admin":
+        q = q.filter((Ticket.assigned_to == current_user.id) | (Ticket.created_by == current_user.id))
+
+    rows = q.all()
+    
+    for status, count in rows:
+        if status in ("open", "pending"):
+            counts["open"] += count
+        elif status == "in_progress":
+            counts["in-progress"] += count
+        elif status == "resolved":
+            counts["resolved"] += count
+        elif status == "closed":
+            counts["closed"] += count
+
+    return counts
+
 @router.get("/", response_model=list[TicketOut])
 def list_tickets(
     status: str | None = Query(default=None),
