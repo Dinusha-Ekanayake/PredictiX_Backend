@@ -220,8 +220,74 @@ def _build_warehouse_summary(db: Session):
     except Exception:
         pass
 
+    # ── Executive overview narrative (deterministic, data-grounded) ──────────
+    # Mirrors the LLM report's insight_summary but is computed instantly here so
+    # it can render on the dashboard with no LLM call. It rides along on the
+    # already-cached summary payload, so there is no extra per-request cost.
+    executive_summary = None
+    # Use a FRESH session for these reads: an earlier swallowed query above
+    # (component_health / recent_maintenance) can leave `db` in an aborted-
+    # transaction state, which would otherwise fail every query here.
+    from app.db.session import SessionLocal
+    _s = SessionLocal()
+    try:
+        wh_row = _s.execute(text(
+            "SELECT w.name FROM warehouses w "
+            "LEFT JOIN assets a ON a.warehouse_id = w.id "
+            "GROUP BY w.id, w.name ORDER BY COUNT(a.id) DESC LIMIT 1"
+        )).fetchone()
+        warehouse_name = wh_row[0] if wh_row and wh_row[0] else "PredictiX"
+
+        avg_age = _s.execute(text(
+            "SELECT ROUND(AVG(vehicle_age_years)::numeric, 1) FROM assets "
+            "WHERE vehicle_age_years IS NOT NULL"
+        )).scalar()
+        active_users = _s.execute(text(
+            "SELECT COUNT(*) FROM profiles WHERE status::text = 'active'"
+        )).scalar() or 0
+        dept_count = _s.execute(text("SELECT COUNT(*) FROM departments")).scalar() or 0
+
+        status_map = {s["name"].lower(): s["value"] for s in asset_status}
+        active_assets  = status_map.get("active", 0)
+        maint_assets   = status_map.get("maintenance", status_map.get("under maintenance", 0))
+        retired_assets = status_map.get("retired", 0)
+
+        top_types = [t["type"].lower() for t in sorted(assets_by_type, key=lambda x: x["count"], reverse=True)[:3]]
+        types_text = (
+            ", ".join(top_types[:-1]) + ", and " + top_types[-1] if len(top_types) > 1
+            else (top_types[0] if top_types else "various assets")
+        )
+
+        crit_rate = round(at_risk_assets / total_assets * 100, 1) if total_assets else 0.0
+        iso_clause = (
+            f"which exceeds the ISO 55000 5% critical target, with a critical rate of {crit_rate}%"
+            if crit_rate > 5 else
+            f"within the ISO 55000 5% critical target, with a critical rate of {crit_rate}%"
+        )
+        age_text = f"an average vehicle age of {avg_age} years" if avg_age is not None else "mixed vehicle ages"
+
+        executive_summary = (
+            f"The {warehouse_name} warehouse has a total fleet size of {total_assets} assets, "
+            f"comprising various types such as {types_text}, with {age_text}. "
+            f"The average fleet health score is {int(avg_health_score)}%, and there are "
+            f"{at_risk_assets} critical assets, {iso_clause}. "
+            f"The estimated maintenance cost is LKR {total_cost:,}, and there are "
+            f"{active_tickets_count} active tickets, with {active_users} active users. "
+            f"The warehouse status is active, with {dept_count} departments, and the fleet "
+            f"composition includes {active_assets} active assets, {maint_assets} under maintenance, "
+            f"and {retired_assets} retired assets."
+        )
+    except Exception:
+        import logging
+        logging.getLogger("predictix").warning(
+            "[warehouse] executive summary build failed", exc_info=True
+        )
+    finally:
+        _s.close()
+
     return {
         "kpis": kpis,
+        "executiveSummary": executive_summary,
         "kpiGrid": kpi_grid,
         "healthMaintenanceTrends": health_trends,
         "assetStatus": asset_status,
