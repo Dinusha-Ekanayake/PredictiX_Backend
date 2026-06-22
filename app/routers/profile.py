@@ -19,6 +19,7 @@ import os
 import uuid as _uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from sqlalchemy import String, cast
 from sqlalchemy.orm import Session
 
 from app.deps import get_current_user, get_db
@@ -74,12 +75,22 @@ def _profile_to_response(user: Profile, db: Session) -> dict:
 
     asset_count = (
         db.query(Asset)
-        .filter(Asset.assigned_to == str(user.id), Asset.status == "active")
+        .filter(Asset.assigned_to == str(user.id), cast(Asset.status, String) == "active")
         .count()
     )
 
     first_name, last_name = _split_name(user.full_name)
-    address = user.meta.get("address") if isinstance(user.meta, dict) else None
+    meta = user.meta if isinstance(user.meta, dict) else {}
+    address = meta.get("address")
+    # Preference toggles live in meta['settings']; default sensibly when unset
+    # so the Settings page renders consistent values for first-time users.
+    saved_settings = meta.get("settings") or {}
+    settings = {
+        "emailNotifications": saved_settings.get("emailNotifications", True),
+        "criticalAlerts": saved_settings.get("criticalAlerts", True),
+        "maintenanceAlerts": saved_settings.get("maintenanceAlerts", True),
+        "compactView": saved_settings.get("compactView", False),
+    }
 
     return {
         "id": str(user.id),
@@ -98,6 +109,7 @@ def _profile_to_response(user: Profile, db: Session) -> dict:
         "status": user.status or "",
         "assignedAssetsCount": asset_count,
         "avatar_url": user.avatar_url or None,
+        "settings": settings,
     }
 
 
@@ -128,6 +140,16 @@ def update_my_profile(
     if payload.address is not None:
         meta = dict(current_user.meta or {})
         meta["address"] = payload.address
+        current_user.meta = meta
+
+    if payload.settings is not None:
+        meta = dict(current_user.meta or {})
+        existing = dict(meta.get("settings") or {})
+        # Merge only the keys the client actually sent (exclude unset/None) so a
+        # partial settings update doesn't wipe other toggles.
+        incoming = payload.settings.model_dump(exclude_none=True)
+        existing.update(incoming)
+        meta["settings"] = existing
         current_user.meta = meta
 
     if db and hasattr(current_user, "__table__"):
@@ -204,7 +226,7 @@ def get_my_assets(
 
     assets = (
         db.query(Asset)
-        .filter(Asset.assigned_to == str(current_user.id), Asset.status == "active")
+        .filter(Asset.assigned_to == str(current_user.id), cast(Asset.status, String) == "active")
         .all()
     )
 
@@ -243,7 +265,7 @@ def get_my_stats(
 
     count = (
         db.query(Asset)
-        .filter(Asset.assigned_to == str(current_user.id), Asset.status == "active")
+        .filter(Asset.assigned_to == str(current_user.id), cast(Asset.status, String) == "active")
         .count()
     )
     return {"assignedAssets": count, "activeAssets": count}

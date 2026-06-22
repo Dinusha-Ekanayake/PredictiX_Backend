@@ -11,6 +11,7 @@ from datetime import date, timedelta
 from typing import Optional
 from uuid import UUID
 
+from sqlalchemy import String, cast
 from sqlalchemy.orm import Session
 
 from app.models import Asset, Profile, ServiceReminderLog
@@ -163,7 +164,7 @@ def run_auto_reminder_sweep(db: Session) -> dict:
         .filter(
             Asset.next_service_date.in_(list(target_dates.keys())),
             Asset.assigned_to.isnot(None),
-            Asset.status == "active",
+            cast(Asset.status, String) == "active",
         )
         .all()
     )
