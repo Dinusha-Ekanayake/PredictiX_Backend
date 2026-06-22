@@ -133,3 +133,54 @@ def delete_notification(
     db.commit()
     
     return {"message": "Notification deleted"}
+
+
+@router.post("/", response_model=NotificationOut)
+async def create_notification(
+    data: NotificationCreate,
+    current_user: Profile = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Create a notification directly in the DB and broadcast via WS"""
+    meta_data = data.meta or {}
+    if data.priority:
+        meta_data["priority"] = data.priority
+    if data.link_url:
+        meta_data["link_url"] = data.link_url
+
+    notif_type = data.type or "system"
+    if notif_type == "system_toast":
+        notif_type = "system"
+
+    notification = Notification(
+        user_id=current_user.id,
+        title=data.title,
+        message=data.message,
+        type=notif_type,
+        meta=meta_data,
+        status="unread"
+    )
+    
+    try:
+        db.add(notification)
+        db.commit()
+        db.refresh(notification)
+        
+        # Broadcast via WebSocket
+        from ..routers.websockets import notifier
+        payload = {
+            "id": str(notification.id),
+            "title": notification.title,
+            "message": notification.message,
+            "type": notification.type,
+            "status": notification.status,
+            "created_at": notification.created_at.isoformat() if notification.created_at else None,
+            "meta": notification.meta,
+            "is_from_client": True
+        }
+        await notifier.send_personal_message(payload, str(current_user.id))
+        
+        return notification
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
