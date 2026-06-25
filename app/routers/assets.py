@@ -1,13 +1,21 @@
 """Assets resource — CRUD, search, assignment, status updates."""
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import String, cast, or_
 from sqlalchemy.orm import Session
 
-from app.deps import get_db
-from app.models import Asset
+from app.deps import get_db, get_current_user
+from app.models import Asset, Profile
 from app.schemas.asset import AssetCreate, AssetOut, AssetUpdate
+from app.services.service_reminder_service import send_manual_reminder
 
 router = APIRouter(prefix="/assets", tags=["Assets"])
+
+
+class ServiceReminderRequest(BaseModel):
+    note: str | None = Field(default=None, max_length=1000)
 
 
 @router.get("/dropdown", summary="Lightweight asset list for dropdowns")
@@ -86,7 +94,6 @@ def list_assets(
 ):
     q = db.query(Asset)
 
-    # search
     if search:
         like_term = f"%{search.strip()}%"
         q = q.filter(
@@ -101,7 +108,6 @@ def list_assets(
             )
         )
 
-    # exact filters
     if warehouse_id:
         q = q.filter(Asset.warehouse_id == warehouse_id)
     if department_id:
@@ -125,13 +131,11 @@ def list_assets(
     if health_band:
         q = q.filter(Asset.health_band == health_band)
 
-    # assigned/unassigned filter
     if is_assigned is True:
         q = q.filter(Asset.assigned_to.isnot(None))
     elif is_assigned is False:
         q = q.filter(Asset.assigned_to.is_(None))
 
-    # numeric range filters
     if min_criticality_score is not None:
         q = q.filter(Asset.criticality_score >= min_criticality_score)
     if max_criticality_score is not None:
@@ -147,7 +151,6 @@ def list_assets(
     if max_payload_capacity_kg is not None:
         q = q.filter(Asset.payload_capacity_kg <= max_payload_capacity_kg)
 
-    # sorting
     sort_column_map = {
         "created_at": Asset.created_at,
         "updated_at": Asset.updated_at,
@@ -299,3 +302,43 @@ def delete_asset(asset_id: str, db: Session = Depends(get_db)):
     db.delete(obj)
     db.commit()
     return {"message": "Asset deleted successfully"}
+
+
+@router.post(
+    "/{asset_id}/send-service-reminder",
+    summary="Send a service reminder email to the assigned user (admin only)",
+)
+def send_service_reminder_endpoint(
+    asset_id: str,
+    payload: ServiceReminderRequest | None = None,
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
+    """Admin-triggered manual send with optional note included in the email."""
+    if getattr(current_user, "role", None) != "admin":
+        raise HTTPException(status_code=403, detail="Admins only")
+
+    try:
+        asset_uuid = UUID(asset_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid asset id")
+
+    note = payload.note.strip() if payload and payload.note else None
+
+    try:
+        result = send_manual_reminder(
+            db,
+            asset_id=asset_uuid,
+            sent_by=current_user.id,
+            admin_note=note,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if not result["sent"]:
+        raise HTTPException(
+            status_code=502,
+            detail=result.get("error") or "Email send failed",
+        )
+
+    return result
