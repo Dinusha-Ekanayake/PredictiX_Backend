@@ -103,6 +103,60 @@ def _build_survival_summary(critical_assets: list, max_assets: int = 12) -> dict
             db.close()
 
 
+# Human-readable labels for the model's SHAP failure-driver features, so each
+# asset summary can name *why* it is failing (the per-asset differentiator).
+_DRIVER_LABELS = {
+    "tire_health_pct": "low tire health",
+    "brake_health_pct": "low brake health",
+    "battery_health_pct": "low battery health",
+    "oil_life_pct": "low oil life",
+    "hydraulic_health_pct": "low hydraulic health",
+    "coolant_temp_max_c": "elevated coolant temperature",
+    "engine_temp_avg_c": "elevated engine temperature",
+    "engine_hours_since_last_service": "high engine hours since last service",
+    "days_since_last_service": "an overdue service interval",
+    "vibration_rms_mm_s": "abnormal vibration",
+    "active_fault_code_count": "active fault codes",
+    "downtime_hours_last_90d": "recent unplanned downtime",
+    "fuel_level": "low fuel level",
+    "odometer_km": "high accumulated mileage",
+    "current_mileage": "high accumulated mileage",
+}
+
+
+def _humanize_driver(top_explanations) -> str | None:
+    """Return a readable phrase for an asset's top SHAP failure driver, or None.
+
+    Handles both stored shapes: a bare list of factor dicts, or
+    ``{"top_factors": [...]}``; values may arrive as a JSON string.
+    """
+    if not top_explanations:
+        return None
+    if isinstance(top_explanations, str):
+        try:
+            top_explanations = json.loads(top_explanations)
+        except (ValueError, TypeError):
+            return None
+    factors = (
+        top_explanations.get("top_factors")
+        if isinstance(top_explanations, dict)
+        else top_explanations
+    )
+    if not isinstance(factors, list) or not factors or not isinstance(factors[0], dict):
+        return None
+    feat = factors[0].get("feature")
+    if not feat:
+        return None
+    if feat in _DRIVER_LABELS:
+        return _DRIVER_LABELS[feat]
+    # Generic fallback: strip unit suffixes and de-snake the feature name.
+    for suffix in ("_pct", "_c", "_mm_s", "_count", "_km"):
+        if feat.endswith(suffix):
+            feat = feat[: -len(suffix)]
+            break
+    return feat.replace("_", " ").strip() or None
+
+
 # ═══════════════════════════════════════════════════════════════
 # FULL DATA INJECTION — PostgreSQL → LLM Context (RAG Layer)
 # ═══════════════════════════════════════════════════════════════
@@ -272,7 +326,8 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
         SELECT * FROM (
             SELECT DISTINCT ON (p.asset_id)
                 a.asset_code, a.asset_name, a.model, a.make, a.vehicle_type, a.status,
-                p.health_score, p.failure_probability, p.risk_level, p.days_until_maintenance
+                p.health_score, p.failure_probability, p.risk_level, p.days_until_maintenance,
+                p.top_explanations
             FROM asset_failure_predictions p
             JOIN assets a ON a.id = p.asset_id
             ORDER BY p.asset_id, p.created_at DESC
@@ -297,6 +352,7 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
             "risk": r[8] or "High",
             "days_to_service": r[9],
             "status": r[5] or "unknown",
+            "primary_driver": _humanize_driver(r[10]),
         }
         for r in critical_rows
     ]

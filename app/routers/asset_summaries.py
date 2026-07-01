@@ -6,15 +6,21 @@ import logging
 from app.schemas.asset_summary import AssetSummaryRequest, AssetSummaryResponse
 from app.ai.services.asset_summary_service import generate_asset_summary, get_asset_summary_repo, get_hf_credentials
 from app.deps import get_db
-from app.models import Asset
+from app.models import Asset, AssetFailurePrediction
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/asset-summaries", tags=["Asset Summaries"])
 
 
-def _build_asset_input_text(asset: Asset) -> str:
-    """Build the pipe-separated input text for the asset summary model from an Asset ORM object."""
+def _build_asset_input_text(asset: Asset, prediction: AssetFailurePrediction | None = None) -> str:
+    """Build the pipe-separated input text for the asset summary model.
+
+    Combines static asset attributes with the latest AI prediction signals
+    (health score, failure probability, risk, days-to-service) so the summary
+    reflects the asset's real current condition — the same numbers shown in the
+    warehouse/asset tables.
+    """
     parts = []
 
     name = asset.asset_name or asset.asset_code or "Unknown Asset"
@@ -43,7 +49,31 @@ def _build_asset_input_text(asset: Asset) -> str:
     if asset.maintenance_priority:
         parts.append(f"Maintenance priority: {asset.maintenance_priority}")
 
+    # ── Latest AI prediction signals (health %, failure probability, risk, days-to-service) ──
+    if prediction is not None:
+        if prediction.health_score is not None:
+            parts.append(f"Health score: {int(round(float(prediction.health_score)))}%")
+        if prediction.failure_probability is not None:
+            fp = float(prediction.failure_probability)
+            fp_pct = fp * 100 if fp <= 1 else fp   # accept 0-1 or 0-100 storage
+            parts.append(f"Failure probability: {round(fp_pct, 1)}%")
+        if prediction.risk_level:
+            parts.append(f"Risk: {prediction.risk_level}")
+        if prediction.days_until_maintenance is not None:
+            d = int(prediction.days_until_maintenance)
+            parts.append(f"Service due in: {d} day" + ("" if d == 1 else "s"))
+
     return " | ".join(parts)
+
+
+def _latest_prediction(db: Session, asset_id) -> AssetFailurePrediction | None:
+    """Most-recent failure prediction for an asset (drives the summary's health signals)."""
+    return (
+        db.query(AssetFailurePrediction)
+        .filter(AssetFailurePrediction.asset_id == asset_id)
+        .order_by(AssetFailurePrediction.created_at.desc())
+        .first()
+    )
 
 
 
@@ -58,7 +88,7 @@ async def get_summary_by_asset(asset_id: str, db: Session = Depends(get_db)):
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
 
-    input_text = _build_asset_input_text(asset)
+    input_text = _build_asset_input_text(asset, _latest_prediction(db, asset.id))
     try:
         logger.info(f"[AssetSummary] Generating summary for asset {asset_id}: {input_text[:80]}...")
         summary = generate_asset_summary(input_text)
