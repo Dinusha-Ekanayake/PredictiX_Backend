@@ -23,6 +23,7 @@ from .routers.asset_assignments import router as asset_assignments_router
 from .routers.asset_documents import router as asset_documents_router
 from .routers.asset_status_history import router as asset_status_history_router
 from .routers.asset_summaries import router as asset_summaries_router
+from .routers.ticket_summaries import router as ticket_summaries_router
 from .routers.assets import router as assets_router
 from .routers.auth import router as auth_router
 from .routers.db_debug import router as db_debug_router
@@ -58,6 +59,7 @@ from .routers.survival_predictions import router as survival_predictions_router
 
 # ─── ML warmup ────────────────────────────────────────────────────────────────
 from app.ai.services.asset_summary_service import warmup_asset_summary_model
+from app.ai.services.ticket_summary_service import warmup_ticket_summary_model
 from app.ai.services.ticket_categorization_service import warmup_ticket_categorizer
 from app.ai.services.ticket_priority_service import warmup_ticket_priority
 
@@ -225,6 +227,12 @@ async def lifespan(_: FastAPI):
             log.info("Asset summary model warmed up.")
         except Exception as exc:
             log.warning("Asset summary warmup failed (non-fatal): %s", exc)
+
+        try:
+            warmup_ticket_summary_model()
+            log.info("Ticket summary ONNX model warmed up.")
+        except Exception as exc:
+            log.warning("Ticket summary warmup failed (non-fatal): %s", exc)
     else:
         log.info("HuggingFace models disabled (DISABLE_HF_MODELS=true). Skipping warmup.")
 
@@ -337,6 +345,7 @@ app.include_router(asset_assignments_router)
 app.include_router(asset_status_history_router)
 app.include_router(asset_documents_router)
 app.include_router(asset_summaries_router)
+app.include_router(ticket_summaries_router)
 app.include_router(maintenance_router)
 app.include_router(sensor_readings_router)
 

@@ -155,9 +155,11 @@ def generate_asset_summary(input_text: str) -> str:
         )
         summary_ids = model.generate(
             inputs["input_ids"],
-            max_length=256,
-            min_length=50,
+            max_length=512,
+            min_length=80,
             num_beams=4,
+            no_repeat_ngram_size=3,   # stop the model repeating phrases when pushed longer
+            length_penalty=1.3,       # gently favour fuller, complete summaries
             early_stopping=True,
         )
         raw = tokenizer.decode(summary_ids[0], skip_special_tokens=True).strip()
