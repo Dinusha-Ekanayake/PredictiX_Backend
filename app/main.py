@@ -10,6 +10,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -154,6 +156,21 @@ def _run_scheduled_batch() -> None:
         db.close()
 
 
+def _run_service_reminder_job() -> None:
+    """Scheduled job — daily sweep for assets due within reminder windows."""
+    from app.db import SessionLocal
+    from app.services.service_reminder_service import run_auto_reminder_sweep
+
+    db = SessionLocal()
+    try:
+        run_auto_reminder_sweep(db)
+    except Exception:
+        log.exception("Service reminder sweep failed")
+    finally:
+        db.close()
+
+
+
 def _run_startup_batch() -> None:
     """Startup-only wrapper: waits 10s for Uvicorn to fully bind before running."""
     import time
@@ -234,6 +251,30 @@ async def lifespan(_: FastAPI):
             replace_existing=True,
         )
         log.info("HF Inference Warmer enabled (4-10 min intervals).")
+
+    # ── Daily service reminder email sweep ─────────────────────────────────────
+    reminder_hour = int(os.getenv("SERVICE_REMINDER_HOUR", "9"))
+    reminder_tz = os.getenv("SERVICE_REMINDER_TZ", "Asia/Colombo")
+    scheduler.add_job(
+        _run_service_reminder_job,
+        trigger=CronTrigger(hour=reminder_hour, minute=0, timezone=reminder_tz),
+        id="service_reminder_check",
+        name="Daily service reminder email sweep",
+        replace_existing=True,
+    )
+    log.info(
+        "Service reminder scheduler registered — daily at %d:00 %s",
+        reminder_hour, reminder_tz,
+    )
+
+    if os.getenv("SERVICE_REMINDER_RUN_ON_STARTUP", "false").lower() == "true":
+        import threading
+        threading.Thread(
+            target=_run_service_reminder_job,
+            daemon=True,
+            name="service_reminder_startup",
+        ).start()
+        log.info("Service reminder startup run queued")
 
     scheduler.start()
     log.info("PDM batch scheduler started — interval=%dh", batch_interval_hours)

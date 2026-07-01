@@ -11,12 +11,12 @@ from datetime import date, timedelta
 from typing import Optional
 from uuid import UUID
 
-from sqlalchemy import String, cast
 from sqlalchemy.orm import Session
 
 from app.models import Asset, Profile, ServiceReminderLog
 from app.services.reminder_email_sender import EmailSendError, send_email
 from app.services.reminder_email_template import service_reminder_html
+
 log = logging.getLogger(__name__)
 
 
@@ -70,6 +70,7 @@ def _send_and_log(
     offset_days: int,
     trigger: str,
     sent_by: Optional[UUID] = None,
+    admin_note: Optional[str] = None,
 ) -> dict:
     if not user.email:
         log.warning("Asset %s assignee %s has no email — skipping", asset.id, user.id)
@@ -88,6 +89,7 @@ def _send_and_log(
         days_remaining=days_remaining,
         warehouse_name=warehouse_name,
         dashboard_url=os.getenv("FRONTEND_URL"),
+        admin_note=admin_note,
     )
 
     if days_remaining <= 1:
@@ -130,7 +132,13 @@ def _send_and_log(
     }
 
 
-def send_manual_reminder(db: Session, *, asset_id: UUID, sent_by: UUID) -> dict:
+def send_manual_reminder(
+    db: Session,
+    *,
+    asset_id: UUID,
+    sent_by: UUID,
+    admin_note: Optional[str] = None,
+) -> dict:
     """Admin button-triggered: send a reminder for one asset, immediately."""
     asset = db.query(Asset).filter(Asset.id == asset_id).first()
     if not asset:
@@ -146,8 +154,13 @@ def send_manual_reminder(db: Session, *, asset_id: UUID, sent_by: UUID) -> dict:
 
     offset_days = max((asset.next_service_date - date.today()).days, 0)
     return _send_and_log(
-        db, asset=asset, user=user,
-        offset_days=offset_days, trigger="manual", sent_by=sent_by,
+        db,
+        asset=asset,
+        user=user,
+        offset_days=offset_days,
+        trigger="manual",
+        sent_by=sent_by,
+        admin_note=admin_note,
     )
 
 
@@ -164,7 +177,7 @@ def run_auto_reminder_sweep(db: Session) -> dict:
         .filter(
             Asset.next_service_date.in_(list(target_dates.keys())),
             Asset.assigned_to.isnot(None),
-            cast(Asset.status, String) == "active",
+            Asset.status == "active",
         )
         .all()
     )
