@@ -210,33 +210,44 @@ class NotificationService:
         Returns:
             True if email sent successfully, False otherwise
         """
+        import requests
+
+        api_key = os.getenv("BREVO_API_KEY")
+        sender_email = os.getenv("BREVO_SENDER_EMAIL", "neuromindspredictix@gmail.com")
+        sender_name = os.getenv("BREVO_SENDER_NAME", "PredictiX System")
+
+        if not api_key:
+            print("[NOTIFICATION] Email service disabled - BREVO_API_KEY not configured")
+            return False
+
+        recipients = [{"email": e} for e in to_emails if e]
+        if not recipients:
+            print("[NOTIFICATION] No valid recipients - skipping email")
+            return False
+
         try:
-            if not EmailConfig.SENDER_PASSWORD:
-                print("[NOTIFICATION] Email service disabled - SENDER_PASSWORD not configured")
-                return False
-            
-            # Create message
-            message = MIMEMultipart("alternative")
-            message["Subject"] = subject
-            message["From"] = EmailConfig.SENDER_EMAIL
-            message["To"] = ", ".join(to_emails)
-            
-            # Attach HTML content
-            message.attach(MIMEText(html_body, "html"))
-            
-            # Send email
-            with smtplib.SMTP(EmailConfig.SMTP_SERVER, EmailConfig.SMTP_PORT) as server:
-                if EmailConfig.USE_TLS:
-                    server.starttls()
-                
-                server.login(EmailConfig.SENDER_EMAIL, EmailConfig.SENDER_PASSWORD)
-                server.sendmail(EmailConfig.SENDER_EMAIL, to_emails, message.as_string())
-            
-            print(f"[NOTIFICATION] Email sent successfully to {len(to_emails)} recipient(s)")
-            return True
-            
+            resp = requests.post(
+                "https://api.brevo.com/v3/smtp/email",
+                headers={
+                    "api-key": api_key,
+                    "Content-Type": "application/json",
+                    "accept": "application/json",
+                },
+                json={
+                    "sender": {"email": sender_email, "name": sender_name},
+                    "to": recipients,
+                    "subject": subject,
+                    "htmlContent": html_body,
+                },
+                timeout=15,
+            )
+            if resp.status_code in (200, 201, 202):
+                print(f"[NOTIFICATION] Email sent via Brevo to {len(recipients)} recipient(s)")
+                return True
+            print(f"[NOTIFICATION-ERROR] Brevo API {resp.status_code}: {resp.text[:200]}")
+            return False
         except Exception as e:
-            print(f"[NOTIFICATION-ERROR] Failed to send email: {str(e)}")
+            print(f"[NOTIFICATION-ERROR] Failed to send via Brevo: {str(e)}")
             return False
     
     @staticmethod
