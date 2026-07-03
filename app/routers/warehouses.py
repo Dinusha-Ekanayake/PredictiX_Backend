@@ -1,12 +1,16 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from app.deps import get_db
+from app.deps import get_db, require_admin, require_user
 from app.models import Warehouse
 from app.schemas.warehouse import WarehouseCreate, WarehouseOut
 
-router = APIRouter(prefix="/warehouses", tags=["Warehouses"])
+router = APIRouter(
+    prefix="/warehouses",
+    tags=["Warehouses"],
+    dependencies=[Depends(require_user)],
+)
 
-@router.post("/", response_model=WarehouseOut)
+@router.post("/", response_model=WarehouseOut, dependencies=[Depends(require_admin)])
 def create_warehouse(payload: WarehouseCreate, db: Session = Depends(get_db)):
     obj = Warehouse(**payload.model_dump())
     db.add(obj)

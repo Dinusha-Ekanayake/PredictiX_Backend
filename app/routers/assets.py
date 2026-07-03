@@ -6,12 +6,48 @@ from pydantic import BaseModel, Field
 from sqlalchemy import String, cast, or_
 from sqlalchemy.orm import Session
 
-from app.deps import get_db, get_current_user
+from app.deps import (
+    get_db,
+    get_current_user,
+    require_user,
+    require_admin,
+    active_warehouse_id,
+    _role_of,
+    ADMIN_ROLES,
+)
 from app.models import Asset, Profile
 from app.schemas.asset import AssetCreate, AssetOut, AssetUpdate
 from app.services.service_reminder_service import send_manual_reminder
 
-router = APIRouter(prefix="/assets", tags=["Assets"])
+
+def _enforced_warehouse(current_user) -> str | None:
+    """Warehouse an admin/super_admin request must be scoped to.
+
+    Admins and super_admins both operate inside exactly one active warehouse
+    (a super_admin's is the one they picked at login). Returns that warehouse id
+    for admin roles, or None for non-admin callers / when no warehouse is set
+    (in which case no extra scoping is applied here).
+    """
+    if _role_of(current_user) in ADMIN_ROLES:
+        return active_warehouse_id(current_user)
+    return None
+
+
+def _assert_asset_in_scope(obj: Asset, current_user) -> None:
+    """Block admins/super_admins from touching an asset outside their active
+    warehouse. Returns 404 (not 403) so the asset's existence isn't revealed
+    across warehouse boundaries."""
+    scoped_wh = _enforced_warehouse(current_user)
+    if scoped_wh and str(obj.warehouse_id) != scoped_wh:
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+# require_user gates every endpoint (valid token needed); mutating endpoints
+# additionally require_admin below.
+router = APIRouter(
+    prefix="/assets",
+    tags=["Assets"],
+    dependencies=[Depends(require_user)],
+)
 
 
 class ServiceReminderRequest(BaseModel):
@@ -23,9 +59,14 @@ def list_assets_dropdown(
     search: str | None = Query(default=None),
     status: str | None = Query(default=None),
     db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
 ):
     """Returns only id, asset_code, asset_name, asset_type, warehouse_id — fast for populating dropdowns."""
     q = db.query(Asset.id, Asset.asset_code, Asset.asset_name, Asset.asset_type, Asset.warehouse_id)
+    # Scope admins/super_admins to their active warehouse.
+    scoped_wh = _enforced_warehouse(current_user)
+    if scoped_wh:
+        q = q.filter(Asset.warehouse_id == scoped_wh)
     if search:
         like_term = f"%{search.strip()}%"
         q = q.filter(or_(
@@ -47,8 +88,12 @@ def list_assets_dropdown(
     ]
 
 
-@router.post("/", response_model=AssetOut)
-def create_asset(payload: AssetCreate, db: Session = Depends(get_db)):
+@router.post("/", response_model=AssetOut, dependencies=[Depends(require_admin)])
+def create_asset(
+    payload: AssetCreate,
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
     existing_code = db.query(Asset).filter(Asset.asset_code == payload.asset_code).first()
     if existing_code:
         raise HTTPException(status_code=400, detail="Asset code already exists")
@@ -58,7 +103,15 @@ def create_asset(payload: AssetCreate, db: Session = Depends(get_db)):
         if existing_vin:
             raise HTTPException(status_code=400, detail="VIN already exists")
 
-    obj = Asset(**payload.model_dump())
+    data = payload.model_dump()
+    # Pin the new asset to the admin's active warehouse so an admin can't create
+    # assets in another warehouse. A super_admin's active warehouse is the one
+    # they picked at login.
+    scoped_wh = _enforced_warehouse(current_user)
+    if scoped_wh:
+        data["warehouse_id"] = scoped_wh
+
+    obj = Asset(**data)
     db.add(obj)
     db.commit()
     db.refresh(obj)
@@ -91,8 +144,16 @@ def list_assets(
     limit: int = Query(default=100, ge=1, le=2000),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
 ):
     q = db.query(Asset)
+
+    # Warehouse scoping: admins/super_admins are pinned to their active
+    # warehouse. Any client-supplied warehouse_id is overridden so it can't be
+    # used to read another warehouse's assets.
+    scoped_wh = _enforced_warehouse(current_user)
+    if scoped_wh:
+        warehouse_id = scoped_wh
 
     if search:
         like_term = f"%{search.strip()}%"
@@ -187,8 +248,14 @@ def count_assets(
     vehicle_role: str | None = Query(default=None),
     is_assigned: bool | None = Query(default=None),
     db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
 ):
     q = db.query(Asset)
+
+    # Warehouse scoping (see list_assets): pin admins to their active warehouse.
+    scoped_wh = _enforced_warehouse(current_user)
+    if scoped_wh:
+        warehouse_id = scoped_wh
 
     if search:
         like_term = f"%{search.strip()}%"
@@ -228,18 +295,29 @@ def count_assets(
 
 
 @router.get("/{asset_id}", response_model=AssetOut)
-def get_asset(asset_id: str, db: Session = Depends(get_db)):
+def get_asset(
+    asset_id: str,
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
     obj = db.query(Asset).filter(Asset.id == asset_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Asset not found")
+    _assert_asset_in_scope(obj, current_user)
     return obj
 
 
-@router.put("/{asset_id}", response_model=AssetOut)
-def update_asset(asset_id: str, payload: AssetUpdate, db: Session = Depends(get_db)):
+@router.put("/{asset_id}", response_model=AssetOut, dependencies=[Depends(require_admin)])
+def update_asset(
+    asset_id: str,
+    payload: AssetUpdate,
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
     obj = db.query(Asset).filter(Asset.id == asset_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Asset not found")
+    _assert_asset_in_scope(obj, current_user)
 
     update_data = payload.model_dump(exclude_unset=True)
 
@@ -269,11 +347,17 @@ def update_asset(asset_id: str, payload: AssetUpdate, db: Session = Depends(get_
     return obj
 
 
-@router.patch("/{asset_id}/assign", response_model=AssetOut)
-def assign_asset(asset_id: str, assigned_to: str | None = None, db: Session = Depends(get_db)):
+@router.patch("/{asset_id}/assign", response_model=AssetOut, dependencies=[Depends(require_admin)])
+def assign_asset(
+    asset_id: str,
+    assigned_to: str | None = None,
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
     obj = db.query(Asset).filter(Asset.id == asset_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Asset not found")
+    _assert_asset_in_scope(obj, current_user)
 
     obj.assigned_to = assigned_to
     db.commit()
@@ -281,11 +365,17 @@ def assign_asset(asset_id: str, assigned_to: str | None = None, db: Session = De
     return obj
 
 
-@router.patch("/{asset_id}/status", response_model=AssetOut)
-def update_asset_status(asset_id: str, status: str, db: Session = Depends(get_db)):
+@router.patch("/{asset_id}/status", response_model=AssetOut, dependencies=[Depends(require_admin)])
+def update_asset_status(
+    asset_id: str,
+    status: str,
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
     obj = db.query(Asset).filter(Asset.id == asset_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Asset not found")
+    _assert_asset_in_scope(obj, current_user)
 
     obj.status = status
     db.commit()
@@ -293,11 +383,16 @@ def update_asset_status(asset_id: str, status: str, db: Session = Depends(get_db
     return obj
 
 
-@router.delete("/{asset_id}")
-def delete_asset(asset_id: str, db: Session = Depends(get_db)):
+@router.delete("/{asset_id}", dependencies=[Depends(require_admin)])
+def delete_asset(
+    asset_id: str,
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
     obj = db.query(Asset).filter(Asset.id == asset_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Asset not found")
+    _assert_asset_in_scope(obj, current_user)
 
     db.delete(obj)
     db.commit()

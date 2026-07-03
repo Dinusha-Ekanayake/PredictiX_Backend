@@ -112,3 +112,57 @@ def _build_mock_profile(*, user_id: str, email: str, role: str, warehouse_id: Op
             self.employee_id = f"EMP-{user_id[:8]}"
 
     return MockProfile()
+
+
+# ─── Role-based access dependencies ────────────────────────────────────────────
+# These build on get_current_user (which already validates the JWT). Attach them
+# either per-endpoint (Depends(...)) or router-wide (router = APIRouter(
+# dependencies=[Depends(require_user)])) to gate access. require_user only
+# requires a valid token; require_admin additionally requires an admin role.
+
+# Roles allowed to perform admin actions. super_admin is included on purpose so
+# super admins are not locked out of admin-only endpoints.
+ADMIN_ROLES = {"admin", "super_admin"}
+
+
+def _role_of(user) -> str:
+    return (getattr(user, "role", "") or "").strip().lower()
+
+
+def require_user(current_user=Depends(get_current_user)):
+    """Dependency: request must carry a valid JWT (any authenticated role).
+
+    get_current_user already raises 401 on a missing/invalid token, so simply
+    depending on it is enough — this wrapper exists to give routers a clearly
+    named, intention-revealing gate.
+    """
+    return current_user
+
+
+def require_admin(current_user=Depends(get_current_user)):
+    """Dependency: request must be an authenticated admin or super_admin."""
+    if _role_of(current_user) not in ADMIN_ROLES:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return current_user
+
+
+def is_super_admin(user) -> bool:
+    return _role_of(user) == "super_admin"
+
+
+def active_warehouse_id(user) -> Optional[str]:
+    """The warehouse a request is scoped to.
+
+    Both regular admins and super_admins operate inside exactly one warehouse at
+    a time. get_current_user already resolves this: a regular admin's warehouse
+    comes from their profile, and a super_admin's comes from the warehouse they
+    picked at login (carried in the JWT and written onto user.warehouse_id).
+    Returning it as a string keeps callers uniform for filtering.
+
+    The difference between the two roles is *not* what they can do once scoped
+    (identical admin operations) but that a super_admin may pick ANY warehouse at
+    login while a regular admin is pinned to their own — so both are enforced the
+    same way here, via the single active warehouse on the token.
+    """
+    wid = getattr(user, "warehouse_id", None)
+    return str(wid) if wid else None

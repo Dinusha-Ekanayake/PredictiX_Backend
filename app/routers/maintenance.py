@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from app.deps import get_db
+from app.deps import get_db, require_admin, require_user
 from app.models import MaintenanceEvent
 from app.schemas.maintenance import (
     MaintenanceEventCreate,
@@ -8,10 +8,14 @@ from app.schemas.maintenance import (
     MaintenanceEventOut,
 )
 
-router = APIRouter(prefix="/maintenance", tags=["Maintenance"])
+router = APIRouter(
+    prefix="/maintenance",
+    tags=["Maintenance"],
+    dependencies=[Depends(require_user)],
+)
 
 
-@router.post("/", response_model=MaintenanceEventOut)
+@router.post("/", response_model=MaintenanceEventOut, dependencies=[Depends(require_admin)])
 def create_maintenance_event(payload: MaintenanceEventCreate, db: Session = Depends(get_db)):
     obj = MaintenanceEvent(**payload.model_dump())
     db.add(obj)
@@ -42,7 +46,7 @@ def get_maintenance_event(event_id: str, db: Session = Depends(get_db)):
     return obj
 
 
-@router.put("/{event_id}", response_model=MaintenanceEventOut)
+@router.put("/{event_id}", response_model=MaintenanceEventOut, dependencies=[Depends(require_admin)])
 def update_maintenance_event(event_id: str, payload: MaintenanceEventUpdate, db: Session = Depends(get_db)):
     obj = db.query(MaintenanceEvent).filter(MaintenanceEvent.id == event_id).first()
     if not obj:
@@ -56,7 +60,7 @@ def update_maintenance_event(event_id: str, payload: MaintenanceEventUpdate, db:
     return obj
 
 
-@router.delete("/{event_id}")
+@router.delete("/{event_id}", dependencies=[Depends(require_admin)])
 def delete_maintenance_event(event_id: str, db: Session = Depends(get_db)):
     obj = db.query(MaintenanceEvent).filter(MaintenanceEvent.id == event_id).first()
     if not obj:

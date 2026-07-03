@@ -14,14 +14,18 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.deps import get_db
+from app.deps import get_db, require_admin, require_user
 from app.models import Asset, PdmBatchPrediction
 from app.ai.services.batch_prediction_service import (
     run_batch_for_all_assets,
     run_batch_for_asset,
 )
 
-router = APIRouter(prefix="/batch-predictions", tags=["Batch Predictions"])
+router = APIRouter(
+    prefix="/batch-predictions",
+    tags=["Batch Predictions"],
+    dependencies=[Depends(require_user)],
+)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -82,7 +86,7 @@ def get_batch_prediction(asset_id: str, db: Session = Depends(get_db)) -> dict:
 
 # ── trigger endpoints ──────────────────────────────────────────────────────────
 
-@router.post("/run", summary="Trigger a full batch prediction run for all assets")
+@router.post("/run", summary="Trigger a full batch prediction run for all assets", dependencies=[Depends(require_admin)])
 def trigger_full_batch(db: Session = Depends(get_db)) -> dict:
     """Immediately runs the PDM pipeline for every active asset and upserts
     results.  Useful as a Render/Railway cron job target or for manual refresh.
@@ -110,7 +114,7 @@ def trigger_full_batch(db: Session = Depends(get_db)) -> dict:
     return result
 
 
-@router.post("/run/{asset_id}", summary="Trigger a fresh prediction for one asset")
+@router.post("/run/{asset_id}", summary="Trigger a fresh prediction for one asset", dependencies=[Depends(require_admin)])
 def trigger_single_asset(asset_id: str, db: Session = Depends(get_db)) -> dict:
     """Re-runs the full PDM pipeline for a single asset and upserts the result.
     Returns the prediction summary."""

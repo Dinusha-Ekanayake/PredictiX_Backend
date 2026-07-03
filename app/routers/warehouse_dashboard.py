@@ -4,12 +4,16 @@ from sqlalchemy import func, text, extract
 import calendar
 from datetime import datetime, timedelta
 
-from ..deps import get_db, get_current_user
+from ..deps import get_db, get_current_user, require_user
 from ..models import Asset, Ticket, AssetFailurePrediction, MaintenanceEvent, AssetCostPrediction, Profile
 from fastapi import BackgroundTasks
 from ..services.dashboard_cache import DashboardCache
 
-warehouse_dashboard_router = APIRouter(prefix="/warehouse-dashboard", tags=["Warehouse Dashboard"])
+warehouse_dashboard_router = APIRouter(
+    prefix="/warehouse-dashboard",
+    tags=["Warehouse Dashboard"],
+    dependencies=[Depends(require_user)],
+)
 
 _cache = DashboardCache("warehouse", ttl=int(__import__("os").getenv("WAREHOUSE_DASHBOARD_TTL", "60")))
 

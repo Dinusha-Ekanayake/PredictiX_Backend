@@ -1,13 +1,17 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from app.deps import get_db
+from app.deps import get_db, require_admin, require_user
 from app.models import AssetDocument
 from app.schemas.misc import AssetDocumentCreate, AssetDocumentOut
 
-router = APIRouter(prefix="/asset-documents", tags=["Asset Documents"])
+router = APIRouter(
+    prefix="/asset-documents",
+    tags=["Asset Documents"],
+    dependencies=[Depends(require_user)],
+)
 
 
-@router.post("/", response_model=AssetDocumentOut)
+@router.post("/", response_model=AssetDocumentOut, dependencies=[Depends(require_admin)])
 def create_asset_document(payload: AssetDocumentCreate, db: Session = Depends(get_db)):
     obj = AssetDocument(**payload.model_dump())
     db.add(obj)
@@ -27,7 +31,7 @@ def list_asset_documents(
     return q.order_by(AssetDocument.created_at.desc()).all()
 
 
-@router.delete("/{document_id}")
+@router.delete("/{document_id}", dependencies=[Depends(require_admin)])
 def delete_asset_document(document_id: str, db: Session = Depends(get_db)):
     obj = db.query(AssetDocument).filter(AssetDocument.id == document_id).first()
     if not obj:

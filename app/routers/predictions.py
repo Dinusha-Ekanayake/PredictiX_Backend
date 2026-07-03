@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
 
-from app.deps import get_db
+from app.deps import get_db, require_user
 from app.models import (
     PredictionRun,
     AssetFailurePrediction,
@@ -28,7 +28,11 @@ from app.ai.services.prediction_service import (
     run_full_prediction,
 )
 
-router = APIRouter(prefix="/predictions", tags=["Predictions"])
+router = APIRouter(
+    prefix="/predictions",
+    tags=["Predictions"],
+    dependencies=[Depends(require_user)],
+)
 
 
 @router.get("/health", response_model=HealthResponse)

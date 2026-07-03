@@ -3,7 +3,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from app.deps import get_db, get_current_user
+from app.deps import get_db, get_current_user, require_admin, require_user
 from app.models import (
     Asset,
     Notification,
@@ -339,7 +339,7 @@ def update_ticket(ticket_id: str, payload: TicketUpdate, db: Session = Depends(g
     return obj
 
 
-@router.delete("/{ticket_id}")
+@router.delete("/{ticket_id}", dependencies=[Depends(require_admin)])
 def delete_ticket(ticket_id: str, db: Session = Depends(get_db)):
     """Delete a ticket and clean up its dependent rows in one transaction.
 
@@ -418,6 +418,7 @@ def preview_ticket(payload: TicketPreviewRequest, _: object = Depends(get_curren
 @router.post(
     "/categorize",
     response_model=TicketCategorizationResponse,
+    dependencies=[Depends(require_user)],
 )
 def categorize_ticket_endpoint(payload: TicketCategorizationRequest):
     try:
@@ -437,6 +438,7 @@ def categorize_ticket_endpoint(payload: TicketCategorizationRequest):
         "Sends ticket text to the AroshN/priority_classif_xgb XGBoost model on Hugging Face "
         "and returns a single priority label (e.g. Low, Medium, High, Critical)."
     ),
+    dependencies=[Depends(require_user)],
 )
 def prioritize_ticket_endpoint(payload: TicketPriorityRequest):
     try:

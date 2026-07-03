@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
-from ..deps import get_db
+from ..deps import get_db, require_admin
 from ..models import (
     Asset,
     AssetCostPrediction,
@@ -31,7 +31,11 @@ from ..models import (
 )
 from ..services.dashboard_cache import DashboardCache
 
-admin_dashboard_router = APIRouter(prefix="/admin-dashboard", tags=["Admin Dashboard"])
+admin_dashboard_router = APIRouter(
+    prefix="/admin-dashboard",
+    tags=["Admin Dashboard"],
+    dependencies=[Depends(require_admin)],
+)
 
 _cache = DashboardCache("admin", ttl=int(__import__("os").getenv("ADMIN_DASHBOARD_TTL", "60")))
 

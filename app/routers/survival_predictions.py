@@ -10,7 +10,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from app.deps import get_db
+from app.deps import get_db, require_user
 from app.ai.services import survival_service
 from app.schemas.survival import (
     AssetSurvivalResponse,
@@ -18,7 +18,11 @@ from app.schemas.survival import (
 )
 
 
-router = APIRouter(prefix="/survival", tags=["FRSO Survival"])
+router = APIRouter(
+    prefix="/survival",
+    tags=["FRSO Survival"],
+    dependencies=[Depends(require_user)],
+)
 
 
 @router.get("/{asset_id}/{component}", response_model=ComponentSurvivalResponse)

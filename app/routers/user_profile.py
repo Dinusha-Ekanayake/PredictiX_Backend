@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from app.deps import get_db, get_current_user
+from app.deps import get_db, get_current_user, require_admin, require_user, active_warehouse_id
 from app.models import Profile, Warehouse, Department, Asset, AssetAssignment, AssetFailurePrediction
 from app.schemas.user_profile import (
     UserProfileOut,
@@ -15,7 +15,14 @@ from typing import List
 import uuid
 import traceback
 
-router = APIRouter(prefix="/user-profile", tags=["User Profile"])
+# Valid token required for all endpoints. The /me* endpoints resolve the caller
+# themselves; the user-management endpoints (list/create/update any user) add
+# require_admin individually below.
+router = APIRouter(
+    prefix="/user-profile",
+    tags=["User Profile"],
+    dependencies=[Depends(require_user)],
+)
 
 @router.get("/me")
 def get_my_profile(
@@ -247,12 +254,22 @@ def get_my_stats(
         traceback.print_exc()
         return {"assignedAssets": 0, "activeAssets": 0}
 
-@router.get("/users")
+@router.get("/users", dependencies=[Depends(require_admin)])
 def get_all_users(
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
 ):
     try:
-        users = db.query(Profile).all()
+        # Scope to the caller's active warehouse (own for admin, selected for
+        # super_admin). Profiles with no warehouse are still included so admin
+        # management isn't blocked.
+        users_q = db.query(Profile)
+        scoped_wh = active_warehouse_id(current_user)
+        if scoped_wh:
+            users_q = users_q.filter(
+                (Profile.warehouse_id == scoped_wh) | (Profile.warehouse_id.is_(None))
+            )
+        users = users_q.all()
         result = []
         for user in users:
             department_name = None
@@ -298,7 +315,7 @@ def get_all_users(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/users", response_model=UserItemOut)
+@router.post("/users", response_model=UserItemOut, dependencies=[Depends(require_admin)])
 def create_user(
     data: UserCreate,
     db: Session = Depends(get_db)
@@ -371,7 +388,7 @@ def list_user_warehouses(db: Session = Depends(get_db)):
     """Simple list of active warehouse names for dropdowns"""
     return [w.name for w in db.query(Warehouse).all()]
 
-@router.get("/users/{user_id}/assets", response_model=List[UserAssignedAssetOut])
+@router.get("/users/{user_id}/assets", response_model=List[UserAssignedAssetOut], dependencies=[Depends(require_admin)])
 def get_user_assets(user_id: str, db: Session = Depends(get_db)):
     try:
         import uuid as _uuid
@@ -414,7 +431,7 @@ def get_user_assets(user_id: str, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.put("/users/{user_id}", response_model=UserItemOut)
+@router.put("/users/{user_id}", response_model=UserItemOut, dependencies=[Depends(require_admin)])
 def update_any_user(user_id: str, data: UserUpdate, db: Session = Depends(get_db)):
     try:
         user = db.query(Profile).filter(Profile.id == user_id).first()

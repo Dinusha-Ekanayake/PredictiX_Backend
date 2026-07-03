@@ -1,10 +1,14 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
-from app.deps import get_db
+from app.deps import get_db, require_user
 from app.models import ReportSource
 from app.schemas.misc import ReportSourceCreate, ReportSourceOut
 
-router = APIRouter(prefix="/report-sources", tags=["Report Sources"])
+router = APIRouter(
+    prefix="/report-sources",
+    tags=["Report Sources"],
+    dependencies=[Depends(require_user)],
+)
 
 
 @router.post("/", response_model=ReportSourceOut)

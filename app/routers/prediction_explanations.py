@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
-from app.deps import get_db
+from app.deps import get_db, require_user
 from app.models import PredictionExplanation, PredictionFeatureImportance
 from app.schemas.misc import (
     PredictionExplanationCreate,
@@ -9,7 +9,11 @@ from app.schemas.misc import (
     PredictionFeatureImportanceOut,
 )
 
-router = APIRouter(prefix="/prediction-explanations", tags=["Prediction Explanations"])
+router = APIRouter(
+    prefix="/prediction-explanations",
+    tags=["Prediction Explanations"],
+    dependencies=[Depends(require_user)],
+)
 
 
 @router.post("/", response_model=PredictionExplanationOut)

@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 import os
 
 from app.core.security import hash_password
-from app.deps import get_db
+from app.deps import get_db, get_current_user, require_admin, active_warehouse_id
 from app.models import Asset, Department, Profile, Warehouse
 from app.schemas.user_profile import (
     UserAssignedAssetOut,
@@ -33,7 +33,12 @@ from app.schemas.user_profile import (
 from app.services.notification_service import NotificationService
 
 log = logging.getLogger(__name__)
-router = APIRouter(prefix="/users", tags=["Users"])
+# User management is admin-only: every endpoint requires an admin/super_admin JWT.
+router = APIRouter(
+    prefix="/users",
+    tags=["Users"],
+    dependencies=[Depends(require_admin)],
+)
 
 
 def _default_password() -> str:
@@ -164,7 +169,10 @@ def _user_to_item(user: Profile, db: Session) -> UserItemOut:
 
 
 @router.get("/", response_model=list[UserItemOut])
-def list_users(db: Session = Depends(get_db)):
+def list_users(
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
     # Pre-fetch lookup maps once — avoids per-user N+1 queries.
     dept_names = {d.id: d.name for d in db.query(Department.id, Department.name).all()}
     warehouse_names = {w.id: w.name for w in db.query(Warehouse.id, Warehouse.name).all()}
@@ -176,7 +184,16 @@ def list_users(db: Session = Depends(get_db)):
         .all()
     }
 
-    users = db.query(Profile).all()
+    # Scope to the caller's active warehouse (their own for a regular admin, the
+    # one a super_admin selected at login). Profiles without a warehouse (e.g.
+    # super_admins themselves) are still shown so admin management isn't blocked.
+    users_q = db.query(Profile)
+    scoped_wh = active_warehouse_id(current_user)
+    if scoped_wh:
+        users_q = users_q.filter(
+            (Profile.warehouse_id == scoped_wh) | (Profile.warehouse_id.is_(None))
+        )
+    users = users_q.all()
     return [_build_item(u, dept_names, warehouse_names, asset_counts) for u in users]
 
 
