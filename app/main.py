@@ -370,8 +370,11 @@ app.include_router(chatbot_router)
 # FAQs
 app.include_router(faqs_router)
 
-# Diagnostics
-app.include_router(db_debug_router)
+# Diagnostics — debug endpoints dump raw DB values, so they are OFF by default.
+# Enable only in a trusted environment by setting ENABLE_DEBUG_ROUTES=true.
+if os.getenv("ENABLE_DEBUG_ROUTES", "false").strip().lower() == "true":
+    app.include_router(db_debug_router)
+    log.info("Debug routes enabled (ENABLE_DEBUG_ROUTES=true).")
 
 # WebSockets
 app.include_router(websockets_router)

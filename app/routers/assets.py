@@ -12,6 +12,7 @@ from app.deps import (
     require_user,
     require_admin,
     active_warehouse_id,
+    is_admin_role,
     _role_of,
     ADMIN_ROLES,
 )
@@ -410,7 +411,7 @@ def send_service_reminder_endpoint(
     current_user: Profile = Depends(get_current_user),
 ):
     """Admin-triggered manual send with optional note included in the email."""
-    if getattr(current_user, "role", None) != "admin":
+    if not is_admin_role(current_user):
         raise HTTPException(status_code=403, detail="Admins only")
 
     try:

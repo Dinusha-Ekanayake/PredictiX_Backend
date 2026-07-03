@@ -12,8 +12,11 @@ from app.schemas.user_profile import (
 )
 from app.services.notification_service import NotificationService
 from typing import List
+import logging
 import uuid
 import traceback
+
+logger = logging.getLogger(__name__)
 
 # Valid token required for all endpoints. The /me* endpoints resolve the caller
 # themselves; the user-management endpoints (list/create/update any user) add
@@ -96,11 +99,12 @@ def get_my_profile(
         }
         
     except Exception as e:
-        print(f"[PROFILE ERROR] {type(e).__name__}: {str(e)}")
+        # Previously returned {"error": ...} with a 200 status, which made the
+        # frontend treat a failure as a valid (broken) profile. Surface a proper
+        # 500 so callers can detect and handle the error.
+        logger.error("[PROFILE ERROR] %s: %s", type(e).__name__, e)
         traceback.print_exc()
-        return {
-            "error": str(e)
-        }
+        raise HTTPException(status_code=500, detail="Failed to load profile")
 
 @router.put("/me", response_model=UserProfileOut)
 def update_my_profile(
@@ -320,63 +324,17 @@ def create_user(
     data: UserCreate,
     db: Session = Depends(get_db)
 ):
-    try:
-        # Gracefully handle lookups for relational mappings
-        dept = db.query(Department).filter(Department.name == data.department).first()
-        wh = db.query(Warehouse).filter(Warehouse.name == data.warehouse).first()
-        
-        new_profile_id = uuid.uuid4()
-        
-        new_profile = Profile(
-            id=new_profile_id,
-            employee_id=data.id, 
-            full_name=data.name,
-            email=data.email,
-            phone=data.contactNumber,
-            role=data.role,
-            status=data.status,
-            department_id=dept.id if dept else None,
-            warehouse_id=wh.id if wh else None,
-            meta={"address": data.address}
-        )
-        
-        db.add(new_profile)
-        db.commit()
-        
-        # ============================================================
-        # SEND NOTIFICATIONS (All data from PostgreSQL database)
-        # ============================================================
-        
-        print(f"[USER-CREATED] New user created: {data.name} ({data.email}) in {data.department} as {data.role}")
-        
-        try:
-            # Trigger notification service which queries database for all data
-            # This method sends all notifications (to user, admins, and dept members)
-            NotificationService.notify_on_new_user(db, str(new_profile_id))
-        except Exception as notification_error:
-            # Log but don't fail the user creation if notifications fail
-            print(f"[NOTIFICATION-ERROR] Failed to send notifications: {str(notification_error)}")
-            import traceback
-            traceback.print_exc()
-        
-        return UserItemOut(
-            id=str(new_profile.id),
-            firstName=data.firstName,
-            lastName=data.lastName,
-            name=data.name,
-            email=data.email,
-            address=data.address,
-            contactNumber=data.contactNumber,
-            warehouse=wh.name if wh else data.warehouse,
-            role=data.role,
-            department=dept.name if dept else data.department,
-            status=data.status,
-            assignedAssets=0
-        )
-    except Exception as e:
-        db.rollback()
-        print(f"[USER-CREATE-ERROR] {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+    """Create a user.
+
+    Delegates to the canonical implementation in app.routers.users, which
+    creates the Supabase auth user FIRST and reuses its id as the profile id.
+    The previous local version inserted a Profile with a random uuid4 and no
+    matching auth.users row, which violates the profiles->auth.users FK (either
+    failing outright or orphaning the row). Delegating keeps a single correct
+    code path and avoids that bug.
+    """
+    from app.routers.users import create_user as _canonical_create_user
+    return _canonical_create_user(data, db)
 
 @router.get("/departments", response_model=List[str])
 def list_user_departments(db: Session = Depends(get_db)):

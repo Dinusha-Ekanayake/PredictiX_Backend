@@ -9,21 +9,31 @@ from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
+from app.core.config import jwt_secret, jwt_algorithm
 
 log = logging.getLogger(__name__)
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 
-def get_db() -> Generator[Optional[Session], None, None]:
-    """Yield a SQLAlchemy session, or None if the DB is not configured.
+def get_db() -> Generator[Session, None, None]:
+    """Yield a SQLAlchemy session.
 
-    Returning None keeps dev environments without a DB password from
-    hanging on connection timeout; routers must handle the None case.
+    If the database is not configured at all (neither DATABASE_URL nor
+    DATABASE_PASSWORD set — i.e. a broken/dev environment), raise a clean
+    503 instead of yielding None. Previously this yielded None, which made
+    every router that assumed a real Session crash with an opaque 500
+    (AttributeError: 'NoneType' has no attribute 'query'). A 503 tells the
+    caller the service is unavailable, which is the accurate signal.
+
+    Endpoints that historically tolerated a None db still work: they simply
+    never reach their `if db is None` branch because this raises first.
     """
     if not os.getenv("DATABASE_PASSWORD") and not os.getenv("DATABASE_URL"):
-        yield None
-        return
+        raise HTTPException(
+            status_code=503,
+            detail="Database is not configured — set DATABASE_URL / DATABASE_PASSWORD.",
+        )
 
     db = SessionLocal()
     try:
@@ -45,8 +55,8 @@ def get_current_user(
     try:
         payload = jwt.decode(
             token,
-            os.getenv("JWT_SECRET", "supersecret"),
-            algorithms=[os.getenv("JWT_ALGORITHM", "HS256")],
+            jwt_secret(),
+            algorithms=[jwt_algorithm()],
         )
     except JWTError as exc:
         log.warning("JWT decode failed: %s", exc)
@@ -148,6 +158,16 @@ def require_admin(current_user=Depends(get_current_user)):
 
 def is_super_admin(user) -> bool:
     return _role_of(user) == "super_admin"
+
+
+def is_admin_role(user) -> bool:
+    """True if the user is an admin OR super_admin.
+
+    Use this for inline role checks inside endpoints instead of comparing
+    role == "admin" directly, so super_admins are never locked out of the
+    admin operations they are entitled to perform.
+    """
+    return _role_of(user) in ADMIN_ROLES
 
 
 def active_warehouse_id(user) -> Optional[str]:

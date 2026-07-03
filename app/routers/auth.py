@@ -30,6 +30,7 @@ from jose import JWTError, jwt
 from pydantic import BaseModel
 
 from app.core.security import verify_password
+from app.core.config import jwt_secret, jwt_algorithm
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 log = logging.getLogger(__name__)
@@ -41,10 +42,11 @@ def _default_password() -> str:
     return raw.strip().strip('"').strip("'").strip() or "Predictix@123"
 
 def _secret() -> str:
-    return os.getenv("JWT_SECRET", "supersecret")
+    # Centralised: fails fast if JWT_SECRET is unset (no public-constant fallback).
+    return jwt_secret()
 
 def _algorithm() -> str:
-    return os.getenv("JWT_ALGORITHM", "HS256")
+    return jwt_algorithm()
 
 # ─── schemas ──────────────────────────────────────────────────────────────────
 
