@@ -1,9 +1,18 @@
 """PredictiX API — FastAPI application entry point."""
 from __future__ import annotations
 
+import os
+
+# Force HuggingFace libraries offline BEFORE any of them can be imported, so no
+# model weights are ever downloaded/loaded from the Hub at runtime. Only the
+# online Gradio Space (plain HTTP) and the local PdM/cost/survival .pkl models
+# (loaded via joblib/pickle, not the Hub) are used. These are hard defaults;
+# they can still be overridden by an explicit environment value if ever needed.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
 import joblib
 import logging
-import os
 import pickle
 import warnings
 from contextlib import asynccontextmanager

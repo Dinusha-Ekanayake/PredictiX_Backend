@@ -244,31 +244,66 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
         actual = None if ym == current_ym else (int(total) if total else 0)
         cost_trend.append({"month": abbr, "estimated": estimated, "actual": actual})
 
-    # ── Query 6: downtime by warehouse (planned vs unplanned) ────────────────
-    _dt_q = (
-        db.query(
-            Warehouse.name,
-            MaintenanceEvent.event_type,
-            func.sum(MaintenanceEvent.downtime_hours),
-        )
-        .join(Asset, MaintenanceEvent.asset_id == Asset.id)
-        .join(Warehouse, Asset.warehouse_id == Warehouse.id)
-        .filter(MaintenanceEvent.downtime_hours.isnot(None))
-    )
+    # ── Query 6: downtime planned vs unplanned ───────────────────────────────
+    # Unscoped (fleet view): grouped BY WAREHOUSE so warehouses can be compared.
+    # Scoped to one warehouse: a single-warehouse bar is meaningless, so instead
+    # group BY MONTH (last 6 months) to show that warehouse's downtime trend.
+    # Both shapes keep the same output keys ({label, planned, unplanned}) so the
+    # frontend chart renders either without change; only the axis label differs.
     if warehouse_id:
-        _dt_q = _dt_q.filter(Asset.warehouse_id == warehouse_id)
-    downtime_rows = _dt_q.group_by(Warehouse.name, MaintenanceEvent.event_type).all()
-    dt_by_wh: dict[str, dict[str, float]] = {}
-    for name, etype, hours in downtime_rows:
-        wh = dt_by_wh.setdefault(name or "Unknown", {"planned": 0.0, "unplanned": 0.0})
-        if etype == "preventive":
-            wh["planned"] += float(hours or 0)
-        else:
-            wh["unplanned"] += float(hours or 0)
-    downtime_by_warehouse = [
-        {"warehouse": name, "planned": round(v["planned"]), "unplanned": round(v["unplanned"])}
-        for name, v in dt_by_wh.items()
-    ]
+        _dt_q = (
+            db.query(
+                func.to_char(MaintenanceEvent.performed_at, "YYYY-MM").label("ym"),
+                MaintenanceEvent.event_type,
+                func.sum(MaintenanceEvent.downtime_hours),
+            )
+            .join(Asset, MaintenanceEvent.asset_id == Asset.id)
+            .filter(
+                MaintenanceEvent.downtime_hours.isnot(None),
+                MaintenanceEvent.performed_at.isnot(None),
+                Asset.warehouse_id == warehouse_id,
+            )
+            .group_by("ym", MaintenanceEvent.event_type)
+        )
+        dt_by_key: dict[str, dict[str, float]] = {}
+        for ym, etype, hours in _dt_q.all():
+            bucket = dt_by_key.setdefault(ym, {"planned": 0.0, "unplanned": 0.0})
+            if etype == "preventive":
+                bucket["planned"] += float(hours or 0)
+            else:
+                bucket["unplanned"] += float(hours or 0)
+        # Emit the trailing 6 months in order, labelled by month abbreviation.
+        downtime_by_warehouse = []
+        for y, m, abbr in _months_ending_at(maint_anchor_dt, 6):
+            v = dt_by_key.get(f"{y:04d}-{m:02d}", {"planned": 0.0, "unplanned": 0.0})
+            downtime_by_warehouse.append(
+                {"warehouse": abbr, "planned": round(v["planned"]), "unplanned": round(v["unplanned"])}
+            )
+        downtime_scope = "month"
+    else:
+        _dt_q = (
+            db.query(
+                Warehouse.name,
+                MaintenanceEvent.event_type,
+                func.sum(MaintenanceEvent.downtime_hours),
+            )
+            .join(Asset, MaintenanceEvent.asset_id == Asset.id)
+            .join(Warehouse, Asset.warehouse_id == Warehouse.id)
+            .filter(MaintenanceEvent.downtime_hours.isnot(None))
+            .group_by(Warehouse.name, MaintenanceEvent.event_type)
+        )
+        dt_by_wh: dict[str, dict[str, float]] = {}
+        for name, etype, hours in _dt_q.all():
+            wh = dt_by_wh.setdefault(name or "Unknown", {"planned": 0.0, "unplanned": 0.0})
+            if etype == "preventive":
+                wh["planned"] += float(hours or 0)
+            else:
+                wh["unplanned"] += float(hours or 0)
+        downtime_by_warehouse = [
+            {"warehouse": name, "planned": round(v["planned"]), "unplanned": round(v["unplanned"])}
+            for name, v in dt_by_wh.items()
+        ]
+        downtime_scope = "warehouse"
 
     # ── Query 7: top 8 risk assets (worst health first) ───────────────────────
     _risk_q = (
@@ -433,6 +468,7 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
         "healthDistribution": health_distribution,
         "costTrend": cost_trend,
         "downtimeByWarehouse": downtime_by_warehouse,
+        "downtimeScope": downtime_scope,  # "warehouse" (fleet) or "month" (scoped)
         "topRiskAssets": top_risk_assets,
         "recentAlerts": recent_alerts,
         "latestTickets": latest_tickets,
