@@ -296,7 +296,15 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="PredictiX API", version="1.0", lifespan=lifespan)
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
-_default_origins = [
+# Production origins are always allowed. Local dev origins are only added when
+# not running in production (ENV != "production"), so a deployed backend doesn't
+# advertise localhost. Add any extra origins (e.g. new Vercel preview URLs) via
+# the ALLOWED_ORIGINS env var (comma-separated).
+_prod_origins = [
+    "https://predicti-x-frontend.vercel.app",
+    "https://predicti-x-frontend-dinusha-ekanayakes-projects.vercel.app",
+]
+_dev_origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "http://localhost:3001",
@@ -305,12 +313,15 @@ _default_origins = [
     "http://127.0.0.1:5173",
     "http://192.168.56.1:3000",
     "http://192.168.56.1:3001",
-    "https://predicti-x-frontend.vercel.app",
-    "https://predicti-x-frontend-dinusha-ekanayakes-projects.vercel.app",
 ]
+
+_is_production = os.getenv("ENV", "").strip().lower() == "production"
 _env_origins = os.getenv("ALLOWED_ORIGINS", "")
 _extra_origins = [o.strip() for o in _env_origins.split(",") if o.strip()]
-_allowed_origins = list(set(_default_origins + _extra_origins))
+
+_allowed_origins = list(set(_prod_origins + _extra_origins))
+if not _is_production:
+    _allowed_origins = list(set(_allowed_origins + _dev_origins))
 
 app.add_middleware(
     CORSMiddleware,

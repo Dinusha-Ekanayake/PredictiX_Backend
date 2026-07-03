@@ -67,7 +67,10 @@ def get_my_profile(
                 AssetAssignment.is_active == True
             ).count()
             asset_count = max(direct, via_table)
-        except:
+        except Exception:
+            # Don't fail the whole profile over a count; default to 0 but log it
+            # so the failure isn't silently swallowed.
+            logger.warning("Asset count query failed for %s", real_user.id, exc_info=True)
             asset_count = 0
         
         # Parse name
@@ -136,7 +139,7 @@ def update_my_profile(
             try:
                 NotificationService.notify_on_profile_update(db, str(current_user.id))
             except Exception as notification_error:
-                print(f"[NOTIFICATION-ERROR] {str(notification_error)}", flush=True)
+                logger.warning("[NOTIFICATION-ERROR] %s", notification_error)
 
         return get_my_profile(current_user=current_user, db=db)
     except Exception as e:
@@ -161,11 +164,11 @@ def get_my_assets(
         ), {"email": email}).fetchone()
 
         if not uid_row:
-            print(f"[ASSETS] no profile found for email={email}", flush=True)
+            logger.info("[ASSETS] no profile found for email=%s", email)
             return []
 
         uid = str(uid_row.id)
-        print(f"[ASSETS] email={email} uid={uid}", flush=True)
+        logger.debug("[ASSETS] email=%s uid=%s", email, uid)
 
         rows = db.execute(sql_text("""
             SELECT
@@ -189,7 +192,7 @@ def get_my_assets(
               AND a.status != 'retired'
         """), {"uid": uid}).fetchall()
 
-        print(f"[ASSETS] raw SQL returned {len(rows)} rows", flush=True)
+        logger.debug("[ASSETS] raw SQL returned %d rows", len(rows))
 
         result = []
         for r in rows:
@@ -221,7 +224,7 @@ def get_my_assets(
 
         return result
     except Exception as e:
-        print(f"[ASSETS-ERROR] {str(e)}", flush=True)
+        logger.error("[ASSETS-ERROR] %s", e)
         traceback.print_exc()
         return []
 
@@ -254,7 +257,7 @@ def get_my_stats(
 
         return {"assignedAssets": int(total), "activeAssets": int(active)}
     except Exception as e:
-        print(f"[STATS-ERROR] {str(e)}", flush=True)
+        logger.error("[STATS-ERROR] %s", e)
         traceback.print_exc()
         return {"assignedAssets": 0, "activeAssets": 0}
 
@@ -274,32 +277,42 @@ def get_all_users(
                 (Profile.warehouse_id == scoped_wh) | (Profile.warehouse_id.is_(None))
             )
         users = users_q.all()
+
+        # Pre-fetch lookup maps ONCE to avoid per-user N+1 queries (dept name,
+        # warehouse name, and both asset-count sources). Mirrors users.list_users.
+        from sqlalchemy import func as _func
+        dept_names = {d.id: d.name for d in db.query(Department.id, Department.name).all()}
+        warehouse_names = {w.id: w.name for w in db.query(Warehouse.id, Warehouse.name).all()}
+        direct_counts = {
+            assigned_to: cnt
+            for assigned_to, cnt in db.query(Asset.assigned_to, _func.count(Asset.id))
+            .filter(Asset.assigned_to.isnot(None), Asset.status != "retired")
+            .group_by(Asset.assigned_to)
+            .all()
+        }
+        table_counts = {
+            user_id: cnt
+            for user_id, cnt in db.query(AssetAssignment.user_id, _func.count(AssetAssignment.id))
+            .filter(AssetAssignment.is_active == True)
+            .group_by(AssetAssignment.user_id)
+            .all()
+        }
+
         result = []
         for user in users:
-            department_name = None
-            if user.department_id:
-                department_name = db.query(Department.name).filter(Department.id == user.department_id).scalar()
-                
-            warehouse_name = None
-            if user.warehouse_id:
-                warehouse_name = db.query(Warehouse.name).filter(Warehouse.id == user.warehouse_id).scalar()
-                
-            direct_cnt = db.query(Asset).filter(
-                Asset.assigned_to == user.id,
-                Asset.status != "retired"
-            ).count()
-            table_cnt = db.query(AssetAssignment).filter(
-                AssetAssignment.user_id == user.id,
-                AssetAssignment.is_active == True
-            ).count()
-            assigned_assets_count = max(direct_cnt, table_cnt)
-            
+            department_name = dept_names.get(user.department_id) if user.department_id else None
+            warehouse_name = warehouse_names.get(user.warehouse_id) if user.warehouse_id else None
+            assigned_assets_count = max(
+                direct_counts.get(user.id, 0),
+                table_counts.get(user.id, 0),
+            )
+
             meta = user.meta or {}
             address = meta.get("address", "") if isinstance(meta, dict) else ""
             name_parts = (user.full_name or "").split(" ")
             first_name = name_parts[0] if len(name_parts) > 0 else ""
             last_name = " ".join(name_parts[1:]) if len(name_parts) > 1 else ""
-            
+
             result.append(UserItemOut(
                 id=str(user.id),
                 firstName=first_name,
@@ -455,22 +468,26 @@ def get_team_members(
         real_user = db.query(Profile).filter(Profile.email == email).first()
         
         if not real_user or not real_user.department_id:
-            print(f"[TEAM-DEBUG] No user or no department for {email}")
+            logger.debug("[TEAM] No user or no department for %s", email)
             return []
-        
-        print(f"[TEAM-DEBUG] User {real_user.full_name} is in dept {real_user.department_id}")
-        
+
+        logger.debug("[TEAM] %s is in dept %s", real_user.full_name, real_user.department_id)
+
         # Get all other users in same department
         team_members = db.query(Profile).filter(
             Profile.department_id == real_user.department_id,
             Profile.id != real_user.id
         ).all()
-        
-        print(f"[TEAM-DEBUG] Found {len(team_members)} team members")
-        
+
+        logger.debug("[TEAM] found %d team members", len(team_members))
+
+        # All members share real_user.department_id — resolve the name once
+        # instead of one Department query per member (removes the N+1).
+        dept = db.query(Department).filter(Department.id == real_user.department_id).first()
+        dept_name = dept.name if dept else "Unknown"
+
         result = []
         for member in team_members:
-            dept = db.query(Department).filter(Department.id == member.department_id).first()
             result.append({
                 "id": str(member.id),
                 "employee_id": member.employee_id,
@@ -479,14 +496,14 @@ def get_team_members(
                 "name": member.full_name,
                 "email": member.email,
                 "contactNumber": member.phone,
-                "department": dept.name if dept else "Unknown",
+                "department": dept_name,
                 "role": member.role,
                 "status": member.status
             })
-        
+
         return result
-        
+
     except Exception as e:
-        print(f"[TEAM-ERROR] {str(e)}")
+        logger.error("[TEAM-ERROR] %s", e)
         traceback.print_exc()
         return []

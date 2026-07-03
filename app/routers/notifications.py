@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import String, cast
 from sqlalchemy.orm import Session
@@ -7,6 +9,7 @@ from ..deps import get_db, get_current_user
 from ..models import Notification, Profile
 from ..schemas.notification import NotificationCreate, NotificationOut
 
+log = logging.getLogger(__name__)
 router = APIRouter(prefix="/notifications", tags=["Notifications"])
 
 
@@ -16,11 +19,11 @@ def list_user_notifications(
     current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    print(f"DEBUG: list_user_notifications called with status={status}")
     """
     Get all notifications for current authenticated user.
     Optional filter by status (unread, read, etc.)
     """
+    log.debug("list_user_notifications called with status=%s", status)
     q = db.query(Notification).filter(Notification.user_id == current_user.id)
     
     if status:

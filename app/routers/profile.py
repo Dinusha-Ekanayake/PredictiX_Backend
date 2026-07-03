@@ -299,9 +299,13 @@ def get_my_colleagues(
         .all()
     )
 
+    # All colleagues share real_user.department_id — resolve the name once
+    # instead of one Department query per colleague (removes the N+1).
+    dept = db.query(Department).filter(Department.id == real_user.department_id).first()
+    dept_name = dept.name if dept else "Unknown"
+
     result = []
     for member in colleagues:
-        dept = db.query(Department).filter(Department.id == member.department_id).first()
         first_name, last_name = _split_name(member.full_name)
         result.append({
             "id": str(member.id),
@@ -311,7 +315,7 @@ def get_my_colleagues(
             "name": member.full_name,
             "email": member.email,
             "contactNumber": member.phone,
-            "department": dept.name if dept else "Unknown",
+            "department": dept_name,
             "role": member.role,
             "status": member.status,
         })

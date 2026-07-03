@@ -2,9 +2,12 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import func, text, extract
 import calendar
+import logging
 from datetime import datetime, timedelta
 
 from ..deps import get_db, get_current_user, require_user
+
+log = logging.getLogger("predictix")
 from ..models import Asset, Ticket, AssetFailurePrediction, MaintenanceEvent, AssetCostPrediction, Profile
 from fastapi import BackgroundTasks
 from ..services.dashboard_cache import DashboardCache
@@ -190,7 +193,9 @@ def _build_warehouse_summary(db: Session):
             total_fault_codes   = int(comp_row[5] or 0)
             assets_with_sensors = int(comp_row[6] or 0)
     except Exception:
-        pass
+        # Best-effort section — keep the dashboard rendering, but log why the
+        # component-health block failed instead of silently swallowing it.
+        log.warning("[warehouse] component health query failed", exc_info=True)
 
     # 10. Recent Maintenance Events (last 10)
     recent_maintenance = []
@@ -222,7 +227,8 @@ def _build_warehouse_summary(db: Session):
                 "notes":    (r[7] or "")[:80],
             })
     except Exception:
-        pass
+        # Best-effort section — log and continue with an empty list.
+        log.warning("[warehouse] recent maintenance query failed", exc_info=True)
 
     # ── Executive overview narrative (deterministic, data-grounded) ──────────
     # Mirrors the LLM report's insight_summary but is computed instantly here so
@@ -282,10 +288,7 @@ def _build_warehouse_summary(db: Session):
             f"and {retired_assets} retired assets."
         )
     except Exception:
-        import logging
-        logging.getLogger("predictix").warning(
-            "[warehouse] executive summary build failed", exc_info=True
-        )
+        log.warning("[warehouse] executive summary build failed", exc_info=True)
     finally:
         _s.close()
 

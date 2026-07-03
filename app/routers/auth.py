@@ -19,7 +19,7 @@ GET  /auth/warehouses
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 import logging
 import os
@@ -389,11 +389,14 @@ def _resolve_user_id(email: str) -> str:
 
 def _create_token(user_id: str, email: str, role: str, *, warehouse_id: Optional[str] = None) -> str:
     """Issue a 24-hour JWT. Includes warehouse_id when provided."""
+    now = datetime.now(timezone.utc)
     payload: dict = {
         "sub": user_id,
         "email": email,
         "role": role,
-        "exp": datetime.utcnow() + timedelta(hours=24),
+        "iat": now,
+        "nbf": now,
+        "exp": now + timedelta(hours=24),
     }
     if warehouse_id:
         payload["warehouse_id"] = warehouse_id
@@ -402,12 +405,15 @@ def _create_token(user_id: str, email: str, role: str, *, warehouse_id: Optional
 
 def _create_selection_token(user_id: str, email: str, full_name: str) -> str:
     """Issue a short-lived (5-min) intermediate token for the warehouse picker."""
+    now = datetime.now(timezone.utc)
     payload = {
         "sub": user_id,
         "email": email,
         "full_name": full_name,
         "type": "warehouse_selection",
-        "exp": datetime.utcnow() + timedelta(minutes=5),
+        "iat": now,
+        "nbf": now,
+        "exp": now + timedelta(minutes=5),
     }
     return jwt.encode(payload, _secret(), algorithm=_algorithm())
 
