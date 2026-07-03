@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
-from ..deps import get_db
+from ..deps import get_db, require_admin, get_current_user, active_warehouse_id
 from ..models import (
     Asset,
     AssetCostPrediction,
@@ -31,7 +31,11 @@ from ..models import (
 )
 from ..services.dashboard_cache import DashboardCache
 
-admin_dashboard_router = APIRouter(prefix="/admin-dashboard", tags=["Admin Dashboard"])
+admin_dashboard_router = APIRouter(
+    prefix="/admin-dashboard",
+    tags=["Admin Dashboard"],
+    dependencies=[Depends(require_admin)],
+)
 
 _cache = DashboardCache("admin", ttl=int(__import__("os").getenv("ADMIN_DASHBOARD_TTL", "60")))
 
@@ -51,23 +55,46 @@ def _months_ending_at(anchor: datetime, n: int) -> list[tuple[int, int, str]]:
 
 
 @admin_dashboard_router.get("/summary")
-def get_admin_summary(db: Session = Depends(get_db)):
-    """Unified summary data for the Admin Dashboard (real DB data, cached)."""
+def get_admin_summary(
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
+    """Unified summary data for the Admin Dashboard (real DB data, cached).
+
+    Scoped to the caller's active warehouse: a regular admin sees their own
+    warehouse; a super_admin sees the warehouse selected at login. Cache is
+    keyed per warehouse.
+    """
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
+    wh_id = active_warehouse_id(current_user)
     try:
-        return _cache.get_or_refresh(db, _build_admin_summary)
+        return _cache.get_or_refresh(
+            db,
+            lambda d: _build_admin_summary(d, wh_id),
+            key=wh_id,
+        )
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Admin dashboard failed: {e}")
 
 
-def _build_admin_summary(db: Session):
+def _build_admin_summary(db: Session, warehouse_id: str | None = None):
     now = datetime.now()
 
+    # Warehouse scoping: entities with no warehouse column of their own
+    # (predictions, costs, maintenance) are scoped via their asset's warehouse.
+    _wh = {"wh": warehouse_id} if warehouse_id else {}
+    _assets_in = (
+        "asset_id IN (SELECT id FROM assets WHERE warehouse_id = :wh)"
+        if warehouse_id else "TRUE"
+    )
+    _assets_where = "WHERE warehouse_id = :wh" if warehouse_id else ""
+    _tickets_where = "WHERE warehouse_id = :wh" if warehouse_id else ""
+
     # ── Query 1: all asset_failure_predictions aggregates in one pass ─────────
-    pred_agg = db.execute(text("""
+    pred_agg = db.execute(text(f"""
         SELECT
             COUNT(*)                                                        AS total_preds,
             COUNT(*) FILTER (WHERE health_score < 60)                       AS critical_alerts,
@@ -80,8 +107,8 @@ def _build_admin_summary(db: Session):
             COUNT(*) FILTER (WHERE health_score >= 40 AND health_score < 60) AS h_poor,
             COUNT(*) FILTER (WHERE health_score < 40)                       AS h_critical
         FROM asset_failure_predictions
-        WHERE health_score IS NOT NULL
-    """)).fetchone()
+        WHERE health_score IS NOT NULL AND {_assets_in}
+    """), _wh).fetchone()
 
     critical_alerts     = int(pred_agg[1] or 0)
     avg_health_raw      = pred_agg[2]
@@ -96,7 +123,7 @@ def _build_admin_summary(db: Session):
     ]
 
     # ── Query 2: all ticket aggregates + anchors in one pass ──────────────────
-    ticket_agg = db.execute(text("""
+    ticket_agg = db.execute(text(f"""
         SELECT
             COUNT(*) FILTER (WHERE status != 'closed')                          AS open_tickets,
             COUNT(*) FILTER (WHERE priority = 'high' AND status != 'closed')    AS high_priority,
@@ -108,7 +135,8 @@ def _build_admin_summary(db: Session):
             )::numeric, 1)                                                       AS avg_resolution_days,
             MAX(created_at)                                                      AS max_created_at
         FROM tickets
-    """)).fetchone()
+        {_tickets_where}
+    """), _wh).fetchone()
 
     open_tickets       = int(ticket_agg[0] or 0)
     high_priority_tickets = int(ticket_agg[1] or 0)
@@ -117,13 +145,14 @@ def _build_admin_summary(db: Session):
     ticket_anchor_dt   = ticket_agg[4] or now
 
     # ── Query 3: assets total + maintenance anchor + cost ─────────────────────
-    misc_agg = db.execute(text("""
+    misc_agg = db.execute(text(f"""
         SELECT
-            (SELECT COUNT(*) FROM assets)                              AS total_assets,
-            (SELECT MAX(performed_at) FROM maintenance_events)        AS max_maint_at,
+            (SELECT COUNT(*) FROM assets {_assets_where})             AS total_assets,
+            (SELECT MAX(performed_at) FROM maintenance_events
+             WHERE {_assets_in})                                      AS max_maint_at,
             (SELECT COALESCE(SUM(estimated_cost), 0)
-             FROM asset_cost_predictions)                             AS est_cost
-    """)).fetchone()
+             FROM asset_cost_predictions WHERE {_assets_in})          AS est_cost
+    """), _wh).fetchone()
 
     total_assets          = int(misc_agg[0] or 0)
     maint_anchor_dt       = misc_agg[1] or now
@@ -152,16 +181,17 @@ def _build_admin_summary(db: Session):
     health_trend = [{"month": abbr, "avgHealth": fleet_health} for (_, _, abbr) in cost_months]
 
     # ── Query 4: ticket trend grouped by month×status ─────────────────────────
-    ticket_rows = (
+    _tt_q = (
         db.query(
             func.to_char(Ticket.created_at, "YYYY-MM").label("ym"),
             Ticket.status,
             func.count(Ticket.id),
         )
         .filter(Ticket.created_at.isnot(None))
-        .group_by("ym", Ticket.status)
-        .all()
     )
+    if warehouse_id:
+        _tt_q = _tt_q.filter(Ticket.warehouse_id == warehouse_id)
+    ticket_rows = _tt_q.group_by("ym", Ticket.status).all()
     ticket_by_ym: dict[str, dict[str, int]] = {}
     for ym, status, cnt in ticket_rows:
         b = ticket_by_ym.setdefault(ym, {"opened": 0, "inProgress": 0, "resolved": 0})
@@ -183,7 +213,7 @@ def _build_admin_summary(db: Session):
         })
 
     # ── Query 5: cost trend grouped by month (total + preventive) ────────────
-    cost_rows = (
+    _cost_q = (
         db.query(
             func.to_char(MaintenanceEvent.performed_at, "YYYY-MM").label("ym"),
             func.sum(MaintenanceEvent.cost_amount).label("total"),
@@ -198,9 +228,12 @@ def _build_admin_summary(db: Session):
             ).label("planned"),
         )
         .filter(MaintenanceEvent.performed_at.isnot(None))
-        .group_by("ym")
-        .all()
     )
+    if warehouse_id:
+        _cost_q = _cost_q.join(Asset, MaintenanceEvent.asset_id == Asset.id).filter(
+            Asset.warehouse_id == warehouse_id
+        )
+    cost_rows = _cost_q.group_by("ym").all()
     cost_by_ym = {ym: (planned, total) for ym, total, planned in cost_rows}
     current_ym = f"{now.year:04d}-{now.month:02d}"
     cost_trend = []
@@ -211,40 +244,76 @@ def _build_admin_summary(db: Session):
         actual = None if ym == current_ym else (int(total) if total else 0)
         cost_trend.append({"month": abbr, "estimated": estimated, "actual": actual})
 
-    # ── Query 6: downtime by warehouse (planned vs unplanned) ────────────────
-    downtime_rows = (
-        db.query(
-            Warehouse.name,
-            MaintenanceEvent.event_type,
-            func.sum(MaintenanceEvent.downtime_hours),
+    # ── Query 6: downtime planned vs unplanned ───────────────────────────────
+    # Unscoped (fleet view): grouped BY WAREHOUSE so warehouses can be compared.
+    # Scoped to one warehouse: a single-warehouse bar is meaningless, so instead
+    # group BY MONTH (last 6 months) to show that warehouse's downtime trend.
+    # Both shapes keep the same output keys ({label, planned, unplanned}) so the
+    # frontend chart renders either without change; only the axis label differs.
+    if warehouse_id:
+        _dt_q = (
+            db.query(
+                func.to_char(MaintenanceEvent.performed_at, "YYYY-MM").label("ym"),
+                MaintenanceEvent.event_type,
+                func.sum(MaintenanceEvent.downtime_hours),
+            )
+            .join(Asset, MaintenanceEvent.asset_id == Asset.id)
+            .filter(
+                MaintenanceEvent.downtime_hours.isnot(None),
+                MaintenanceEvent.performed_at.isnot(None),
+                Asset.warehouse_id == warehouse_id,
+            )
+            .group_by("ym", MaintenanceEvent.event_type)
         )
-        .join(Asset, MaintenanceEvent.asset_id == Asset.id)
-        .join(Warehouse, Asset.warehouse_id == Warehouse.id)
-        .filter(MaintenanceEvent.downtime_hours.isnot(None))
-        .group_by(Warehouse.name, MaintenanceEvent.event_type)
-        .all()
-    )
-    dt_by_wh: dict[str, dict[str, float]] = {}
-    for name, etype, hours in downtime_rows:
-        wh = dt_by_wh.setdefault(name or "Unknown", {"planned": 0.0, "unplanned": 0.0})
-        if etype == "preventive":
-            wh["planned"] += float(hours or 0)
-        else:
-            wh["unplanned"] += float(hours or 0)
-    downtime_by_warehouse = [
-        {"warehouse": name, "planned": round(v["planned"]), "unplanned": round(v["unplanned"])}
-        for name, v in dt_by_wh.items()
-    ]
+        dt_by_key: dict[str, dict[str, float]] = {}
+        for ym, etype, hours in _dt_q.all():
+            bucket = dt_by_key.setdefault(ym, {"planned": 0.0, "unplanned": 0.0})
+            if etype == "preventive":
+                bucket["planned"] += float(hours or 0)
+            else:
+                bucket["unplanned"] += float(hours or 0)
+        # Emit the trailing 6 months in order, labelled by month abbreviation.
+        downtime_by_warehouse = []
+        for y, m, abbr in _months_ending_at(maint_anchor_dt, 6):
+            v = dt_by_key.get(f"{y:04d}-{m:02d}", {"planned": 0.0, "unplanned": 0.0})
+            downtime_by_warehouse.append(
+                {"warehouse": abbr, "planned": round(v["planned"]), "unplanned": round(v["unplanned"])}
+            )
+        downtime_scope = "month"
+    else:
+        _dt_q = (
+            db.query(
+                Warehouse.name,
+                MaintenanceEvent.event_type,
+                func.sum(MaintenanceEvent.downtime_hours),
+            )
+            .join(Asset, MaintenanceEvent.asset_id == Asset.id)
+            .join(Warehouse, Asset.warehouse_id == Warehouse.id)
+            .filter(MaintenanceEvent.downtime_hours.isnot(None))
+            .group_by(Warehouse.name, MaintenanceEvent.event_type)
+        )
+        dt_by_wh: dict[str, dict[str, float]] = {}
+        for name, etype, hours in _dt_q.all():
+            wh = dt_by_wh.setdefault(name or "Unknown", {"planned": 0.0, "unplanned": 0.0})
+            if etype == "preventive":
+                wh["planned"] += float(hours or 0)
+            else:
+                wh["unplanned"] += float(hours or 0)
+        downtime_by_warehouse = [
+            {"warehouse": name, "planned": round(v["planned"]), "unplanned": round(v["unplanned"])}
+            for name, v in dt_by_wh.items()
+        ]
+        downtime_scope = "warehouse"
 
     # ── Query 7: top 8 risk assets (worst health first) ───────────────────────
-    risk_rows = (
+    _risk_q = (
         db.query(Asset, AssetFailurePrediction, Warehouse.name)
         .join(AssetFailurePrediction, Asset.id == AssetFailurePrediction.asset_id)
         .outerjoin(Warehouse, Asset.warehouse_id == Warehouse.id)
-        .order_by(AssetFailurePrediction.health_score.asc())
-        .limit(8)
-        .all()
     )
+    if warehouse_id:
+        _risk_q = _risk_q.filter(Asset.warehouse_id == warehouse_id)
+    risk_rows = _risk_q.order_by(AssetFailurePrediction.health_score.asc()).limit(8).all()
     today = now.date()
     top_risk_assets = []
     for asset, pred, wh_name in risk_rows:
@@ -267,7 +336,7 @@ def _build_admin_summary(db: Session):
             return "warning"
         return "info"
 
-    notif_rows = (
+    _notif_q = (
         db.query(
             Notification.id,
             Notification.type,
@@ -280,10 +349,15 @@ def _build_admin_summary(db: Session):
         )
         .outerjoin(Asset, Notification.related_asset_id == Asset.id)
         .outerjoin(Warehouse, Asset.warehouse_id == Warehouse.id)
-        .order_by(Notification.created_at.desc())
-        .limit(5)
-        .all()
     )
+    if warehouse_id:
+        # Keep this warehouse's asset-linked alerts plus system/fleet-wide alerts
+        # that aren't tied to any asset (so system notices still show).
+        _notif_q = _notif_q.filter(
+            (Asset.warehouse_id == warehouse_id)
+            | (Notification.related_asset_id.is_(None))
+        )
+    notif_rows = _notif_q.order_by(Notification.created_at.desc()).limit(5).all()
     recent_alerts = [
         {
             "id":       str(nid),
@@ -298,7 +372,7 @@ def _build_admin_summary(db: Session):
 
     # ── Query 9: latest 5 tickets ─────────────────────────────────────────────
     assignee = Profile.__table__.alias("assignee")
-    ticket_list_rows = (
+    _tl_q = (
         db.query(
             Ticket.id,
             Ticket.ticket_number,
@@ -311,10 +385,10 @@ def _build_admin_summary(db: Session):
         )
         .outerjoin(Asset, Ticket.asset_id == Asset.id)
         .outerjoin(assignee, Ticket.assigned_to == assignee.c.id)
-        .order_by(Ticket.created_at.desc())
-        .limit(5)
-        .all()
     )
+    if warehouse_id:
+        _tl_q = _tl_q.filter(Ticket.warehouse_id == warehouse_id)
+    ticket_list_rows = _tl_q.order_by(Ticket.created_at.desc()).limit(5).all()
     valid_priorities = {"critical", "high", "medium", "low"}
     valid_statuses   = {"open", "in_progress", "resolved", "closed"}
     latest_tickets = []
@@ -394,6 +468,7 @@ def _build_admin_summary(db: Session):
         "healthDistribution": health_distribution,
         "costTrend": cost_trend,
         "downtimeByWarehouse": downtime_by_warehouse,
+        "downtimeScope": downtime_scope,  # "warehouse" (fleet) or "month" (scoped)
         "topRiskAssets": top_risk_assets,
         "recentAlerts": recent_alerts,
         "latestTickets": latest_tickets,

@@ -1,10 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from app.deps import get_db
+from app.deps import get_db, require_user
 from app.models import TicketComment
 from app.schemas.misc import TicketCommentCreate, TicketCommentOut
 
-router = APIRouter(prefix="/ticket-comments", tags=["Ticket Comments"])
+router = APIRouter(
+    prefix="/ticket-comments",
+    tags=["Ticket Comments"],
+    dependencies=[Depends(require_user)],
+)
 
 
 @router.post("/", response_model=TicketCommentOut)

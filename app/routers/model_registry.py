@@ -1,13 +1,17 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from app.deps import get_db
+from app.deps import get_db, require_admin, require_user
 from app.models import ModelRegistry
 from app.schemas.misc import ModelRegistryCreate, ModelRegistryOut
 
-router = APIRouter(prefix="/model-registry", tags=["Model Registry"])
+router = APIRouter(
+    prefix="/model-registry",
+    tags=["Model Registry"],
+    dependencies=[Depends(require_user)],
+)
 
 
-@router.post("/", response_model=ModelRegistryOut)
+@router.post("/", response_model=ModelRegistryOut, dependencies=[Depends(require_admin)])
 def create_model_registry(payload: ModelRegistryCreate, db: Session = Depends(get_db)):
     obj = ModelRegistry(**payload.model_dump())
     db.add(obj)

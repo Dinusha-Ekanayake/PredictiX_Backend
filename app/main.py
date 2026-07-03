@@ -1,9 +1,18 @@
 """PredictiX API — FastAPI application entry point."""
 from __future__ import annotations
 
+import os
+
+# Force HuggingFace libraries offline BEFORE any of them can be imported, so no
+# model weights are ever downloaded/loaded from the Hub at runtime. Only the
+# online Gradio Space (plain HTTP) and the local PdM/cost/survival .pkl models
+# (loaded via joblib/pickle, not the Hub) are used. These are hard defaults;
+# they can still be overridden by an explicit environment value if ever needed.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
 import joblib
 import logging
-import os
 import pickle
 import warnings
 from contextlib import asynccontextmanager
@@ -296,7 +305,15 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="PredictiX API", version="1.0", lifespan=lifespan)
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
-_default_origins = [
+# Production origins are always allowed. Local dev origins are only added when
+# not running in production (ENV != "production"), so a deployed backend doesn't
+# advertise localhost. Add any extra origins (e.g. new Vercel preview URLs) via
+# the ALLOWED_ORIGINS env var (comma-separated).
+_prod_origins = [
+    "https://predicti-x-frontend.vercel.app",
+    "https://predicti-x-frontend-dinusha-ekanayakes-projects.vercel.app",
+]
+_dev_origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "http://localhost:3001",
@@ -305,12 +322,15 @@ _default_origins = [
     "http://127.0.0.1:5173",
     "http://192.168.56.1:3000",
     "http://192.168.56.1:3001",
-    "https://predicti-x-frontend.vercel.app",
-    "https://predicti-x-frontend-dinusha-ekanayakes-projects.vercel.app",
 ]
+
+_is_production = os.getenv("ENV", "").strip().lower() == "production"
 _env_origins = os.getenv("ALLOWED_ORIGINS", "")
 _extra_origins = [o.strip() for o in _env_origins.split(",") if o.strip()]
-_allowed_origins = list(set(_default_origins + _extra_origins))
+
+_allowed_origins = list(set(_prod_origins + _extra_origins))
+if not _is_production:
+    _allowed_origins = list(set(_allowed_origins + _dev_origins))
 
 app.add_middleware(
     CORSMiddleware,
@@ -370,8 +390,11 @@ app.include_router(chatbot_router)
 # FAQs
 app.include_router(faqs_router)
 
-# Diagnostics
-app.include_router(db_debug_router)
+# Diagnostics — debug endpoints dump raw DB values, so they are OFF by default.
+# Enable only in a trusted environment by setting ENABLE_DEBUG_ROUTES=true.
+if os.getenv("ENABLE_DEBUG_ROUTES", "false").strip().lower() == "true":
+    app.include_router(db_debug_router)
+    log.info("Debug routes enabled (ENABLE_DEBUG_ROUTES=true).")
 
 # WebSockets
 app.include_router(websockets_router)

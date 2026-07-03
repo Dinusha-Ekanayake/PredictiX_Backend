@@ -3,7 +3,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from app.deps import get_db, get_current_user
+from app.deps import get_db, get_current_user, require_admin, require_user, is_admin_role
 from app.models import (
     Asset,
     Notification,
@@ -102,7 +102,7 @@ def get_ticket_status_counts(
     counts = {"open": 0, "in-progress": 0, "resolved": 0, "closed": 0}
     q = db.query(Ticket.status, func.count(Ticket.id)).group_by(Ticket.status)
 
-    if str(current_user.role).lower() != "admin":
+    if not is_admin_role(current_user):
         q = q.filter((Ticket.assigned_to == current_user.id) | (Ticket.created_by == current_user.id))
 
     rows = q.all()
@@ -149,7 +149,8 @@ def list_tickets(
 # non-admin user may only read/modify tickets they created.
 
 def _is_admin(user: Profile) -> bool:
-    return (getattr(user, "role", None) or "").lower() == "admin"
+    # Includes super_admin — see app.deps.is_admin_role.
+    return is_admin_role(user)
 
 
 def _serialize_user_ticket(t: Ticket, asset_name: str | None) -> dict:
@@ -298,7 +299,7 @@ def get_ticket(ticket_id: str, db: Session = Depends(get_db), _: object = Depend
 
 @router.put("/{ticket_id}", response_model=TicketOut)
 def update_ticket(ticket_id: str, payload: TicketUpdate, db: Session = Depends(get_db), current_user: object = Depends(get_current_user)):
-    if getattr(current_user, "role", "") != "admin":
+    if not is_admin_role(current_user):
         raise HTTPException(status_code=403, detail="Only admins can update tickets")
     obj = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not obj:
@@ -339,7 +340,7 @@ def update_ticket(ticket_id: str, payload: TicketUpdate, db: Session = Depends(g
     return obj
 
 
-@router.delete("/{ticket_id}")
+@router.delete("/{ticket_id}", dependencies=[Depends(require_admin)])
 def delete_ticket(ticket_id: str, db: Session = Depends(get_db)):
     """Delete a ticket and clean up its dependent rows in one transaction.
 
@@ -418,6 +419,7 @@ def preview_ticket(payload: TicketPreviewRequest, _: object = Depends(get_curren
 @router.post(
     "/categorize",
     response_model=TicketCategorizationResponse,
+    dependencies=[Depends(require_user)],
 )
 def categorize_ticket_endpoint(payload: TicketCategorizationRequest):
     try:
@@ -437,6 +439,7 @@ def categorize_ticket_endpoint(payload: TicketCategorizationRequest):
         "Sends ticket text to the AroshN/priority_classif_xgb XGBoost model on Hugging Face "
         "and returns a single priority label (e.g. Low, Medium, High, Critical)."
     ),
+    dependencies=[Depends(require_user)],
 )
 def prioritize_ticket_endpoint(payload: TicketPriorityRequest):
     try:

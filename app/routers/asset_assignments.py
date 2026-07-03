@@ -1,13 +1,17 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from app.deps import get_db
+from app.deps import get_db, require_admin, require_user
 from app.models import AssetAssignment
 from app.schemas.misc import AssetAssignmentCreate, AssetAssignmentOut
 
-router = APIRouter(prefix="/asset-assignments", tags=["Asset Assignments"])
+router = APIRouter(
+    prefix="/asset-assignments",
+    tags=["Asset Assignments"],
+    dependencies=[Depends(require_user)],
+)
 
 
-@router.post("/", response_model=AssetAssignmentOut)
+@router.post("/", response_model=AssetAssignmentOut, dependencies=[Depends(require_admin)])
 def create_asset_assignment(payload: AssetAssignmentCreate, db: Session = Depends(get_db)):
     obj = AssetAssignment(**payload.model_dump())
     db.add(obj)
@@ -30,7 +34,7 @@ def list_asset_assignments(
     return q.order_by(AssetAssignment.assigned_at.desc()).all()
 
 
-@router.delete("/{assignment_id}")
+@router.delete("/{assignment_id}", dependencies=[Depends(require_admin)])
 def delete_asset_assignment(assignment_id: str, db: Session = Depends(get_db)):
     obj = db.query(AssetAssignment).filter(AssetAssignment.id == assignment_id).first()
     if not obj:
