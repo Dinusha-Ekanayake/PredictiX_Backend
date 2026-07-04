@@ -32,6 +32,7 @@ from .routers.asset_assignments import router as asset_assignments_router
 from .routers.asset_documents import router as asset_documents_router
 from .routers.asset_status_history import router as asset_status_history_router
 from .routers.asset_summaries import router as asset_summaries_router
+from .routers.asset_component_rul import router as asset_component_rul_router
 from .routers.assets import router as assets_router
 from .routers.auth import router as auth_router
 from .routers.db_debug import router as db_debug_router
@@ -357,6 +358,7 @@ app.include_router(asset_assignments_router)
 app.include_router(asset_status_history_router)
 app.include_router(asset_documents_router)
 app.include_router(asset_summaries_router)
+app.include_router(asset_component_rul_router)
 app.include_router(maintenance_router)
 app.include_router(sensor_readings_router)
 
