@@ -249,41 +249,29 @@ def _resolve_onnx_dir() -> Path:
 
 @lru_cache(maxsize=1)
 def get_asset_summary_model() -> dict:
-    """Load and cache the asset-summary model + tokenizer.
+    """Load and cache the asset-summary ONNX model from HuggingFace.
 
-    Prefers the local ONNX (BART) model in ``onnx_asset_summary_final/`` via ONNX
-    Runtime — far lighter on memory than the PyTorch weights and fully offline.
-    Falls back to the HuggingFace PyTorch model only if the ONNX dir is missing.
+    Loads the ONNX (BART) model from the HF repo (HF_ASSET_SUMMARIZATION_REPO)
+    via ONNX Runtime. The download is gated behind ALLOW_MODEL_DOWNLOAD so
+    teammates who clone the repo don't fetch it just to run the backend — they
+    get the deterministic grounded fallback instead.
     """
     if os.getenv("DISABLE_HF_MODELS", "false").lower() == "true":
         raise RuntimeError("Asset summary model is disabled (DISABLE_HF_MODELS=true).")
 
-    from transformers import AutoTokenizer  # noqa: PLC0415
-
-    onnx_dir = _resolve_onnx_dir()
-    if onnx_dir.is_dir():
-        from optimum.onnxruntime import ORTModelForSeq2SeqLM  # noqa: PLC0415
-        tokenizer = AutoTokenizer.from_pretrained(str(onnx_dir))
-        model = ORTModelForSeq2SeqLM.from_pretrained(str(onnx_dir))
-        print(f"Asset summary ONNX model loaded from: {onnx_dir}")
-        return {"model": model, "tokenizer": tokenizer}
-
-    # No local ONNX model. Pulling from HF is a large download, so gate it:
-    # teammates who clone the repo (no local model folder) get the grounded
-    # deterministic fallback instead of downloading. Set ALLOW_MODEL_DOWNLOAD=true
-    # to fetch from HF.
     if os.getenv("ALLOW_MODEL_DOWNLOAD", "false").lower() != "true":
         raise RuntimeError(
-            "Asset summary model not present locally and downloads are disabled "
+            "Asset summary model download disabled "
             "(set ALLOW_MODEL_DOWNLOAD=true to fetch from HF) — using deterministic fallback."
         )
 
-    # Fallback: original PyTorch model from the Hub.
-    from transformers import AutoModelForSeq2SeqLM  # noqa: PLC0415
+    from transformers import AutoTokenizer  # noqa: PLC0415
+    from optimum.onnxruntime import ORTModelForSeq2SeqLM  # noqa: PLC0415
+
     hf_token, model_repo = get_hf_credentials()
     tokenizer = AutoTokenizer.from_pretrained(model_repo, token=hf_token)
-    model = AutoModelForSeq2SeqLM.from_pretrained(model_repo, token=hf_token)
-    print(f"Asset summary model loaded from Hub fallback: {model_repo}")
+    model = ORTModelForSeq2SeqLM.from_pretrained(model_repo, token=hf_token)
+    print(f"Asset summary ONNX model loaded from HF: {model_repo}")
     return {"model": model, "tokenizer": tokenizer}
 
 

@@ -26,9 +26,13 @@ load_dotenv(dotenv_path=env_path)
 logger = logging.getLogger(__name__)
 
 # ── Model location ──────────────────────────────────────────────────────────
-_BACKEND_ROOT = Path(__file__).resolve().parents[3]
-_LOCAL_ONNX = _BACKEND_ROOT / "onnx_ticket_summary_final"
-_MODEL_LOCATION = os.getenv("HF_TICKET_SUMMARIZATION_ONNX_REPO") or str(_LOCAL_ONNX)
+# Load the ONNX model from HuggingFace (no local folder). Prefers an explicit
+# ONNX repo var, else the main ticket-summarization repo.
+_MODEL_LOCATION = (
+    os.getenv("HF_TICKET_SUMMARIZATION_ONNX_REPO")
+    or os.getenv("HF_TICKET_SUMMARIZATION_REPO")
+    or ""
+)
 
 
 # ── Output quality guard ────────────────────────────────────────────────────
