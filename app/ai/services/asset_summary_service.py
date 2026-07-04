@@ -268,6 +268,16 @@ def get_asset_summary_model() -> dict:
         print(f"Asset summary ONNX model loaded from: {onnx_dir}")
         return {"model": model, "tokenizer": tokenizer}
 
+    # No local ONNX model. Pulling from HF is a large download, so gate it:
+    # teammates who clone the repo (no local model folder) get the grounded
+    # deterministic fallback instead of downloading. Set ALLOW_MODEL_DOWNLOAD=true
+    # to fetch from HF.
+    if os.getenv("ALLOW_MODEL_DOWNLOAD", "false").lower() != "true":
+        raise RuntimeError(
+            "Asset summary model not present locally and downloads are disabled "
+            "(set ALLOW_MODEL_DOWNLOAD=true to fetch from HF) — using deterministic fallback."
+        )
+
     # Fallback: original PyTorch model from the Hub.
     from transformers import AutoModelForSeq2SeqLM  # noqa: PLC0415
     hf_token, model_repo = get_hf_credentials()

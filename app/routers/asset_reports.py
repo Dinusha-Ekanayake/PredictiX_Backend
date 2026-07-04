@@ -5,16 +5,21 @@ Routes:
   GET  /asset-reports/dummy/pdf   — dummy PDF for styling test
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.background import BackgroundTasks
 from app.services.report_service import ReportService
 from app.services.pdf_render import PDFRenderService
+from app.deps import require_user
 import uuid
 import os
 import traceback
 
-router = APIRouter(prefix="/asset-reports", tags=["Asset Reports"])
+router = APIRouter(
+    prefix="/asset-reports",
+    tags=["Asset Reports"],
+    dependencies=[Depends(require_user)],
+)
 
 
 @router.post("/{asset_id}")

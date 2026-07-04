@@ -42,65 +42,80 @@ class DashboardCache:
         self.name = name
         self.ttl = ttl
         self._lock = threading.Lock()
-        self._payload: Optional[Any] = None
-        self._built_at: float = 0.0
-        self._refreshing: bool = False
+        # Per-key entries: key -> {"payload", "built_at", "refreshing"}.
+        # The key is the active warehouse id (or "__all__" for the unscoped,
+        # backwards-compatible global payload). This keeps each warehouse's
+        # dashboard cached separately so a super_admin switching warehouses,
+        # or two admins in different warehouses, never see each other's data.
+        self._entries: dict[str, dict] = {}
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
-    def get_or_refresh(self, db, build_fn: Callable) -> Any:
-        """Return the cached payload or build it now (first call only).
+    def get_or_refresh(self, db, build_fn: Callable, key: Optional[str] = None) -> Any:
+        """Return the cached payload for `key` or build it now (first call only).
 
-        On subsequent calls: always returns cached payload instantly and
+        `key` scopes the cache (e.g. the active warehouse id). Omitting it keeps
+        the original single-payload behaviour. `build_fn` receives the db session
+        (the caller closes over any key-specific filter it needs).
+
+        On subsequent calls: always returns the cached payload instantly and
         triggers a background rebuild if TTL has expired.
         """
+        k = key or "__all__"
         with self._lock:
-            payload = self._payload
-            stale = self._is_stale()
-            refreshing = self._refreshing
+            entry = self._entries.get(k)
+            payload = entry["payload"] if entry else None
+            stale = self._is_stale(entry)
+            refreshing = entry["refreshing"] if entry else False
 
         if payload is None:
-            # First ever call — must build synchronously so we have something to return.
-            return self._build_sync(db, build_fn)
+            # First ever call for this key — build synchronously.
+            return self._build_sync(db, build_fn, k)
 
         if stale and not refreshing:
-            # Serve stale instantly, refresh in background.
-            self._start_background_refresh(build_fn)
+            self._start_background_refresh(build_fn, k)
 
         return payload
 
     # ── Internals ──────────────────────────────────────────────────────────────
 
-    def _is_stale(self) -> bool:
-        return (time.monotonic() - self._built_at) >= self.ttl
+    def _is_stale(self, entry: Optional[dict]) -> bool:
+        if not entry:
+            return True
+        return (time.monotonic() - entry["built_at"]) >= self.ttl
 
-    def _build_sync(self, db, build_fn: Callable) -> Any:
+    def _build_sync(self, db, build_fn: Callable, key: str) -> Any:
         """Build synchronously (first-call path). Stores result and returns it."""
         try:
             payload = build_fn(db)
         except Exception:
-            log.exception("[DashboardCache:%s] sync build failed", self.name)
+            log.exception("[DashboardCache:%s] sync build failed (key=%s)", self.name, key)
             raise
         with self._lock:
-            self._payload = payload
-            self._built_at = time.monotonic()
+            self._entries[key] = {
+                "payload": payload,
+                "built_at": time.monotonic(),
+                "refreshing": False,
+            }
         return payload
 
-    def _start_background_refresh(self, build_fn: Callable) -> None:
+    def _start_background_refresh(self, build_fn: Callable, key: str) -> None:
         with self._lock:
-            if self._refreshing:
+            entry = self._entries.get(key)
+            if entry and entry["refreshing"]:
                 return
-            self._refreshing = True
+            if entry:
+                entry["refreshing"] = True
 
         t = threading.Thread(
             target=self._bg_worker,
-            args=(build_fn,),
+            args=(build_fn, key),
             daemon=True,
-            name=f"dash_cache_{self.name}",
+            name=f"dash_cache_{self.name}_{key}",
         )
         t.start()
 
-    def _bg_worker(self, build_fn: Callable) -> None:
+    def _bg_worker(self, build_fn: Callable, key: str) -> None:
         from app.db.session import SessionLocal
 
         new_payload = None
@@ -111,13 +126,17 @@ class DashboardCache:
             finally:
                 db.close()
         except Exception:
-            log.warning("[DashboardCache:%s] background refresh failed (stale data kept)", self.name, exc_info=True)
+            log.warning("[DashboardCache:%s] background refresh failed (stale data kept, key=%s)", self.name, key, exc_info=True)
 
         with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                entry = {"payload": None, "built_at": 0.0, "refreshing": False}
+                self._entries[key] = entry
             if new_payload is not None:
-                self._payload = new_payload
-                self._built_at = time.monotonic()
+                entry["payload"] = new_payload
+                entry["built_at"] = time.monotonic()
             else:
                 # Back off: don't retry for half a TTL to avoid hammering a down DB.
-                self._built_at = time.monotonic() - self.ttl + max(self.ttl // 2, 30)
-            self._refreshing = False
+                entry["built_at"] = time.monotonic() - self.ttl + max(self.ttl // 2, 30)
+            entry["refreshing"] = False

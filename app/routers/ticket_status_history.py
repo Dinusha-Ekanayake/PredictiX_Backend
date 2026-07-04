@@ -1,10 +1,14 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
-from app.deps import get_db
+from app.deps import get_db, require_user
 from app.models import TicketStatusHistory
 from app.schemas.misc import TicketStatusHistoryCreate, TicketStatusHistoryOut
 
-router = APIRouter(prefix="/ticket-status-history", tags=["Ticket Status History"])
+router = APIRouter(
+    prefix="/ticket-status-history",
+    tags=["Ticket Status History"],
+    dependencies=[Depends(require_user)],
+)
 
 
 @router.post("/", response_model=TicketStatusHistoryOut)

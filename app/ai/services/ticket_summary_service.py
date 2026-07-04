@@ -143,6 +143,16 @@ def get_ticket_summary_model() -> dict:
     from optimum.onnxruntime import ORTModelForSeq2SeqLM  # noqa: PLC0415
     from transformers import AutoTokenizer  # noqa: PLC0415
 
+    # If the model isn't a local dir, loading it means downloading from HF. Gate
+    # that so teammates cloning the repo (no local model) don't fetch it just to
+    # run the backend — the caller falls back to a deterministic summary. Set
+    # ALLOW_MODEL_DOWNLOAD=true to enable the download.
+    if not Path(_MODEL_LOCATION).is_dir() and os.getenv("ALLOW_MODEL_DOWNLOAD", "false").lower() != "true":
+        raise RuntimeError(
+            "Ticket summary model not present locally and downloads are disabled "
+            "(set ALLOW_MODEL_DOWNLOAD=true) — using deterministic fallback."
+        )
+
     token = os.getenv("HF_TOKEN")
     tokenizer = AutoTokenizer.from_pretrained(_MODEL_LOCATION, token=token)
     model = ORTModelForSeq2SeqLM.from_pretrained(_MODEL_LOCATION, token=token)

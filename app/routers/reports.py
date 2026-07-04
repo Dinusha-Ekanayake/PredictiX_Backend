@@ -1,10 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from app.deps import get_db
+from app.deps import get_db, require_admin, require_user
 from app.models import Report
 from app.schemas.report import ReportCreate, ReportUpdate, ReportOut
 
-router = APIRouter(prefix="/reports", tags=["Reports"])
+router = APIRouter(
+    prefix="/reports",
+    tags=["Reports"],
+    dependencies=[Depends(require_user)],
+)
 
 
 @router.post("/", response_model=ReportOut)
@@ -43,7 +47,7 @@ def update_report(report_id: str, payload: ReportUpdate, db: Session = Depends(g
     return obj
 
 
-@router.delete("/{report_id}")
+@router.delete("/{report_id}", dependencies=[Depends(require_admin)])
 def delete_report(report_id: str, db: Session = Depends(get_db)):
     obj = db.query(Report).filter(Report.id == report_id).first()
     if not obj:

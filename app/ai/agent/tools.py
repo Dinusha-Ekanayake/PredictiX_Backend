@@ -21,7 +21,8 @@ class ToolContext:
 
     @property
     def is_admin(self) -> bool:
-        return str(getattr(self.user, "role", "")).lower() == "admin"
+        # super_admin has the same admin capabilities as admin.
+        return str(getattr(self.user, "role", "")).lower() in ("admin", "super_admin")
 
     @property
     def user_id(self) -> str:

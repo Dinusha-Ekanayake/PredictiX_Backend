@@ -1,13 +1,17 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from app.deps import get_db
+from app.deps import get_db, require_user
 from app.models import UserNotificationPreference
 from app.schemas.misc import (
     UserNotificationPreferenceCreate,
     UserNotificationPreferenceOut,
 )
 
-router = APIRouter(prefix="/notification-preferences", tags=["Notification Preferences"])
+router = APIRouter(
+    prefix="/notification-preferences",
+    tags=["Notification Preferences"],
+    dependencies=[Depends(require_user)],
+)
 
 
 @router.post("/", response_model=UserNotificationPreferenceOut)
