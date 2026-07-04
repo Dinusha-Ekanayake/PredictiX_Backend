@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func, text, extract
 import calendar
@@ -6,6 +6,7 @@ import logging
 from datetime import datetime, timedelta
 
 from ..deps import get_db, get_current_user, require_user, active_warehouse_id
+from ..models import Department
 
 log = logging.getLogger("predictix")
 from ..models import Asset, Ticket, AssetFailurePrediction, MaintenanceEvent, AssetCostPrediction, Profile
@@ -372,6 +373,92 @@ def _build_warehouse_summary(db: Session, warehouse_id: str | None = None):
         "assetsWithSensors": assets_with_sensors,
         "recentMaintenance": recent_maintenance,
     }
+
+@warehouse_dashboard_router.get("/departments-overview")
+def get_departments_overview(
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
+    """Departments in the caller's active warehouse, with active-user counts,
+    asset counts, and ticket load per department.
+
+    Scoped the same way as /summary: a regular admin sees their own warehouse's
+    departments; a super_admin sees the warehouse they selected at login. If
+    there is no active warehouse (e.g. a plain user), all departments are
+    returned unscoped.
+    """
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    warehouse_id = active_warehouse_id(current_user)
+
+    dept_q = db.query(Department)
+    if warehouse_id:
+        dept_q = dept_q.filter(Department.warehouse_id == warehouse_id)
+    departments = dept_q.order_by(Department.name).all()
+
+    if not departments:
+        return {"departments": [], "ticketsByDepartment": []}
+
+    dept_ids = [d.id for d in departments]
+
+    # Active users per department (pre-fetched map, no N+1).
+    user_counts = dict(
+        db.query(Profile.department_id, func.count(Profile.id))
+        .filter(Profile.department_id.in_(dept_ids), Profile.status == "active")
+        .group_by(Profile.department_id)
+        .all()
+    )
+
+    # Assets per department (pre-fetched map, no N+1).
+    asset_counts = dict(
+        db.query(Asset.department_id, func.count(Asset.id))
+        .filter(Asset.department_id.in_(dept_ids))
+        .group_by(Asset.department_id)
+        .all()
+    )
+
+    # Ticket load per department — tickets link to a department via their
+    # asset, so join Ticket -> Asset and group by Asset.department_id.
+    ticket_counts = dict(
+        db.query(Asset.department_id, func.count(Ticket.id))
+        .join(Ticket, Ticket.asset_id == Asset.id)
+        .filter(Asset.department_id.in_(dept_ids))
+        .group_by(Asset.department_id)
+        .all()
+    )
+    open_ticket_counts = dict(
+        db.query(Asset.department_id, func.count(Ticket.id))
+        .join(Ticket, Ticket.asset_id == Asset.id)
+        .filter(Asset.department_id.in_(dept_ids), Ticket.status != "closed")
+        .group_by(Asset.department_id)
+        .all()
+    )
+
+    dept_rows = []
+    ticket_rows = []
+    for d in departments:
+        active_users = int(user_counts.get(d.id, 0))
+        asset_count = int(asset_counts.get(d.id, 0))
+        ticket_count = int(ticket_counts.get(d.id, 0))
+        open_tickets = int(open_ticket_counts.get(d.id, 0))
+
+        dept_rows.append({
+            "id": str(d.id),
+            "name": d.name,
+            "code": d.code,
+            "activeUsers": active_users,
+            "assetCount": asset_count,
+            "ticketCount": ticket_count,
+            "openTickets": open_tickets,
+        })
+        ticket_rows.append({"department": d.name, "tickets": ticket_count, "openTickets": open_tickets})
+
+    # Highest ticket load first, so the chart reads as a ranked list.
+    ticket_rows.sort(key=lambda r: r["tickets"], reverse=True)
+
+    return {"departments": dept_rows, "ticketsByDepartment": ticket_rows}
+
 
 @warehouse_dashboard_router.get("/maintenance-schedule")
 def get_maintenance_schedule(db: Session = Depends(get_db)):
