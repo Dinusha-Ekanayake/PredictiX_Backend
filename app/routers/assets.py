@@ -3,7 +3,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import String, cast, or_
+from sqlalchemy import String, cast, or_, func, case
 from sqlalchemy.orm import Session
 
 from app.deps import (
@@ -17,7 +17,7 @@ from app.deps import (
     ADMIN_ROLES,
 )
 from app.models import Asset, Profile
-from app.schemas.asset import AssetCreate, AssetOut, AssetUpdate
+from app.schemas.asset import AssetCreate, AssetOut, AssetListOut, AssetUpdate
 from app.services.service_reminder_service import send_manual_reminder
 
 
@@ -119,7 +119,7 @@ def create_asset(
     return obj
 
 
-@router.get("/", response_model=list[AssetOut])
+@router.get("/", response_model=list[AssetListOut])
 def list_assets(
     search: str | None = Query(default=None, description="Search by asset id, asset code, asset name, VIN, registration, make, model"),
     warehouse_id: str | None = Query(default=None),
@@ -234,6 +234,24 @@ def list_assets(
     else:
         q = q.order_by(sort_column.desc())
 
+    # Project down to only the columns the list view needs (AssetListOut) —
+    # filters/sort above still run against the full table; this only trims
+    # what's SELECTed and hydrated into Python, cutting payload + ORM overhead.
+    q = q.with_entities(
+        Asset.id,
+        Asset.asset_code,
+        Asset.asset_name,
+        Asset.asset_type,
+        Asset.vehicle_type,
+        Asset.make,
+        Asset.model,
+        Asset.manufacture_year,
+        Asset.status,
+        Asset.health_band,
+        Asset.warehouse_id,
+        Asset.meta,
+    )
+
     return q.offset(offset).limit(limit).all()
 
 
@@ -293,6 +311,129 @@ def count_assets(
         q = q.filter(Asset.assigned_to.is_(None))
 
     return {"count": q.count()}
+
+
+@router.get("/stats")
+def get_asset_stats(
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
+    """Fleet-wide asset summary counts for the AssetsSummary cards.
+
+    Computed as SQL aggregates over ALL matching assets (scoped to the
+    caller's warehouse the same way list_assets is), independent of whatever
+    page of results the table is currently showing. This exists so paginating
+    the list endpoint doesn't change what the summary cards report.
+    """
+    q = db.query(Asset)
+    scoped_wh = _enforced_warehouse(current_user)
+    if scoped_wh:
+        q = q.filter(Asset.warehouse_id == scoped_wh)
+
+    band_score = case(
+        (Asset.health_band == "excellent", 90),
+        (Asset.health_band == "good", 72),
+        (Asset.health_band == "moderate", 52),
+        (Asset.health_band == "poor", 30),
+        (Asset.health_band == "critical", 12),
+        else_=50,
+    )
+
+    # Real values of the asset_status Postgres enum: active, inactive,
+    # under_maintenance, critical, decommissioned.
+    row = q.with_entities(
+        func.count(Asset.id),
+        func.count(Asset.id).filter(cast(Asset.status, String) == "active"),
+        func.count(Asset.id).filter(cast(Asset.status, String) == "under_maintenance"),
+        func.count(Asset.id).filter(Asset.health_band == "critical"),
+        func.count(Asset.id).filter(cast(Asset.status, String).in_(("inactive", "decommissioned"))),
+        func.avg(band_score),
+    ).one()
+
+    total, operational, maintenance, critical, offline, avg_band_score = row
+    total = int(total or 0)
+
+    return {
+        "total": total,
+        "operational": int(operational or 0),
+        "maintenance": int(maintenance or 0),
+        "critical": int(critical or 0),
+        "offline": int(offline or 0),
+        "avgHealth": round(float(avg_band_score), 0) if total and avg_band_score is not None else 0,
+    }
+
+
+@router.get("/analytics")
+def get_asset_analytics(
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
+    """Fleet-wide descriptive analytics for the AssetsAnalytics charts:
+    status distribution, health-band distribution, vehicle-type breakdown,
+    and the top 5 at-risk assets. Computed over ALL matching assets (scoped
+    to the caller's warehouse), independent of pagination — so the charts
+    don't silently reflect only whatever page of the table is showing.
+    """
+    base_q = db.query(Asset)
+    scoped_wh = _enforced_warehouse(current_user)
+    if scoped_wh:
+        base_q = base_q.filter(Asset.warehouse_id == scoped_wh)
+
+    status_rows = (
+        base_q.with_entities(cast(Asset.status, String), func.count(Asset.id))
+        .group_by(Asset.status)
+        .all()
+    )
+    health_rows = (
+        base_q.with_entities(Asset.health_band, func.count(Asset.id))
+        .group_by(Asset.health_band)
+        .all()
+    )
+    type_rows = (
+        base_q.with_entities(
+            func.coalesce(Asset.vehicle_type, Asset.asset_type, "Other"),
+            func.count(Asset.id),
+        )
+        .group_by(func.coalesce(Asset.vehicle_type, Asset.asset_type, "Other"))
+        .order_by(func.count(Asset.id).desc())
+        .limit(8)
+        .all()
+    )
+
+    # Top 5 at-risk: critical first, then poor, each ordered by criticality_score desc.
+    risk_order = case(
+        (Asset.health_band == "critical", 0),
+        (Asset.health_band == "poor", 1),
+        else_=2,
+    )
+    at_risk_rows = (
+        base_q.filter(Asset.health_band.in_(("critical", "poor")))
+        .with_entities(Asset.id, Asset.asset_name, Asset.asset_code, Asset.health_band)
+        .order_by(risk_order, Asset.criticality_score.desc().nullslast())
+        .limit(5)
+        .all()
+    )
+
+    return {
+        "statusDistribution": [
+            {"name": s or "unknown", "value": int(c)} for s, c in status_rows
+        ],
+        "healthDistribution": [
+            {"name": (h or "unknown").lower(), "value": int(c)} for h, c in health_rows
+        ],
+        "vehicleTypeDistribution": [
+            {"name": t or "Other", "value": int(c)} for t, c in type_rows
+        ],
+        "topAtRisk": [
+            {
+                "id": str(i),
+                "asset_name": name,
+                "asset_code": code,
+                "health_band": band,
+            }
+            for i, name, code, band in at_risk_rows
+        ],
+    }
 
 
 @router.get("/{asset_id}", response_model=AssetOut)
