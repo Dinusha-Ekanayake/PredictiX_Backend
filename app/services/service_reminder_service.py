@@ -47,6 +47,27 @@ def _already_sent_auto(
     )
 
 
+def _already_sent_auto_keys(db: Session, asset_ids: list[UUID]) -> set[tuple[UUID, date, int]]:
+    """Batch version of _already_sent_auto — one query for the whole sweep
+    instead of one query per due asset."""
+    if not asset_ids:
+        return set()
+    rows = (
+        db.query(
+            ServiceReminderLog.asset_id,
+            ServiceReminderLog.service_date,
+            ServiceReminderLog.reminder_offset_days,
+        )
+        .filter(
+            ServiceReminderLog.asset_id.in_(asset_ids),
+            ServiceReminderLog.trigger == "auto",
+            ServiceReminderLog.success.is_(True),
+        )
+        .all()
+    )
+    return {(asset_id, service_date, offset_days) for asset_id, service_date, offset_days in rows}
+
+
 def _resolve_warehouse_name(db: Session, warehouse_id) -> Optional[str]:
     try:
         from app.models import Warehouse
@@ -184,14 +205,27 @@ def run_auto_reminder_sweep(db: Session) -> dict:
 
     stats = {"checked": len(due_assets), "sent": 0, "skipped": 0, "failed": 0}
 
+    if not due_assets:
+        log.info("Service reminder sweep complete — %s", stats)
+        return stats
+
+    # Batch both lookups that were previously issued once per due asset:
+    # already-sent dedup checks and assignee profile resolution.
+    already_sent_keys = _already_sent_auto_keys(db, [a.id for a in due_assets])
+    assignee_ids = {a.assigned_to for a in due_assets if a.assigned_to is not None}
+    profiles_by_id = {
+        p.id: p
+        for p in db.query(Profile).filter(Profile.id.in_(assignee_ids)).all()
+    } if assignee_ids else {}
+
     for asset in due_assets:
         offset = target_dates[asset.next_service_date]
 
-        if _already_sent_auto(db, asset.id, asset.next_service_date, offset):
+        if (asset.id, asset.next_service_date, offset) in already_sent_keys:
             stats["skipped"] += 1
             continue
 
-        user = db.query(Profile).filter(Profile.id == asset.assigned_to).first()
+        user = profiles_by_id.get(asset.assigned_to)
         if not user:
             log.warning("Asset %s assigned_to=%s but profile not found", asset.id, asset.assigned_to)
             stats["skipped"] += 1

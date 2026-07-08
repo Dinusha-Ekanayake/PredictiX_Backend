@@ -22,7 +22,7 @@ GROQ_API_KEY=<your-groq-api-key>
 # ── ML / Batch Predictions ────────────────────────────────────
 DISABLE_HF_MODELS=true           # Keep true on Railway — saves ~3GB RAM
 BATCH_RUN_ON_STARTUP=true        # Run full batch right after server boots
-BATCH_INTERVAL_HOURS=1           # Re-run predictions every hour
+BATCH_INTERVAL_HOURS=24          # Re-run predictions once a day
 
 # ── CORS ──────────────────────────────────────────────────────
 # Add your frontend URL(s) here (comma-separated, no trailing slash)

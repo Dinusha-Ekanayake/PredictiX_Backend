@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import String, cast, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -146,18 +146,34 @@ def _build_item(
     )
 
 
-def _user_to_item(user: Profile, db: Session) -> UserItemOut:
-    """Single-user variant (used by create/update). Three small scoped queries."""
+def _user_to_item(
+    user: Profile,
+    db: Session,
+    known_department_name: str | None = None,
+    known_warehouse_name: str | None = None,
+) -> UserItemOut:
+    """Single-user variant (used by create/update).
+
+    Callers that already looked up the Department/Warehouse row (e.g. to
+    resolve name -> id) can pass the name straight through via
+    known_department_name/known_warehouse_name to skip the re-fetch here.
+    """
     dept_names = {}
     if user.department_id:
-        name = db.query(Department.name).filter(Department.id == user.department_id).scalar()
-        if name is not None:
-            dept_names[user.department_id] = name
+        if known_department_name is not None:
+            dept_names[user.department_id] = known_department_name
+        else:
+            name = db.query(Department.name).filter(Department.id == user.department_id).scalar()
+            if name is not None:
+                dept_names[user.department_id] = name
     warehouse_names = {}
     if user.warehouse_id:
-        name = db.query(Warehouse.name).filter(Warehouse.id == user.warehouse_id).scalar()
-        if name is not None:
-            warehouse_names[user.warehouse_id] = name
+        if known_warehouse_name is not None:
+            warehouse_names[user.warehouse_id] = known_warehouse_name
+        else:
+            name = db.query(Warehouse.name).filter(Warehouse.id == user.warehouse_id).scalar()
+            if name is not None:
+                warehouse_names[user.warehouse_id] = name
     assigned = (
         db.query(func.count(Asset.id))
         .filter(Asset.assigned_to == str(user.id), cast(Asset.status, String) == "active")
@@ -170,6 +186,8 @@ def _user_to_item(user: Profile, db: Session) -> UserItemOut:
 
 @router.get("/", response_model=list[UserItemOut])
 def list_users(
+    limit: int = Query(default=500, ge=1, le=2000),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
@@ -193,7 +211,7 @@ def list_users(
         users_q = users_q.filter(
             (Profile.warehouse_id == scoped_wh) | (Profile.warehouse_id.is_(None))
         )
-    users = users_q.all()
+    users = users_q.order_by(Profile.full_name).offset(offset).limit(limit).all()
     return [_build_item(u, dept_names, warehouse_names, asset_counts) for u in users]
 
 
@@ -246,7 +264,11 @@ def create_user(data: UserCreate, db: Session = Depends(get_db)):
     except Exception:
         log.exception("New-user notification failed (non-fatal)")
 
-    return _user_to_item(profile, db)
+    return _user_to_item(
+        profile, db,
+        known_department_name=dept.name if dept else None,
+        known_warehouse_name=wh.name if wh else None,
+    )
 
 
 @router.put("/{user_id}", response_model=UserItemOut)
@@ -353,9 +375,14 @@ def list_user_assets(user_id: str, db: Session = Depends(get_db)):
         .all()
     )
 
+    warehouse_ids = {a.warehouse_id for a in assets if a.warehouse_id is not None}
+    warehouse_names = {
+        w.id: w.name
+        for w in db.query(Warehouse.id, Warehouse.name).filter(Warehouse.id.in_(warehouse_ids)).all()
+    } if warehouse_ids else {}
+
     result = []
     for asset in assets:
-        wh = db.query(Warehouse).filter(Warehouse.id == asset.warehouse_id).first()
         result.append(UserAssignedAssetOut(
             assignment_id=str(asset.id),
             asset_id=str(asset.id),
@@ -363,7 +390,7 @@ def list_user_assets(user_id: str, db: Session = Depends(get_db)):
             name=asset.asset_name,
             asset_type=asset.asset_type,
             category=asset.category,
-            location=wh.name if wh else "Unknown",
+            location=warehouse_names.get(asset.warehouse_id, "Unknown"),
             status=asset.status or "active",
             healthPercent=float(asset.criticality_score or 100),
             nextServiceDate=asset.next_service_date.isoformat() if asset.next_service_date else None,

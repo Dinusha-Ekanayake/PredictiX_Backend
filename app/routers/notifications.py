@@ -16,6 +16,8 @@ router = APIRouter(prefix="/notifications", tags=["Notifications"])
 @router.get("/", response_model=list[NotificationOut])
 def list_user_notifications(
     status: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -25,15 +27,17 @@ def list_user_notifications(
     """
     log.debug("list_user_notifications called with status=%s", status)
     q = db.query(Notification).filter(Notification.user_id == current_user.id)
-    
+
     if status:
         q = q.filter(cast(Notification.status, String) == status)
-    
-    return q.order_by(Notification.created_at.desc()).all()
+
+    return q.order_by(Notification.created_at.desc()).offset(offset).limit(limit).all()
 
 
 @router.get("/unread", response_model=list[NotificationOut])
 def get_unread_notifications(
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -45,6 +49,8 @@ def get_unread_notifications(
             & (cast(Notification.status, String) == "unread")
         )
         .order_by(Notification.created_at.desc())
+        .offset(offset)
+        .limit(limit)
         .all()
     )
 
