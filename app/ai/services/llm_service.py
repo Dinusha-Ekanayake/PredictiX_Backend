@@ -19,7 +19,6 @@ log = logging.getLogger("predictix.llm")
 # Fast models prioritized by speed/availability. The primary heavy model is always at the end.
 MODEL_CASCADE = [
     "llama-3.1-8b-instant",
-    "llama3-8b-8192",
     "gemma2-9b-it",
     "mixtral-8x7b-32768",
     "llama-3.3-70b-versatile"
