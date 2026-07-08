@@ -13,7 +13,7 @@ services:
       - key: BATCH_RUN_ON_STARTUP
         value: "true"
       - key: BATCH_INTERVAL_HOURS
-        value: "1"
+        value: "24"
       # ── Set these in the Render dashboard (do NOT commit real values) ──
       - key: DATABASE_URL
         sync: false

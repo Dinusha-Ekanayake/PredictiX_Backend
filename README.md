@@ -413,7 +413,7 @@ ENABLE_HF_WARMER=false
 
 # PDM Batch Job
 BATCH_RUN_ON_STARTUP=false
-BATCH_INTERVAL_HOURS=1
+BATCH_INTERVAL_HOURS=24
 
 # Dashboard Cache TTLs (seconds)
 ADMIN_DASHBOARD_TTL=60
@@ -529,7 +529,7 @@ APScheduler runs a PDM batch prediction job at startup (if enabled) and then on 
 
 ```env
 BATCH_RUN_ON_STARTUP=true    # Run immediately on server start
-BATCH_INTERVAL_HOURS=1       # Repeat every N hours
+BATCH_INTERVAL_HOURS=24       # Repeat every N hours
 ```
 
 ---

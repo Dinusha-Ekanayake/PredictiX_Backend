@@ -238,15 +238,15 @@ async def lifespan(_: FastAPI):
     else:
         log.info("HuggingFace models disabled (DISABLE_HF_MODELS=true). Skipping warmup.")
 
-    # ── Hourly batch PDM scheduler ─────────────────────────────────────────────
-    batch_interval_hours = int(os.getenv("BATCH_INTERVAL_HOURS", "1"))
+    # ── Batch PDM scheduler ─────────────────────────────────────────────────────
+    batch_interval_hours = int(os.getenv("BATCH_INTERVAL_HOURS", "24"))
     scheduler = BackgroundScheduler(daemon=True)
     scheduler.add_job(
         _run_scheduled_batch,
         trigger="interval",
         hours=batch_interval_hours,
         id="pdm_batch",
-        name="PDM hourly batch prediction",
+        name=f"PDM batch prediction (every {batch_interval_hours}h)",
         replace_existing=True,
     )
 

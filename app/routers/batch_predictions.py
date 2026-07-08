@@ -97,7 +97,10 @@ def trigger_full_batch(db: Session = Depends(get_db)) -> dict:
     """
     from app.main import _load_pdm_models
     _load_pdm_models()
-    from app.main import clf_model, clf_features, clf_threshold, clf_categorical_cols, reg_model, reg_features
+    from app.main import (
+        clf_model, clf_features, clf_threshold, clf_categorical_cols,
+        reg_model, reg_features, reg_categorical_cols,
+    )
 
     if clf_model is None or reg_model is None:
         raise HTTPException(status_code=503, detail="ML models are not loaded yet")
@@ -110,6 +113,7 @@ def trigger_full_batch(db: Session = Depends(get_db)) -> dict:
         clf_categorical_cols=clf_categorical_cols,
         reg_model=reg_model,
         reg_features=reg_features,
+        reg_categorical_cols=reg_categorical_cols,
     )
     return result
 
@@ -120,7 +124,10 @@ def trigger_single_asset(asset_id: str, db: Session = Depends(get_db)) -> dict:
     Returns the prediction summary."""
     from app.main import _load_pdm_models
     _load_pdm_models()
-    from app.main import clf_model, clf_features, clf_threshold, clf_categorical_cols, reg_model, reg_features
+    from app.main import (
+        clf_model, clf_features, clf_threshold, clf_categorical_cols,
+        reg_model, reg_features, reg_categorical_cols,
+    )
 
     if clf_model is None or reg_model is None:
         raise HTTPException(status_code=503, detail="ML models are not loaded yet")
@@ -138,6 +145,7 @@ def trigger_single_asset(asset_id: str, db: Session = Depends(get_db)) -> dict:
         clf_categorical_cols=clf_categorical_cols,
         reg_model=reg_model,
         reg_features=reg_features,
+        reg_categorical_cols=reg_categorical_cols,
     )
 
     if result.get("status") == "error":
