@@ -145,6 +145,55 @@ def list_tickets(
     return q.order_by(Ticket.created_at.desc()).offset(offset).limit(limit).all()
 
 
+@router.get("/paginated")
+def list_tickets_paginated(
+    status: str | None = Query(default=None),
+    priority: str | None = Query(default=None),
+    search: str | None = Query(default=None),
+    asset_id: str | None = Query(default=None),
+    warehouse_id: str | None = Query(default=None),
+    limit: int = Query(default=10, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: object = Depends(get_current_user),
+):
+    """Paginated ticket list with search, filters and total count.
+    Used by the frontend ticket page instead of direct Supabase client calls.
+    Admins see all tickets; regular users see only tickets they created or are assigned to.
+    """
+    from sqlalchemy import or_, cast
+    from sqlalchemy import String
+
+    q = db.query(Ticket)
+
+    # Role-based scoping
+    if not is_admin_role(current_user):
+        uid = str(getattr(current_user, "id", ""))
+        q = q.filter(
+            (cast(Ticket.created_by, String) == uid) |
+            (cast(Ticket.assigned_to, String) == uid)
+        )
+
+    if status:
+        q = q.filter(Ticket.status == _normalize_status(status))
+    if priority:
+        q = q.filter(Ticket.priority == _normalize_priority(priority))
+    if asset_id:
+        q = q.filter(Ticket.asset_id == asset_id)
+    if warehouse_id:
+        q = q.filter(Ticket.warehouse_id == warehouse_id)
+    if search and search.strip():
+        term = f"%{search.strip()}%"
+        q = q.filter(
+            Ticket.title.ilike(term) | Ticket.description.ilike(term)
+        )
+
+    total = q.count()
+    rows = q.order_by(Ticket.created_at.desc()).offset(offset).limit(limit).all()
+
+    return {"tickets": [TicketOut.model_validate(t) for t in rows], "total": total}
+
+
 # ── User (owner-scoped) ticket endpoints ──────────────────────────────────────
 # Registered BEFORE "/{ticket_id}" so "/mine" isn't captured as an id.
 # Ownership is enforced server-side via the app JWT (get_current_user): a
