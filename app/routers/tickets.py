@@ -126,6 +126,8 @@ def list_tickets(
     asset_id: str | None = Query(default=None),
     warehouse_id: str | None = Query(default=None),
     assigned_to: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     _: object = Depends(get_current_user),
 ):
@@ -140,7 +142,7 @@ def list_tickets(
         q = q.filter(Ticket.warehouse_id == warehouse_id)
     if assigned_to:
         q = q.filter(Ticket.assigned_to == assigned_to)
-    return q.order_by(Ticket.created_at.desc()).all()
+    return q.order_by(Ticket.created_at.desc()).offset(offset).limit(limit).all()
 
 
 # ── User (owner-scoped) ticket endpoints ──────────────────────────────────────
