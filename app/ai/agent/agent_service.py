@@ -72,6 +72,17 @@ def _classify_intent(question: str) -> str:
     if q.startswith("faq") or "frequently asked" in q:
         return INTENT_FAQ
 
+    # Fast-path: "how to X" / "guide me" / "help me" / "how do i" → always FAQ
+    FAQ_TRIGGERS = (
+        "how to ", "how do i ", "guide me", "guide me to", "help me ",
+        "what is the", "how can i ", "how should i ", "steps to ",
+        "where is ", "where can i find", "how does ", "what are the steps",
+        "is it possible to", "can i ", "how to navigate", "i want to know how",
+    )
+    if any(q.startswith(t) for t in FAQ_TRIGGERS):
+        return INTENT_FAQ
+
+
     # LLM router call
     try:
         result = call_groq(

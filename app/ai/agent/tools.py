@@ -162,13 +162,20 @@ def handle_navigation(question: str, ctx: ToolContext) -> dict:
 
 
 def handle_faq(question: str, ctx: ToolContext) -> dict:
-    """Fetch FAQs from Supabase, filter by relevance, 0 LLM tokens."""
+    """Fetch FAQs from Supabase, synthesize with LLM, and fallback to admin if not found."""
+    from app.ai.services.llm_service import call_groq
+
+    def _get_faq_fallback() -> dict:
+        return {
+            "answer": "Please reach out to our admins at **neuromindspredictix@gmail.com** and they'll get back to you as soon as possible.",
+            "action_buttons": [{"label": "Copy Admin Email", "path": "copy:neuromindspredictix@gmail.com"}],
+        }
+
     try:
         resp = (
             supabase.from_("faqs")
             .select("id,question,answer,category")
             .eq("is_active", True)
-            .order("created_at", desc=True)
             .execute()
         )
         all_faqs = resp.data or []
@@ -177,34 +184,63 @@ def handle_faq(question: str, ctx: ToolContext) -> dict:
         all_faqs = []
 
     q_lower = question.lower()
-    # Score by keyword overlap
-    words = [w for w in q_lower.split() if len(w) > 3]
+    words = [w for w in q_lower.split() if len(w) > 2]
     scored = []
     for faq in all_faqs:
-        score = sum(1 for w in words if w in faq.get("question", "").lower() or w in faq.get("answer", "").lower())
+        faq_q = faq.get("question", "").lower()
+        faq_a = faq.get("answer", "").lower()
+        score = sum(2 for w in words if w in faq_q) + sum(1 for w in words if w in faq_a)
         if score > 0:
             scored.append((score, faq))
 
     scored.sort(key=lambda x: x[0], reverse=True)
-    top = [faq for _, faq in scored[:3]]
-
-    if not top and all_faqs:
-        top = all_faqs[:3]  # show generic FAQs if no match
+    top = [faq for _, faq in scored[:4]]
 
     if not top:
-        return {
-            "answer": "❓ I couldn't find any FAQs in the system right now. Please check the Helpdesk for support.",
-            "action_buttons": [{"label": "Go to Helpdesk", "path": "/admin/help-desk"}],
-        }
+        return _get_faq_fallback()
 
-    lines = ["❓ **Here are some FAQs that might help:**\n"]
-    for faq in top:
-        lines.append(f"**Q: {faq['question']}**")
-        lines.append(f"A: {faq['answer']}\n")
+    context_str = "\n".join(
+        f"Q: {faq['question']}\nA: {faq['answer']}" for faq in top
+    )
+    user_name = ctx.full_name.split()[0] if ctx.full_name else "there"
+
+    try:
+        summary, fb = call_groq(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are PredictiX Assistant. Answer the user's question using ONLY the provided FAQ context. "
+                        "CRITICAL INSTRUCTION: If the provided context does NOT contain the exact answer to the user's specific question (for example, they ask how to delete a ticket, but the context only explains how to open or view tickets), you MUST reply EXACTLY with the word: NOT_FOUND. Do not try to guess or invent an answer based on unrelated context. "
+                        "If the context DOES answer the question accurately, be conversational, encouraging, and use simple language. "
+                        "Never mention 'the FAQ', 'the context', or 'the database'. Just answer naturally. "
+                        "Always start your response with a ✅ emoji and end with: '*Let me know if you need any more help! 😊*'"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"My name is {user_name}. My question is: \"{question}\"\n\n"
+                        f"FAQ Context:\n{context_str}"
+                    ),
+                },
+            ],
+            model="llama-3.1-8b-instant",
+            max_tokens=400,
+            temperature=0.1,
+        )
+        
+        if not summary or "NOT_FOUND" in str(summary).strip():
+            return _get_faq_fallback()
+            
+        answer = fb + str(summary)
+    except Exception as e:
+        log.error("FAQ LLM synthesis failed: %s", e)
+        return _get_faq_fallback()
 
     return {
-        "answer": "\n".join(lines),
-        "action_buttons": [{"label": "View All FAQs", "path": "/admin/help-desk"}],
+        "answer": answer,
+        "action_buttons": [],
     }
 
 
@@ -253,13 +289,19 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
     """Two-agent pipeline: Table Selector → SQL Generator → Execute → Summarize."""
     from app.ai.services.llm_service import call_groq
 
+    def _get_generic_fallback() -> dict:
+        return {
+            "answer": "Please reach out to our admins at **neuromindspredictix@gmail.com** and they'll get back to you as soon as possible.",
+            "action_buttons": [{"label": "Copy Admin Email", "path": "copy:neuromindspredictix@gmail.com"}],
+        }
+
     # Collect fallback messages from models
     fallback_msg = ""
 
     # ── Step 0: Dashboard Fast-Path (100% UI Parity) ─────────────────────────
     q_lower = question.lower()
-    is_counting = any(w in q_lower for w in ["how many", "count", "total", "stats", "summary", "overview"])
-    if is_counting and any(w in q_lower for w in ["user", "ticket", "asset", "warehouse", "alert", "prediction"]):
+    is_summary = any(w in q_lower for w in ["summary", "overview", "dashboard stats", "all stats"])
+    if is_summary:
         try:
             from app.routers.admin_dashboard import _build_admin_summary
             from app.models import Profile
@@ -376,14 +418,14 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             return {"answer": "⚠️ I had trouble generating a database query. Please try again shortly.", "action_buttons": []}
 
         if sql.startswith("ERROR:"):
-            return {"answer": f"⚠️ {sql}", "action_buttons": []}
+            return _get_generic_fallback()
 
         # Security guard: block any mutation
         import re
         sql_upper = sql.upper()
         for dangerous in ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE", "GRANT"]:
             if re.search(rf"\b{dangerous}\b", sql_upper):
-                return {"answer": "🚫 I can only run read-only queries. This operation is not permitted.", "action_buttons": []}
+                return _get_generic_fallback()
 
         # ── Step 3: Execute ───────────────────────────────────────────────────────
         if ctx.db is None:
@@ -411,11 +453,17 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             return "📊 No data found."
         lines = [f"📊 **Results ({len(rows)} record{'s' if len(rows) != 1 else ''}):**\n"]
         for row in rows:
-            line_parts = []
-            for k, v in row.items():
-                if v is not None and str(v).strip():
-                    line_parts.append(f"{v}")
-            lines.append("• " + " | ".join(line_parts))
+            keys = list(row.keys())
+            # Clean format for two-column stats (e.g. Metric/Count, Category/Total)
+            if len(keys) == 2 and str(keys[1]).lower() in ["count", "value", "total", "amount", "sum"]:
+                lines.append(f"• **{row[keys[0]]}:** {row[keys[1]]}")
+            else:
+                line_parts = []
+                for k, v in row.items():
+                    if v is not None and str(v).strip():
+                        pretty_key = str(k).replace("_", " ").title()
+                        line_parts.append(f"**{pretty_key}:** {v}")
+                lines.append("• " + " | ".join(line_parts))
         return "\n".join(lines)
 
     summarizer_prompt = (
