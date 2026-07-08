@@ -123,10 +123,6 @@ PredictiX_backend/
 ├── alembic/                         # Database migration scripts
 ├── docs/                            # Developer notes and lessons
 ├── requirements.txt
-├── Procfile                         # Heroku / Railway deployment config
-├── railway.toml
-├── render.yaml
-├── nixpacks.toml
 └── alembic.ini
 ```
 
@@ -507,14 +503,14 @@ python seed_data/seed.py
 
 ## Deployment
 
-The backend is pre-configured for one-command deployment on several platforms:
+The backend is deployed on AWS EC2 — see `EC2 Backend Deployment by Dinusha.md` for the full setup.
 
 ```bash
-# Production command (Railway / Render / Heroku)
+# Production command
 uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
 ```
 
-Set all required environment variables in your platform's dashboard. The `railway.toml`, `render.yaml`, `Procfile`, and `nixpacks.toml` are committed and ready to use.
+Set all required environment variables in `.env` on the EC2 instance.
 
 ---
 

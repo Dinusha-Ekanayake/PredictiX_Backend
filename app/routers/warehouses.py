@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from app.deps import get_db, require_admin, require_user
 from app.models import Warehouse
@@ -19,8 +19,12 @@ def create_warehouse(payload: WarehouseCreate, db: Session = Depends(get_db)):
     return obj
 
 @router.get("/", response_model=list[WarehouseOut])
-def list_warehouses(db: Session = Depends(get_db)):
-    return db.query(Warehouse).order_by(Warehouse.name).all()
+def list_warehouses(
+    limit: int = Query(default=200, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    return db.query(Warehouse).order_by(Warehouse.name).offset(offset).limit(limit).all()
 
 @router.get("/{warehouse_id}", response_model=WarehouseOut)
 def get_warehouse(warehouse_id: str, db: Session = Depends(get_db)):

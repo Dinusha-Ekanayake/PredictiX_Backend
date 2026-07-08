@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from app.deps import get_db, require_admin, require_user
 from app.models import ModelRegistry
@@ -21,8 +21,12 @@ def create_model_registry(payload: ModelRegistryCreate, db: Session = Depends(ge
 
 
 @router.get("/", response_model=list[ModelRegistryOut])
-def list_model_registry(db: Session = Depends(get_db)):
-    return db.query(ModelRegistry).order_by(ModelRegistry.created_at.desc()).all()
+def list_model_registry(
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    return db.query(ModelRegistry).order_by(ModelRegistry.created_at.desc()).offset(offset).limit(limit).all()
 
 
 @router.get("/{model_id}", response_model=ModelRegistryOut)

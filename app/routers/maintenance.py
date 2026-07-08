@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from app.deps import get_db, require_admin, require_user
-from app.models import MaintenanceEvent
+from app.models import Asset, MaintenanceEvent
 from app.schemas.maintenance import (
     MaintenanceEventCreate,
     MaintenanceEventUpdate,
@@ -17,6 +17,10 @@ router = APIRouter(
 
 @router.post("/", response_model=MaintenanceEventOut, dependencies=[Depends(require_admin)])
 def create_maintenance_event(payload: MaintenanceEventCreate, db: Session = Depends(get_db)):
+    asset = db.query(Asset).filter(Asset.id == payload.asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+
     obj = MaintenanceEvent(**payload.model_dump())
     db.add(obj)
     db.commit()

@@ -62,18 +62,23 @@ def get_notification(
     db: Session = Depends(get_db),
 ):
     """Get a specific notification (user can only see their own)"""
+    try:
+        notif_id = UUID(notification_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid notification id")
+
     notification = (
         db.query(Notification)
         .filter(
-            (Notification.id == UUID(notification_id))
+            (Notification.id == notif_id)
             & (Notification.user_id == current_user.id)
         )
         .first()
     )
-    
+
     if not notification:
         raise HTTPException(status_code=404, detail="Notification not found")
-    
+
     return notification
 
 
@@ -84,18 +89,23 @@ def mark_notification_read(
     db: Session = Depends(get_db),
 ):
     """Mark a notification as read"""
+    try:
+        notif_id = UUID(notification_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid notification id")
+
     notification = (
         db.query(Notification)
         .filter(
-            (Notification.id == UUID(notification_id))
+            (Notification.id == notif_id)
             & (Notification.user_id == current_user.id)
         )
         .first()
     )
-    
+
     if not notification:
         raise HTTPException(status_code=404, detail="Notification not found")
-    
+
     notification.status = "read"
     db.commit()
     db.refresh(notification)
@@ -126,18 +136,23 @@ def delete_notification(
     db: Session = Depends(get_db),
 ):
     """Delete a notification (user can only delete their own)"""
+    try:
+        notif_id = UUID(notification_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid notification id")
+
     notification = (
         db.query(Notification)
         .filter(
-            (Notification.id == UUID(notification_id))
+            (Notification.id == notif_id)
             & (Notification.user_id == current_user.id)
         )
         .first()
     )
-    
+
     if not notification:
         raise HTTPException(status_code=404, detail="Notification not found")
-    
+
     db.delete(notification)
     db.commit()
     

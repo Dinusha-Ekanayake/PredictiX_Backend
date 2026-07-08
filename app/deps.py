@@ -71,6 +71,12 @@ def get_current_user(
     if db is not None:
         user = db.query(Profile).filter(Profile.id == user_id).first()
         if user:
+            # Re-check status on every request, not just at login — otherwise
+            # deactivating a user has no effect until their JWT naturally
+            # expires (up to 24h), since the token itself carries no status.
+            if (user.status or "").strip().lower() != "active":
+                raise HTTPException(status_code=401, detail="Account is not active")
+
             # Super admin JWT carries the warehouse they selected at login.
             # Override the profile's warehouse_id so all downstream queries
             # are automatically scoped to the chosen warehouse.

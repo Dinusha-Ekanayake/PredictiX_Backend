@@ -357,7 +357,7 @@ def list_user_departments(db: Session = Depends(get_db)):
 @router.get("/warehouses", response_model=List[str])
 def list_user_warehouses(db: Session = Depends(get_db)):
     """Simple list of active warehouse names for dropdowns"""
-    return [w.name for w in db.query(Warehouse).all()]
+    return [w.name for w in db.query(Warehouse).filter(Warehouse.is_active == True).all()]
 
 @router.get("/users/{user_id}/assets", response_model=List[UserAssignedAssetOut], dependencies=[Depends(require_admin)])
 def get_user_assets(user_id: str, db: Session = Depends(get_db)):
