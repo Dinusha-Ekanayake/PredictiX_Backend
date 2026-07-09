@@ -11,10 +11,8 @@ import os
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
-import joblib
+import json
 import logging
-import pickle
-import warnings
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -78,16 +76,24 @@ log = logging.getLogger("predictix")
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_DIR = BASE_DIR / "ai" / "models"
 
-CLF_MODEL_PATH    = MODEL_DIR / "pdm_classifier_model" / "predictix_xgboost_classifier_v6.pkl"
-CLF_FEATURES_PATH = MODEL_DIR / "pdm_classifier_model" / "maintenance_classifier_features.pkl"
-REG_MODEL_PATH    = MODEL_DIR / "pdm_regressor_model"  / "predictix_pm_model_v5.pkl"
-REG_FEATURES_PATH = MODEL_DIR / "pdm_regressor_model"  / "regression_selected_features.pkl"
+# v7 LightGBM boosters (current). Old v5/v6 CatBoost/XGBoost bundles are kept
+# on disk under each model folder's old/ subdirectory as an archive — not
+# loaded anywhere in the app.
+CLF_MODEL_PATH = MODEL_DIR / "pdm_classifier_model" / "predictix_pdm_classifier_v7.txt"
+REG_MODEL_PATH = MODEL_DIR / "pdm_regressor_model"  / "predictix_pdm_regressor_v7.txt"
+CLF_DECISION_LOG_PATH = MODEL_DIR / "pdm_classifier_model" / "classifier_v7_decision_log.json"
+REG_DECISION_LOG_PATH = MODEL_DIR / "pdm_regressor_model"  / "regressor_v7_decision_log.json"
 
-clf_model = None
+# Same names used as the model_registry.model_name keys throughout the app —
+# kept in sync with app.ai.services.vehicle_prediction_service.
+CLASSIFIER_MODEL_NAME = "pdm_classifier_model"
+REGRESSOR_MODEL_NAME = "pdm_regressor_model"
+
+clf_model = None            # LgbModelBundle
 clf_features: list = []
 clf_threshold: float = 0.5
 clf_categorical_cols: list = []
-reg_model = None
+reg_model = None            # LgbModelBundle
 reg_features: list = []
 reg_categorical_cols: list = []
 
@@ -95,12 +101,68 @@ scheduler: BackgroundScheduler | None = None
 _model_load_lock = __import__('threading').Lock()
 
 
-def _load_pickle(path: Path):
+def _load_decision_log(path: Path) -> dict:
     try:
-        with open(path, "rb") as fh:
-            return pickle.load(fh)
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
     except Exception:
-        return joblib.load(path)
+        return {}
+
+
+def _upsert_model_registry(db, model_name: str, model_type: str, version: str, artifact_path: Path, metrics: dict) -> None:
+    from app.models import ModelRegistry
+
+    existing = (
+        db.query(ModelRegistry)
+        .filter(ModelRegistry.model_name == model_name, ModelRegistry.version == version)
+        .first()
+    )
+    if existing:
+        existing.framework = "lightgbm"
+        existing.artifact_path = str(artifact_path)
+        existing.metrics = metrics
+        existing.is_active = True
+    else:
+        db.add(ModelRegistry(
+            model_name=model_name,
+            model_type=model_type,
+            version=version,
+            framework="lightgbm",
+            artifact_path=str(artifact_path),
+            metrics=metrics,
+            is_active=True,
+        ))
+    # Deactivate any other version of this model so is_active always points
+    # at exactly the model generation currently loaded in memory.
+    db.query(ModelRegistry).filter(
+        ModelRegistry.model_name == model_name, ModelRegistry.version != version
+    ).update({"is_active": False})
+
+
+def _register_active_models() -> None:
+    from app.db.session import SessionLocal
+
+    clf_log = _load_decision_log(CLF_DECISION_LOG_PATH)
+    reg_log = _load_decision_log(REG_DECISION_LOG_PATH)
+
+    db = SessionLocal()
+    try:
+        if clf_log:
+            _upsert_model_registry(
+                db, CLASSIFIER_MODEL_NAME, "failure_classification",
+                str(clf_log.get("version", "unknown")), CLF_MODEL_PATH, clf_log,
+            )
+        if reg_log:
+            _upsert_model_registry(
+                db, REGRESSOR_MODEL_NAME, "maintenance_regression",
+                str(reg_log.get("version", "unknown")), REG_MODEL_PATH, reg_log,
+            )
+        db.commit()
+    except Exception:
+        db.rollback()
+        log.exception("Failed to register active PdM models in model_registry")
+    finally:
+        db.close()
 
 
 def _load_pdm_models():
@@ -114,31 +176,28 @@ def _load_pdm_models():
         if clf_model is not None and reg_model is not None:
             return
         try:
-            # ── Classifier bundle (pickle) ──────────────────────────────
-            clf_bundle = _load_pickle(CLF_MODEL_PATH)
-            if isinstance(clf_bundle, dict):
-                clf_model            = clf_bundle["model"]
-                clf_features         = list(clf_bundle.get("feature_cols", []))
-                clf_threshold        = float(clf_bundle.get("threshold", 0.5))
-                clf_categorical_cols = list(clf_bundle.get("categorical_cols", []))
-            else:
-                clf_model    = clf_bundle
-                clf_features = _load_pickle(CLF_FEATURES_PATH)
+            from app.ai.services.lgb_model_adapter import LgbModelBundle
 
-            # ── Regressor bundle (joblib) ───────────────────────────────
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                reg_bundle = _load_pickle(REG_MODEL_PATH)
-            if isinstance(reg_bundle, dict):
-                reg_model            = reg_bundle["explainer_model"]
-                reg_features         = list(reg_bundle.get("feature_cols", []))
-                reg_categorical_cols = list(reg_bundle.get("categorical_cols", []))
-            else:
-                reg_model    = reg_bundle
-                reg_features = _load_pickle(REG_FEATURES_PATH)
+            clf_model = LgbModelBundle(CLF_MODEL_PATH)
+            clf_features = clf_model.feature_names
+            clf_categorical_cols = clf_model.categorical_cols
 
-            log.info("PdM models loaded — clf: %d features, reg: %d features",
-                     len(clf_features), len(reg_features))
+            reg_model = LgbModelBundle(REG_MODEL_PATH)
+            reg_features = reg_model.feature_names
+            reg_categorical_cols = reg_model.categorical_cols
+
+            clf_log = _load_decision_log(CLF_DECISION_LOG_PATH)
+            clf_threshold = float(clf_log.get("threshold_max_f1", 0.5))
+
+            log.info(
+                "PdM v7 LightGBM models loaded — clf: %d features (threshold=%.3f), reg: %d features",
+                len(clf_features), clf_threshold, len(reg_features),
+            )
+
+            try:
+                _register_active_models()
+            except Exception:
+                log.exception("model_registry upsert failed (non-fatal)")
         except Exception as exc:
             log.warning("Local PdM model loading failed (non-fatal): %s", exc)
 

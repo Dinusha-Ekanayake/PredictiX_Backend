@@ -30,6 +30,7 @@ scikit-learn==1.6.1
 catboost==1.2.10
 shap==0.51.0
 xgboost==3.2.0
+lightgbm==4.6.0
 lifelines==0.30.3
 joblib==1.5.3
 

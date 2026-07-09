@@ -50,6 +50,13 @@ def _serialize(row: PdmBatchPrediction) -> dict[str, Any]:
         "run_duration_ms": row.run_duration_ms,
         "status": row.status,
         "error_message": row.error_message,
+        "model_version": row.model_version,
+        "tier": row.tier,
+        "agreement": row.agreement,
+        "display_mode": row.display_mode,
+        "horizon_text": row.horizon_text,
+        "recommended_action": row.recommended_action,
+        "horizon_saturated": row.horizon_saturated,
     }
 
 
