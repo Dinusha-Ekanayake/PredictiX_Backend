@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from app.deps import get_db, require_admin, require_user
 from app.models import Warehouse
 from app.schemas.warehouse import WarehouseCreate, WarehouseOut
+from app.services.reference_data_cache import invalidate_warehouse_names
 
 router = APIRouter(
     prefix="/warehouses",
@@ -16,6 +17,7 @@ def create_warehouse(payload: WarehouseCreate, db: Session = Depends(get_db)):
     db.add(obj)
     db.commit()
     db.refresh(obj)
+    invalidate_warehouse_names()
     return obj
 
 @router.get("/", response_model=list[WarehouseOut])

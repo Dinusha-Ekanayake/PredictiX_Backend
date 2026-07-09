@@ -60,7 +60,7 @@ def get_my_profile(
         try:
             direct = db.query(Asset).filter(
                 Asset.assigned_to == real_user.id,
-                Asset.status != "retired"
+                Asset.status != "decommissioned"
             ).count()
             via_table = db.query(AssetAssignment).filter(
                 AssetAssignment.user_id == real_user.id,
@@ -189,7 +189,7 @@ def get_my_assets(
                 LIMIT 1
             ) sr ON true
             WHERE a.assigned_to = :uid
-              AND a.status != 'retired'
+              AND a.status != 'decommissioned'
         """), {"uid": uid}).fetchall()
 
         logger.debug("[ASSETS] raw SQL returned %d rows", len(rows))
@@ -248,11 +248,15 @@ def get_my_stats(
         uid = str(uid_row.id)
 
         total = db.execute(sql_text(
-            "SELECT count(*) FROM assets WHERE assigned_to = :uid AND status != 'retired'"
+            "SELECT count(*) FROM assets WHERE assigned_to = :uid AND status != 'decommissioned'"
         ), {"uid": uid}).scalar() or 0
 
+        # "Active" means operationally active — a critical-health asset is
+        # explicitly NOT active, it needs attention (shown separately via
+        # health scores). The real asset_status enum has no 'operational'
+        # value; 'active' is the only status that means what this label says.
         active = db.execute(sql_text(
-            "SELECT count(*) FROM assets WHERE assigned_to = :uid AND status IN ('active','operational','critical')"
+            "SELECT count(*) FROM assets WHERE assigned_to = :uid AND status = 'active'"
         ), {"uid": uid}).scalar() or 0
 
         return {"assignedAssets": int(total), "activeAssets": int(active)}
@@ -281,12 +285,13 @@ def get_all_users(
         # Pre-fetch lookup maps ONCE to avoid per-user N+1 queries (dept name,
         # warehouse name, and both asset-count sources). Mirrors users.list_users.
         from sqlalchemy import func as _func
-        dept_names = {d.id: d.name for d in db.query(Department.id, Department.name).all()}
-        warehouse_names = {w.id: w.name for w in db.query(Warehouse.id, Warehouse.name).all()}
+        from app.services.reference_data_cache import get_department_names, get_warehouse_names
+        dept_names = get_department_names()
+        warehouse_names = get_warehouse_names()
         direct_counts = {
             assigned_to: cnt
             for assigned_to, cnt in db.query(Asset.assigned_to, _func.count(Asset.id))
-            .filter(Asset.assigned_to.isnot(None), Asset.status != "retired")
+            .filter(Asset.assigned_to.isnot(None), Asset.status != "decommissioned")
             .group_by(Asset.assigned_to)
             .all()
         }
@@ -370,7 +375,7 @@ def get_user_assets(user_id: str, db: Session = Depends(get_db)):
 
         direct_assets = db.query(Asset).filter(
             Asset.assigned_to == uid,
-            Asset.status != "retired"
+            Asset.status != "decommissioned"
         ).all()
 
         assignment_rows = db.query(AssetAssignment).filter(
@@ -448,7 +453,7 @@ def update_any_user(user_id: str, data: UserUpdate, db: Session = Depends(get_db
             department=dp_name or "Not assigned",
             status=user.status,
             assignedAssets=max(
-                db.query(Asset).filter(Asset.assigned_to == user.id, Asset.status != "retired").count(),
+                db.query(Asset).filter(Asset.assigned_to == user.id, Asset.status != "decommissioned").count(),
                 db.query(AssetAssignment).filter(AssetAssignment.user_id == user.id, AssetAssignment.is_active == True).count()
             )
         )
