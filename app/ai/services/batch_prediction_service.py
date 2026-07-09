@@ -699,9 +699,14 @@ def run_batch_for_all_assets(
     run_start = time.time()
     log.info("[batch] Starting PDM batch run…")
 
+    # Score every asset still in the fleet — not just "active" ones. A
+    # critical or under_maintenance asset needs fresh predictions more than
+    # an active one, not less; excluding them silently stops predictions
+    # the moment an asset needs them most. Only decommissioned assets (fully
+    # retired from the fleet) are skipped.
     assets = (
         db.query(Asset)
-        .filter(cast(Asset.status, String) == "active")
+        .filter(cast(Asset.status, String) != "decommissioned")
         .order_by(Asset.asset_code)
         .all()
     )
