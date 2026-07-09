@@ -500,7 +500,19 @@ class PdmBatchPrediction(Base):
     run_duration_ms = Column(Integer)
     error_message = Column(Text)
     status = Column(Text, nullable=False, default="ok")
-    
+
+    # Auditability — which model generation + exact input produced this row.
+    model_version = Column(Text)
+    feature_snapshot = Column(JSONB, default={})
+
+    # Decision layer (app.ai.services.pdm_decision_service.build_decision).
+    tier = Column(Text)
+    agreement = Column(Boolean)
+    display_mode = Column(Text)
+    horizon_text = Column(Text)
+    recommended_action = Column(Text)
+    horizon_saturated = Column(Boolean, default=False)
+
 
 class ServiceReminderLog(Base):
     """One row per service-reminder email send attempt."""

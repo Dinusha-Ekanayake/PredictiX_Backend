@@ -11,38 +11,81 @@ from pydantic import BaseModel
 # =========================
 
 class PredictionRequest(BaseModel):
-    engine_hours_since_last_service: Optional[float] = None
-    days_since_last_service: Optional[int] = None
-    tire_health_pct: Optional[float] = None
-    brake_health_pct: Optional[float] = None
-    mileage_since_last_service_km: Optional[float] = None
-    battery_health_pct: Optional[float] = None
-    oil_life_pct: Optional[float] = None
-    hydraulic_health_pct: Optional[float] = None
-    vibration_rms_mm_s: Optional[float] = None
-    fuel_price_lkr_per_l: Optional[float] = None
-    engine_hours_total: Optional[float] = None
-    coolant_temp_max_c: Optional[float] = None
-    lifetime_service_count: Optional[int] = None
-    engine_temp_avg_c: Optional[float] = None
-    battery_voltage_v: Optional[float] = None
-    odometer_km: Optional[float] = None
-    downtime_hours_last_90d: Optional[float] = None
-    active_fault_code_count: Optional[int] = None
-    vehicle_age_years: Optional[int] = None
-    distance_last_30d_km: Optional[float] = None
-    payload_utilization_pct: Optional[float] = None
-    trip_count_30d: Optional[int] = None
-    ambient_humidity_avg_pct: Optional[float] = None
-    rough_road_pct: Optional[float] = None
-    idle_hours_last_30d: Optional[float] = None
+    """Raw feature payload for the low-level /predictions/* debug endpoints
+    (classification / regression / full). Mirrors the v7 LightGBM models'
+    58-feature schema (see predictix_pdm_classifier_v7.txt / _regressor_v7.txt
+    feature_names) plus snapshot_date, which run_regression() needs to turn
+    a days-until-maintenance prediction into a calendar date.
+
+    Unlike the asset-based /vehicle-predictions/{id} and /batch-predictions/*
+    endpoints, this one takes hand-supplied features rather than reading a
+    real Asset + SensorReading — intended for testing/debugging the models
+    directly. All fields are optional; missing ones are treated as
+    0 (numeric) / "" (categorical) by LgbModelBundle.build_frame().
+    """
+    snapshot_date: Optional[str] = None
+
+    # Categorical (must match the model's trained vocabulary to be used
+    # natively; unrecognized values fall back to LightGBM's missing-value
+    # handling rather than raising)
+    vehicle_type: Optional[str] = None
     vehicle_role: Optional[str] = None
-    port_route_pct: Optional[float] = None
-    overload_events_30d: Optional[int] = None
-    fuel_rate_lph: Optional[float] = None
+    make_model: Optional[str] = None
+    fuel_type: Optional[str] = None
+    transmission: Optional[str] = None
+    service_provider_type: Optional[str] = None
+    maintenance_priority: Optional[str] = None
+    route_type: Optional[str] = None
+    cargo_type: Optional[str] = None
+    operating_shift: Optional[str] = None
+    last_service_type: Optional[str] = None
+    parts_replaced_last_service: Optional[str] = None
+    major_component_replaced: Optional[str] = None
+
+    # Numeric
+    manufacture_year: Optional[int] = None
+    vehicle_age_years: Optional[int] = None
     payload_capacity_kg: Optional[float] = None
+    odometer_km: Optional[float] = None
+    engine_hours_total: Optional[float] = None
+    distance_last_30d_km: Optional[float] = None
+    operating_hours_last_30d: Optional[float] = None
+    idle_hours_last_30d: Optional[float] = None
+    trip_count_30d: Optional[int] = None
+    avg_trip_distance_km: Optional[float] = None
     avg_payload_kg: Optional[float] = None
+    payload_utilization_pct: Optional[float] = None
+    overload_events_30d: Optional[int] = None
+    start_stop_burden_30d: Optional[int] = None
+    rough_road_pct: Optional[float] = None
+    urban_route_pct: Optional[float] = None
+    port_route_pct: Optional[float] = None
+    ambient_temp_avg_c: Optional[float] = None
+    ambient_humidity_avg_pct: Optional[float] = None
+    rainfall_mm_30d: Optional[float] = None
+    fuel_price_lkr_per_l: Optional[float] = None
+    engine_temp_avg_c: Optional[float] = None
+    coolant_temp_max_c: Optional[float] = None
+    vibration_rms_mm_s: Optional[float] = None
+    tire_pressure_psi: Optional[float] = None
+    fuel_rate_lph: Optional[float] = None
+    fuel_efficiency_km_per_l: Optional[float] = None
+    battery_voltage_v: Optional[float] = None
+    oil_life_pct: Optional[float] = None
+    brake_health_pct: Optional[float] = None
+    tire_health_pct: Optional[float] = None
+    battery_health_pct: Optional[float] = None
+    hydraulic_health_pct: Optional[float] = None
+    days_since_last_service: Optional[int] = None
+    mileage_since_last_service_km: Optional[float] = None
+    engine_hours_since_last_service: Optional[float] = None
+    maintenance_cost_last_service_lkr: Optional[float] = None
+    is_home_warehouse_service: Optional[bool] = None
+    active_fault_code_count: Optional[int] = None
+    sensor_fault_flag: Optional[bool] = None
+    lifetime_service_count: Optional[int] = None
     lifetime_breakdown_count: Optional[int] = None
+    downtime_hours_last_90d: Optional[float] = None
 
 
 class ClassificationResponse(BaseModel):
