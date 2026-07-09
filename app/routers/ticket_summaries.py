@@ -16,7 +16,6 @@ from app.schemas.ticket_summary import TicketSummaryRequest, TicketSummaryRespon
 from app.ai.services.ticket_summary_service import (
     build_ticket_summary_input,
     generate_ticket_summary,
-    get_ticket_summary_model,
     get_ticket_summary_repo,
 )
 
@@ -80,9 +79,11 @@ async def get_summary_by_ticket(ticket_id: str, db: Session = Depends(get_db)):
 
 @router.get("/health")
 async def health_check():
-    """Report whether the ONNX ticket-summary model is loadable."""
-    try:
-        get_ticket_summary_model()
-        return {"status": "ok", "model_loaded": True, "repo": get_ticket_summary_repo()}
-    except Exception as e:  # noqa: BLE001
-        return {"status": "error", "model_loaded": False, "message": str(e)}
+    """Report which HF Space serves ticket summaries (online inference)."""
+    space = get_ticket_summary_repo()
+    return {
+        "status": "ok" if space else "unconfigured",
+        "space": space or None,
+        "message": "Ticket summaries served by HF Space" if space
+        else "TICKET_SUMMARY_SPACE not set — deterministic fallback in use",
+    }

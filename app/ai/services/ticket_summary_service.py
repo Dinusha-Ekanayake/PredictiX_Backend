@@ -1,12 +1,9 @@
-"""Ticket summary generation service — local ONNX (ONNX Runtime) inference.
+"""Ticket summary generation service — HF Space (online) inference only.
 
-Loads the quantized ONNX ticket-summary model once and runs generation on CPU
-via ONNX Runtime (Optimum). This replaces the retired/paywalled HF Inference
-API path. The model is a fine-tuned BART summariser exported to ONNX + INT8.
-
-Model location resolution (first match wins):
-  1. env HF_TICKET_SUMMARIZATION_ONNX_REPO  (a HF repo id or a path)
-  2. local  <backend-root>/onnx_ticket_summary_final/
+Inference runs entirely on the private Hugging Face Space (TICKET_SUMMARY_SPACE)
+via its Gradio API — no local model and no model download. If the Space is
+unreachable, a clean deterministic summary built from the ticket fields is
+returned instead, so a client never sees an error or garbled text.
 
 Public functions keep their names so the /tickets + user-ticket callers and
 app/ai/services/__init__.py don't need to change.
@@ -15,24 +12,13 @@ app/ai/services/__init__.py don't need to change.
 import os
 import re
 import logging
-from functools import lru_cache
-from pathlib import Path
 
 from dotenv import load_dotenv
 
-env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".env")
 load_dotenv(dotenv_path=env_path)
 
 logger = logging.getLogger(__name__)
-
-# ── Model location ──────────────────────────────────────────────────────────
-# Load the ONNX model from HuggingFace (no local folder). Prefers an explicit
-# ONNX repo var, else the main ticket-summarization repo.
-_MODEL_LOCATION = (
-    os.getenv("HF_TICKET_SUMMARIZATION_ONNX_REPO")
-    or os.getenv("HF_TICKET_SUMMARIZATION_REPO")
-    or ""
-)
 
 
 # ── Output quality guard ────────────────────────────────────────────────────
@@ -86,23 +72,44 @@ def _is_clean_summary(text: str) -> bool:
 
 
 def _fallback_summary(fields: dict[str, str]) -> str:
-    """Deterministic summary from the parsed input fields (never garbled)."""
-    title = fields.get("title")
-    desc = fields.get("description")
-    asset = fields.get("asset")
-    category = fields.get("category")
-    priority = fields.get("priority")
+    """Deterministic ticket summary from the parsed fields (never garbled).
 
-    base = title or (desc[:120] if desc else "Support ticket logged")
-    sentence = base.rstrip(".")
-    if asset:
-        sentence += f" on asset {asset}"
+    Reads as a short paragraph and always weaves in the (possibly default)
+    category and priority so the output is meaningful even without the model.
+    """
+    title = (fields.get("title") or "").strip()
+    desc = (fields.get("description") or "").strip()
+    asset = (fields.get("asset") or "").strip()
+    category = (fields.get("category") or "").strip().lower()
+    priority = (fields.get("priority") or "").strip().lower()
+
+    subject = (title or (desc[:80] if desc else "A support issue")).rstrip(".")
+
+    # 1) What it is — category + asset
+    tail = []
     if category:
-        sentence += f" ({category})"
-    sentence += "."
-    if priority:
-        sentence += f" Priority: {priority}."
-    return sentence
+        article = "an" if category[:1] in "aeiou" else "a"
+        tail.append(f"{article} {category} issue")
+    if asset:
+        tail.append(f"on asset {asset}")
+    sentences = [f"{subject} is " + " ".join(tail) + "." if tail else subject + "."]
+
+    # 2) Detail from the description (trimmed, grounded)
+    if desc and desc.lower() not in subject.lower():
+        d = desc if len(desc) <= 160 else desc[:157].rstrip() + "…"
+        if not d.endswith((".", "…", "!", "?")):
+            d += "."
+        sentences.append(d[0].upper() + d[1:])
+
+    # 3) Priority + recommendation
+    if priority in ("high", "critical"):
+        sentences.append(f"It is assessed as {priority} priority and needs prompt attention.")
+    elif priority == "low":
+        sentences.append(f"It is assessed as {priority} priority and can be scheduled routinely.")
+    elif priority:
+        sentences.append(f"It is assessed as {priority} priority.")
+
+    return " ".join(sentences)
 
 
 # ── Input formatting (unchanged public API) ─────────────────────────────────
@@ -131,77 +138,52 @@ def build_ticket_summary_input(
     return " | ".join(parts)
 
 
-# ── Model loading (cached) ──────────────────────────────────────────────────
-@lru_cache(maxsize=1)
+# ── Space location (reported by /ticket-summaries/health) ───────────────────
 def get_ticket_summary_repo() -> str:
-    """Back-compat shim — returns the resolved model location."""
-    return _MODEL_LOCATION
-
-
-@lru_cache(maxsize=1)
-def get_ticket_summary_model() -> dict:
-    """Load (first call) and cache the ONNX model + tokenizer."""
-    if os.getenv("DISABLE_HF_MODELS", "false").lower() == "true":
-        raise RuntimeError("Ticket summary model is disabled (DISABLE_HF_MODELS=true).")
-
-    from optimum.onnxruntime import ORTModelForSeq2SeqLM  # noqa: PLC0415
-    from transformers import AutoTokenizer  # noqa: PLC0415
-
-    # If the model isn't a local dir, loading it means downloading from HF. Gate
-    # that so teammates cloning the repo (no local model) don't fetch it just to
-    # run the backend — the caller falls back to a deterministic summary. Set
-    # ALLOW_MODEL_DOWNLOAD=true to enable the download.
-    if not Path(_MODEL_LOCATION).is_dir() and os.getenv("ALLOW_MODEL_DOWNLOAD", "false").lower() != "true":
-        raise RuntimeError(
-            "Ticket summary model not present locally and downloads are disabled "
-            "(set ALLOW_MODEL_DOWNLOAD=true) — using deterministic fallback."
-        )
-
-    token = os.getenv("HF_TOKEN")
-    tokenizer = AutoTokenizer.from_pretrained(_MODEL_LOCATION, token=token)
-    model = ORTModelForSeq2SeqLM.from_pretrained(_MODEL_LOCATION, token=token)
-    logger.info("Ticket summary ONNX model loaded from: %s", _MODEL_LOCATION)
-    return {"model": model, "tokenizer": tokenizer}
+    """Return the HF Space id that serves ticket summaries (for /health)."""
+    return os.getenv("TICKET_SUMMARY_SPACE") or ""
 
 
 # ── Public prediction API (unchanged name/signature) ────────────────────────
-def generate_ticket_summary(input_text: str) -> str:
-    """Summarise the formatted ticket text using the local ONNX model.
+def _summarize_via_space(space_id, input_text: str):
+    """Run inference on a HuggingFace Space (online) via its Gradio API.
 
-    Falls back to a clean deterministic summary if the model is unavailable or
-    produces malformed output, so a client never sees garbled text.
+    Returns the summary, or None if no Space is configured or it's unreachable/
+    asleep (the caller then falls back). Spaces are private, so HF_TOKEN is used.
+    """
+    if not space_id:
+        return None
+    try:
+        from gradio_client import Client  # noqa: PLC0415
+        space_token = (
+            os.getenv("HF_TOKEN_space")
+            or os.getenv("SPACE_HF_TOKEN")
+            or os.getenv("HF_TOKEN")
+            or None
+        )
+        client = Client(space_id, token=space_token, verbose=False)
+        out = client.predict(input_text, api_name="/predict")
+        return (out or "").strip() or None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[TicketSummary] Space %s unavailable (%s)", space_id, e)
+        return None
+
+
+def generate_ticket_summary(input_text: str) -> str:
+    """Summarise the formatted ticket text.
+
+    Order: HF Space (online, TICKET_SUMMARY_SPACE) → deterministic fallback,
+    so a client never sees an error or garbled text.
     """
     if not input_text or not input_text.strip():
         raise ValueError("input_text cannot be empty")
 
     fields = _parse_input_fields(input_text)
 
-    try:
-        data = get_ticket_summary_model()
-        model, tokenizer = data["model"], data["tokenizer"]
-
-        inputs = tokenizer(input_text, return_tensors="pt", max_length=512, truncation=True)
-        summary_ids = model.generate(
-            inputs["input_ids"],
-            max_length=160,
-            min_length=20,
-            num_beams=4,
-            early_stopping=True,
-        )
-        raw = _postprocess(tokenizer.decode(summary_ids[0], skip_special_tokens=True))
-        if _is_clean_summary(raw):
-            return raw
-        logger.warning("[TicketSummary] model output rejected as malformed; using fallback")
-    except Exception as e:  # noqa: BLE001
-        logger.warning("[TicketSummary] model unavailable (%s); using fallback", e)
+    space_out = _summarize_via_space(os.getenv("TICKET_SUMMARY_SPACE"), input_text)
+    if space_out:
+        cleaned = _postprocess(space_out)
+        if _is_clean_summary(cleaned):
+            return cleaned
 
     return _fallback_summary(fields)
-
-
-def warmup_ticket_summary_model() -> None:
-    """Pre-load the ONNX model on application startup."""
-    try:
-        get_ticket_summary_model()
-        print("Ticket summary ONNX model warmed up successfully")
-    except Exception as e:  # noqa: BLE001
-        print(f"Ticket summary model warmup failed (non-fatal): {e}")

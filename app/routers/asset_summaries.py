@@ -4,7 +4,7 @@ from datetime import datetime
 import logging
 
 from app.schemas.asset_summary import AssetSummaryRequest, AssetSummaryResponse
-from app.ai.services.asset_summary_service import generate_asset_summary, get_asset_summary_repo, get_hf_credentials
+from app.ai.services.asset_summary_service import generate_asset_summary, get_asset_summary_repo
 from app.deps import get_db, require_user
 from app.models import Asset, AssetFailurePrediction
 
@@ -159,63 +159,11 @@ async def generate_summary(payload: AssetSummaryRequest):
 
 @router.get("/health")
 async def health_check():
-    """Check if asset summary model is loaded and accessible"""
-    try:
-        logger.info("[AssetSummary] Health check started...")
-        
-        # Check if credentials are set
-        try:
-            token, repo = get_hf_credentials()
-            has_token = bool(token)
-            has_repo = bool(repo)
-        except Exception as e:
-            return {
-                "status": "error",
-                "model_loaded": False,
-                "message": str(e),
-                "details": {
-                    "has_token": False,
-                    "has_repo": False,
-                    "error": "Credentials not properly configured"
-                }
-            }
-        
-        # Check if model can be loaded
-        try:
-            from app.ai.services.asset_summary_service import get_asset_summary_model
-            model = get_asset_summary_model()
-            model_loaded = model is not None
-            repo = get_asset_summary_repo()
-            
-            logger.info(f"[AssetSummary] Health check: model={model_loaded}, repo={repo}")
-            
-            return {
-                "status": "ok" if model_loaded else "warning",
-                "model_loaded": model_loaded,
-                "message": "Asset summary model is ready" if model_loaded else "Model initialized but not yet warmed up",
-                "details": {
-                    "has_token": has_token,
-                    "has_repo": has_repo,
-                    "repo": repo,
-                    "model_loaded": model_loaded
-                }
-            }
-        except Exception as e:
-            logger.error(f"[AssetSummary] Health check failed: {e}")
-            return {
-                "status": "error",
-                "model_loaded": False,
-                "message": f"Model loading failed: {str(e)}",
-                "details": {
-                    "has_token": has_token,
-                    "has_repo": has_repo,
-                    "error": str(e)
-                }
-            }
-    except Exception as e:
-        logger.error(f"[AssetSummary] Health check exception: {e}")
-        return {
-            "status": "error",
-            "model_loaded": False,
-            "message": f"Health check failed: {str(e)}"
-        }
+    """Report which HF Space serves asset summaries (online inference)."""
+    space = get_asset_summary_repo()
+    return {
+        "status": "ok" if space else "unconfigured",
+        "space": space or None,
+        "message": "Asset summaries served by HF Space" if space
+        else "ASSET_SUMMARY_SPACE not set — deterministic fallback in use",
+    }

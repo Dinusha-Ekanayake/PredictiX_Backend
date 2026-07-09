@@ -68,8 +68,7 @@ from .routers.user_tickets import router as user_tickets_router
 from .routers.survival_predictions import router as survival_predictions_router
 
 # ─── ML warmup ────────────────────────────────────────────────────────────────
-from app.ai.services.asset_summary_service import warmup_asset_summary_model
-from app.ai.services.ticket_summary_service import warmup_ticket_summary_model
+# Asset & ticket summaries run on HF Spaces (online) — nothing to warm up here.
 from app.ai.services.ticket_categorization_service import warmup_ticket_categorizer
 from app.ai.services.ticket_priority_service import warmup_ticket_priority
 
@@ -232,25 +231,7 @@ async def lifespan(_: FastAPI):
         except Exception as exc:
             log.warning("Ticket priority warmup failed (non-fatal): %s", exc)
 
-        # Summary models (BART — the heaviest) load lazily on first request via
-        # lru_cache. Warming BOTH at startup spikes memory on low-RAM machines and
-        # lengthens/crashes restarts (causing intermittent "Failed to fetch"), so
-        # preloading is opt-in via WARMUP_SUMMARY_MODELS=true.
-        if os.getenv("WARMUP_SUMMARY_MODELS", "false").lower() == "true":
-            try:
-                warmup_asset_summary_model()
-                log.info("Asset summary model warmed up.")
-            except Exception as exc:
-                log.warning("Asset summary warmup failed (non-fatal): %s", exc)
-
-            try:
-                warmup_ticket_summary_model()
-                log.info("Ticket summary ONNX model warmed up.")
-            except Exception as exc:
-                log.warning("Ticket summary warmup failed (non-fatal): %s", exc)
-        else:
-            log.info("Summary models will load lazily on first request "
-                     "(set WARMUP_SUMMARY_MODELS=true to preload at startup).")
+        # Asset & ticket summaries run online on HF Spaces — no local warmup.
     else:
         log.info("HuggingFace models disabled (DISABLE_HF_MODELS=true). Skipping warmup.")
 

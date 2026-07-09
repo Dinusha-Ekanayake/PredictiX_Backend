@@ -1,20 +1,18 @@
-"""Asset summary generation service — local Seq2Seq inference (offline).
+"""Asset summary generation service — HF Space (online) inference only.
 
-Loads the fine-tuned Seq2Seq model from HuggingFace **once** and runs
-``model.generate`` locally on CPU. This is the original approach (it ran fine
-before the merge that briefly switched to the online HF Inference API, which
-HF has since retired/paywalled).
+Inference runs entirely on the private Hugging Face Space (ASSET_SUMMARY_SPACE)
+via its Gradio API — no local model and no model download. If the Space is
+unreachable, a clean, fully data-grounded deterministic summary built from the
+asset fields is returned instead, so a client PDF never shows an error or
+garbled text.
 
-Public functions (``generate_asset_summary``, ``warmup_asset_summary_model``,
-``get_asset_summary_model``, ``get_asset_summary_repo``, ``get_hf_credentials``)
-keep their names so the ``/asset-summaries`` router and shared callers don't
-need to change.
+Public functions (``generate_asset_summary``, ``get_asset_summary_repo``) keep
+their names so the ``/asset-summaries`` router and shared callers don't change.
 """
 
 import os
 import re
 import logging
-from functools import lru_cache
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -206,125 +204,49 @@ def _fallback_summary(fields: dict[str, str]) -> str:
     return sentence
 
 
-def get_hf_credentials() -> tuple[str, str]:
-    """Read HF credentials from the environment.
-
-    The token is only used to *download* the (private/public) model weights
-    from the Hub the first time; inference itself runs locally and offline.
-    """
-    hf_token = os.getenv("HF_TOKEN")
-    model_repo = os.getenv("HF_ASSET_SUMMARIZATION_REPO")
-    if not hf_token:
-        raise RuntimeError("HF_TOKEN is not set in .env")
-    if not model_repo:
-        raise RuntimeError("HF_ASSET_SUMMARIZATION_REPO is not set in .env")
-    return hf_token, model_repo
-
-
-@lru_cache(maxsize=1)
 def get_asset_summary_repo() -> str:
-    """Back-compat shim — the router imports this. Returns the repo id."""
-    _, repo = get_hf_credentials()
-    return repo
+    """Return the HF Space id that serves asset summaries (for /health)."""
+    return os.getenv("ASSET_SUMMARY_SPACE") or ""
 
 
-def _resolve_onnx_dir() -> Path:
-    """Locate the local ONNX asset-summary model directory.
+def _summarize_via_space(space_id, input_text: str):
+    """Run inference on a HuggingFace Space (online) via its Gradio API.
 
-    Overridable via ASSET_SUMMARY_ONNX_DIR; otherwise defaults to
-    ``onnx_asset_summary_final`` at the project root (or CWD).
+    Returns the summary string, or None if no Space is configured or it's
+    unreachable/asleep (the caller then falls back). Spaces are private, so the
+    HF_TOKEN is passed for auth.
     """
-    env = os.getenv("ASSET_SUMMARY_ONNX_DIR")
-    if env:
-        return Path(env)
-    candidates = [
-        Path(__file__).resolve().parents[3] / "onnx_asset_summary_final",
-        Path.cwd() / "onnx_asset_summary_final",
-    ]
-    for c in candidates:
-        if c.is_dir():
-            return c
-    return candidates[0]
-
-
-@lru_cache(maxsize=1)
-def get_asset_summary_model() -> dict:
-    """Load and cache the asset-summary ONNX model from HuggingFace.
-
-    Loads the ONNX (BART) model from the HF repo (HF_ASSET_SUMMARIZATION_REPO)
-    via ONNX Runtime. The download is gated behind ALLOW_MODEL_DOWNLOAD so
-    teammates who clone the repo don't fetch it just to run the backend — they
-    get the deterministic grounded fallback instead.
-    """
-    if os.getenv("DISABLE_HF_MODELS", "false").lower() == "true":
-        raise RuntimeError("Asset summary model is disabled (DISABLE_HF_MODELS=true).")
-
-    if os.getenv("ALLOW_MODEL_DOWNLOAD", "false").lower() != "true":
-        raise RuntimeError(
-            "Asset summary model download disabled "
-            "(set ALLOW_MODEL_DOWNLOAD=true to fetch from HF) — using deterministic fallback."
+    if not space_id:
+        return None
+    try:
+        from gradio_client import Client  # noqa: PLC0415
+        space_token = (
+            os.getenv("HF_TOKEN_space")
+            or os.getenv("SPACE_HF_TOKEN")
+            or os.getenv("HF_TOKEN")
+            or None
         )
-
-    from transformers import AutoTokenizer  # noqa: PLC0415
-    from optimum.onnxruntime import ORTModelForSeq2SeqLM  # noqa: PLC0415
-
-    hf_token, model_repo = get_hf_credentials()
-    tokenizer = AutoTokenizer.from_pretrained(model_repo, token=hf_token)
-    model = ORTModelForSeq2SeqLM.from_pretrained(model_repo, token=hf_token)
-    print(f"Asset summary ONNX model loaded from HF: {model_repo}")
-    return {"model": model, "tokenizer": tokenizer}
+        client = Client(space_id, token=space_token, verbose=False)
+        out = client.predict(input_text, api_name="/predict")
+        return (out or "").strip() or None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[AssetSummary] Space %s unavailable (%s)", space_id, e)
+        return None
 
 
 def generate_asset_summary(input_text: str) -> str:
-    """Summarise the formatted asset text using the local Seq2Seq model.
+    """Summarise the formatted asset text.
 
-    Args:
-        input_text: Formatted input text (pipe-separated vehicle/asset attributes).
-            Example: ``"Vehicle: SLW0225 | Type: Light Truck 3.5T | ..."``
-
-    Returns:
-        Generated summary string.
+    Order: HF Space (online, ASSET_SUMMARY_SPACE) → deterministic fallback.
+    Only output that passes the grounding/quality guard is published.
     """
     if not input_text or not input_text.strip():
         raise ValueError("input_text cannot be empty")
 
     fields = _parse_input_fields(input_text)
 
-    # Try the fine-tuned model, but only publish its output if it passes the
-    # quality guard. Any failure or malformed result falls back to a clean,
-    # deterministic summary so a client PDF never shows garbled text.
-    try:
-        model_data = get_asset_summary_model()
-        model = model_data["model"]
-        tokenizer = model_data["tokenizer"]
-
-        inputs = tokenizer(
-            input_text, return_tensors="pt", max_length=512, truncation=True
-        )
-        summary_ids = model.generate(
-            inputs["input_ids"],
-            max_new_tokens=200,       # override the model's baked-in 96-token cap for a longer summary
-            min_new_tokens=40,
-            num_beams=4,
-            no_repeat_ngram_size=3,   # stop the model repeating phrases when pushed longer
-            length_penalty=1.3,       # gently favour fuller, complete summaries
-            early_stopping=True,
-        )
-        raw = tokenizer.decode(summary_ids[0], skip_special_tokens=True).strip()
-        if _is_clean_summary(raw, input_text):
-            return raw
-        logger.warning("[AssetSummary] model output rejected as malformed; using deterministic fallback")
-    except Exception as e:
-        logger.warning(f"[AssetSummary] model unavailable ({e}); using deterministic fallback")
+    space_out = _summarize_via_space(os.getenv("ASSET_SUMMARY_SPACE"), input_text)
+    if space_out and _is_clean_summary(space_out, input_text):
+        return space_out
 
     return _fallback_summary(fields)
-
-
-def warmup_asset_summary_model() -> None:
-    """Pre-load the model on application startup."""
-    try:
-        get_asset_summary_model()
-        print("Asset summary model warmed up successfully")
-    except Exception as e:
-        print(f"Asset summary model warmup failed: {e}")
-        raise
