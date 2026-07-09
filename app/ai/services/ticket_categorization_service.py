@@ -112,4 +112,7 @@ def categorize_ticket_text(title: str, description: str) -> dict:
 
 
 def warmup_ticket_categorizer() -> None:
-    pass
+    """Wake the shared Gradio Space (categorization + priority live on the
+    same Space, so one ping warms both)."""
+    from app.ai.services._gradio_space import ping_gradio_space
+    ping_gradio_space()

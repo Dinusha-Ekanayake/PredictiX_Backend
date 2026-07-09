@@ -58,7 +58,8 @@ from .routers.warehouse_dashboard import warehouse_dashboard_router
 from .routers.warehouses import router as warehouses_router
 from .routers.batch_predictions import router as batch_predictions_router
 from .routers.websockets import router as websockets_router
-from .routers.asset_reports import router as asset_reports_router 
+from .routers.asset_reports import router as asset_reports_router
+from .routers.warmup import router as warmup_router
 
 # Sharada — user-role self-service profile (/user-profile)
 from .routers.user_profile import router as user_profile_router
@@ -235,15 +236,15 @@ async def lifespan(_: FastAPI):
     else:
         log.info("HuggingFace models disabled (DISABLE_HF_MODELS=true). Skipping warmup.")
 
-    # ── Hourly batch PDM scheduler ─────────────────────────────────────────────
-    batch_interval_hours = int(os.getenv("BATCH_INTERVAL_HOURS", "1"))
+    # ── Batch PDM scheduler ─────────────────────────────────────────────────────
+    batch_interval_hours = int(os.getenv("BATCH_INTERVAL_HOURS", "24"))
     scheduler = BackgroundScheduler(daemon=True)
     scheduler.add_job(
         _run_scheduled_batch,
         trigger="interval",
         hours=batch_interval_hours,
         id="pdm_batch",
-        name="PDM hourly batch prediction",
+        name=f"PDM batch prediction (every {batch_interval_hours}h)",
         replace_existing=True,
     )
 
@@ -398,6 +399,9 @@ if os.getenv("ENABLE_DEBUG_ROUTES", "false").strip().lower() == "true":
 
 # WebSockets
 app.include_router(websockets_router)
+
+# Public warmup ping (no auth — fired from the login page before any token exists)
+app.include_router(warmup_router)
 
 
 @app.get("/", tags=["Health"])

@@ -18,7 +18,10 @@ email-validator==2.3.0
 # ── Auth ───────────────────────────────────────────────────────────────────────
 python-jose==3.5.0
 passlib==1.7.4
-bcrypt==4.1.2
+# Pinned to 4.0.x: passlib 1.7.4 (unmaintained) probes bcrypt.__about__.__version__,
+# which was removed in bcrypt>=4.1 — that raises a trapped AttributeError logged on
+# every hash/verify call. 4.0.1 is the last release that still has __about__.
+bcrypt==4.0.1
 
 # ── ML / data ──────────────────────────────────────────────────────────────────
 pandas==2.3.3

@@ -92,4 +92,8 @@ def predict_ticket_priority(
 
 
 def warmup_ticket_priority() -> None:
-    pass
+    """Wake the shared Gradio Space (categorization + priority live on the
+    same Space, so one ping warms both — kept as a separate call so the
+    startup log line for each stays accurate/independent)."""
+    from app.ai.services._gradio_space import ping_gradio_space
+    ping_gradio_space()

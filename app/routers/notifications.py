@@ -16,6 +16,8 @@ router = APIRouter(prefix="/notifications", tags=["Notifications"])
 @router.get("/", response_model=list[NotificationOut])
 def list_user_notifications(
     status: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -25,15 +27,17 @@ def list_user_notifications(
     """
     log.debug("list_user_notifications called with status=%s", status)
     q = db.query(Notification).filter(Notification.user_id == current_user.id)
-    
+
     if status:
         q = q.filter(cast(Notification.status, String) == status)
-    
-    return q.order_by(Notification.created_at.desc()).all()
+
+    return q.order_by(Notification.created_at.desc()).offset(offset).limit(limit).all()
 
 
 @router.get("/unread", response_model=list[NotificationOut])
 def get_unread_notifications(
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -45,6 +49,8 @@ def get_unread_notifications(
             & (cast(Notification.status, String) == "unread")
         )
         .order_by(Notification.created_at.desc())
+        .offset(offset)
+        .limit(limit)
         .all()
     )
 
@@ -56,18 +62,23 @@ def get_notification(
     db: Session = Depends(get_db),
 ):
     """Get a specific notification (user can only see their own)"""
+    try:
+        notif_id = UUID(notification_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid notification id")
+
     notification = (
         db.query(Notification)
         .filter(
-            (Notification.id == UUID(notification_id))
+            (Notification.id == notif_id)
             & (Notification.user_id == current_user.id)
         )
         .first()
     )
-    
+
     if not notification:
         raise HTTPException(status_code=404, detail="Notification not found")
-    
+
     return notification
 
 
@@ -78,18 +89,23 @@ def mark_notification_read(
     db: Session = Depends(get_db),
 ):
     """Mark a notification as read"""
+    try:
+        notif_id = UUID(notification_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid notification id")
+
     notification = (
         db.query(Notification)
         .filter(
-            (Notification.id == UUID(notification_id))
+            (Notification.id == notif_id)
             & (Notification.user_id == current_user.id)
         )
         .first()
     )
-    
+
     if not notification:
         raise HTTPException(status_code=404, detail="Notification not found")
-    
+
     notification.status = "read"
     db.commit()
     db.refresh(notification)
@@ -120,18 +136,23 @@ def delete_notification(
     db: Session = Depends(get_db),
 ):
     """Delete a notification (user can only delete their own)"""
+    try:
+        notif_id = UUID(notification_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid notification id")
+
     notification = (
         db.query(Notification)
         .filter(
-            (Notification.id == UUID(notification_id))
+            (Notification.id == notif_id)
             & (Notification.user_id == current_user.id)
         )
         .first()
     )
-    
+
     if not notification:
         raise HTTPException(status_code=404, detail="Notification not found")
-    
+
     db.delete(notification)
     db.commit()
     

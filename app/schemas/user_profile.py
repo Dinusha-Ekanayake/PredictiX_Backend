@@ -83,19 +83,3 @@ class UserUpdate(BaseModel):
     address: Optional[str] = None
     contactNumber: Optional[str] = None
 
-class TeamMemberOut(BaseModel):
-    """Team member shown in department section"""
-    id: str
-    employee_id: Optional[str]
-    firstName: str
-    lastName: str
-    name: str
-    email: str
-    contactNumber: Optional[str]
-    department: Optional[str]
-    role: str
-    status: str
-    warehouse: Optional[str] = None
-    role: Optional[str] = None
-    department: Optional[str] = None
-    status: Optional[str] = None

@@ -21,14 +21,23 @@ def get_exact_db_values(db: Session = Depends(get_db)):
     
     # Total AssetFailurePrediction records
     total_predictions = db.query(AssetFailurePrediction.id).count()
-    
-    # Health scores - get all
-    all_health_scores = db.query(AssetFailurePrediction.health_score).all()
-    health_scores_list = [int(h[0]) for h in all_health_scores if h[0] is not None]
-    
-    # Average health
-    avg_health = sum(health_scores_list) / len(health_scores_list) if health_scores_list else 0
-    
+
+    # Average health — computed in SQL (AVG) instead of pulling every row
+    # into Python just to sum()/len() it.
+    avg_health = db.query(func.avg(AssetFailurePrediction.health_score)).scalar() or 0
+    total_health_scores_count = (
+        db.query(AssetFailurePrediction.id).filter(AssetFailurePrediction.health_score.isnot(None)).count()
+    )
+
+    # Small sample of raw values for inspection — not the whole table.
+    sample_health_scores = (
+        db.query(AssetFailurePrediction.health_score)
+        .filter(AssetFailurePrediction.health_score.isnot(None))
+        .limit(20)
+        .all()
+    )
+    health_scores_sample = [int(h[0]) for h in sample_health_scores]
+
     # Count by health score ranges
     healthy_count = db.query(AssetFailurePrediction.id).filter(AssetFailurePrediction.health_score >= 80).count()
     at_risk_count = db.query(AssetFailurePrediction.id).filter(AssetFailurePrediction.health_score < 60).count()
@@ -46,9 +55,9 @@ def get_exact_db_values(db: Session = Depends(get_db)):
         "exact_values": {
             "total_assets": total_assets,
             "total_asset_failures_predictions": total_predictions,
-            "all_health_scores": health_scores_list[:20],  # First 20 for inspection
-            "total_health_scores_count": len(health_scores_list),
-            "average_health_score": round(avg_health, 2),
+            "all_health_scores": health_scores_sample,  # First 20 for inspection
+            "total_health_scores_count": total_health_scores_count,
+            "average_health_score": round(float(avg_health), 2),
             "healthy_assets_count_>=80": healthy_count,
             "at_risk_assets_count_<60": at_risk_count,
             "critical_assets_count_<50": critical_count,

@@ -45,6 +45,8 @@ def list_profiles(
     role: str | None = Query(default=None),
     department_id: str | None = Query(default=None),
     warehouse_id: str | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
@@ -61,7 +63,7 @@ def list_profiles(
         warehouse_id = scoped_wh
     if warehouse_id:
         q = q.filter(Profile.warehouse_id == warehouse_id)
-    return q.order_by(Profile.full_name).all()
+    return q.order_by(Profile.full_name).offset(offset).limit(limit).all()
 
 
 # ─── Self-service endpoints (/profiles/me) ────────────────────────────────────
@@ -248,15 +250,20 @@ def get_my_assets(
         .all()
     )
 
+    warehouse_ids = {a.warehouse_id for a in assets if a.warehouse_id is not None}
+    warehouses_by_id = {
+        w.id: w
+        for w in db.query(Warehouse.id, Warehouse.name, Warehouse.city).filter(Warehouse.id.in_(warehouse_ids)).all()
+    } if warehouse_ids else {}
+
     result = []
     for asset in assets:
         location = ""
-        if asset.warehouse_id:
-            wh = db.query(Warehouse).filter(Warehouse.id == asset.warehouse_id).first()
-            if wh:
-                location = wh.name
-                if wh.city:
-                    location += f" - {wh.city}"
+        wh = warehouses_by_id.get(asset.warehouse_id)
+        if wh:
+            location = wh.name
+            if wh.city:
+                location += f" - {wh.city}"
 
         result.append({
             "assignment_id": str(asset.id),
