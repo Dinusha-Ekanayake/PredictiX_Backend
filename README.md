@@ -41,7 +41,7 @@ PredictiX is a predictive maintenance platform for fleet and warehouse operation
 | Task Scheduling | APScheduler (configurable PDM batch + daily service reminders) |
 | Data Processing | pandas, numpy |
 | Config | pydantic-settings |
-| Python Version | 3.12 |
+| Python Version | 3.12+ |
 
 ---
 
@@ -54,7 +54,7 @@ Client (Frontend / IoT Devices)
   FastAPI Application (app/main.py)
          │
   ┌──────┴──────────────────────────────────────────┐
-  │  38 Routers (one per domain)                    │
+  │  37 Routers (one per domain)                    │
   │  17 Pydantic Schema modules (validation)        │
   │  Service modules (business logic + caching)     │
   │  Repository layer (data access)                 │
@@ -96,7 +96,7 @@ PredictiX_backend/
 │   │   ├── base.py                  # SQLAlchemy declarative base
 │   │   ├── session.py               # Engine and SessionLocal initialization
 │   │   └── supabase_client.py       # Supabase Python client setup
-│   ├── routers/                     # 38 API router modules (one per domain)
+│   ├── routers/                     # 37 API router modules (one per domain)
 │   ├── schemas/                     # Pydantic request/response models (17 files)
 │   ├── services/
 │   │   ├── dashboard_cache.py       # TTL-based full-response payload cache
@@ -400,9 +400,10 @@ SUPABASE_SERVICE_ROLE_KEY=<service-role-jwt>
 PROJECT_REF=<project-ref>
 
 # Database
-DATABASE_URL=postgresql+psycopg2://postgres:<password>@db.<project-ref>.supabase.co:5432/postgres
+DATABASE_URL=postgresql+psycopg2://postgres.<project-ref>:<password>@aws-1-ap-southeast-2.pooler.supabase.com:5432/postgres
 DATABASE_PASSWORD=<your-db-password>
 DATABASE_KEY=sb_secret_...
+# If DATABASE_URL is omitted, the backend builds the pooler URL from PROJECT_REF and DATABASE_PASSWORD.
 
 # Groq (AI reports and chatbot agent — required for LLM features)
 GROQ_API_KEY=gsk_...
@@ -449,7 +450,7 @@ Never commit `.env`. On EC2, systemd loads the same values through the service `
 
 ### Prerequisites
 
-- Python 3.12
+- Python 3.12+
 - A Supabase project (PostgreSQL database)
 - Groq API key — free tier at [console.groq.com](https://console.groq.com)
 - (Optional) CUDA-capable GPU for HuggingFace inference
@@ -525,26 +526,60 @@ The backend is deployed on AWS EC2 — see `EC2 Backend Deployment by Dinusha.md
 
 ```bash
 # Production command
-uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
+/home/ubuntu/PredictiX_Backend/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
 ```
 
 Set all required environment variables in `.env` on the EC2 instance.
+
+Typical systemd service settings:
+
+```ini
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/PredictiX_Backend
+EnvironmentFile=/home/ubuntu/PredictiX_Backend/.env
+ExecStart=/home/ubuntu/PredictiX_Backend/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+Restart=always
+RestartSec=5
+```
+
+Useful EC2 commands:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart predictix
+sudo systemctl status predictix
+journalctl -u predictix -n 100 --no-pager
+```
+
+After changing `.env`, restart the service and confirm the live process has the expected values:
+
+```bash
+PID=$(systemctl show -p MainPID --value predictix)
+sudo strings /proc/$PID/environ | grep BATCH_INTERVAL_HOURS
+```
 
 ---
 
 ## Background Jobs
 
-APScheduler runs a PDM batch prediction job at startup (if enabled) and then on an hourly interval:
+APScheduler runs these jobs inside the FastAPI process:
 
-1. Reads the latest sensor readings for every asset
-2. Runs the local PDM classifier and regressor models
-3. Writes results to `asset_failure_predictions` and `asset_cost_predictions`
-4. Triggers in-app notifications for newly critical assets
+- **PDM batch predictions** - reads the latest sensor readings for each asset, runs the local classifier/regressor, writes results to `asset_failure_predictions` and `asset_cost_predictions`, and creates notifications for newly critical assets.
+- **Service reminder sweep** - runs daily at the configured local hour and sends reminder notifications/emails based on upcoming service dates.
+- **Optional HF/Gradio warmer** - pings the external inference Space only when explicitly enabled.
 
 ```env
-BATCH_RUN_ON_STARTUP=true    # Run immediately on server start
-BATCH_INTERVAL_HOURS=24       # Repeat every N hours
+BATCH_RUN_ON_STARTUP=false
+BATCH_INTERVAL_HOURS=24
+SERVICE_REMINDER_HOUR=9
+SERVICE_REMINDER_TZ=Asia/Colombo
+SERVICE_REMINDER_OFFSETS=14,7,3,1
+SERVICE_REMINDER_RUN_ON_STARTUP=false
+ENABLE_HF_WARMER=false
 ```
+
+For Supabase free-tier protection, keep `BATCH_INTERVAL_HOURS=24`, keep startup batch runs disabled unless you intentionally need an immediate rebuild, and keep `ENABLE_HF_WARMER=false` unless the Space cold-start cost is more important than the extra traffic.
 
 ---
 
