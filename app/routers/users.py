@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import String, cast, func
@@ -22,8 +23,10 @@ from sqlalchemy.orm import Session
 import os
 
 from app.core.security import hash_password
+from app.db.session import SessionLocal
 from app.deps import get_db, get_current_user, require_admin, active_warehouse_id
 from app.models import Asset, Department, Profile, Warehouse
+from app.services.reference_data_cache import get_department_names, get_warehouse_names
 from app.schemas.user_profile import (
     UserAssignedAssetOut,
     UserCreate,
@@ -184,34 +187,50 @@ def _user_to_item(
     return _build_item(user, dept_names, warehouse_names, asset_counts)
 
 
+def _fetch_asset_counts() -> dict:
+    with SessionLocal() as s:
+        return {
+            str(assigned_to): count
+            for assigned_to, count in s.query(Asset.assigned_to, func.count(Asset.id))
+            .filter(Asset.assigned_to.isnot(None), cast(Asset.status, String) == "active")
+            .group_by(Asset.assigned_to)
+            .all()
+        }
+
+
+def _fetch_users(scoped_wh: str | None, limit: int, offset: int) -> list[Profile]:
+    with SessionLocal() as s:
+        q = s.query(Profile)
+        if scoped_wh:
+            q = q.filter((Profile.warehouse_id == scoped_wh) | (Profile.warehouse_id.is_(None)))
+        users = q.order_by(Profile.full_name).offset(offset).limit(limit).all()
+        s.expunge_all()  # detach so attributes stay readable after the session closes
+        return users
+
+
 @router.get("/", response_model=list[UserItemOut])
 def list_users(
     limit: int = Query(default=500, ge=1, le=2000),
     offset: int = Query(default=0, ge=0),
-    db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
-    # Pre-fetch lookup maps once — avoids per-user N+1 queries.
-    dept_names = {d.id: d.name for d in db.query(Department.id, Department.name).all()}
-    warehouse_names = {w.id: w.name for w in db.query(Warehouse.id, Warehouse.name).all()}
-    asset_counts = {
-        str(assigned_to): count
-        for assigned_to, count in db.query(Asset.assigned_to, func.count(Asset.id))
-        .filter(Asset.assigned_to.isnot(None), cast(Asset.status, String) == "active")
-        .group_by(Asset.assigned_to)
-        .all()
-    }
-
-    # Scope to the caller's active warehouse (their own for a regular admin, the
-    # one a super_admin selected at login). Profiles without a warehouse (e.g.
-    # super_admins themselves) are still shown so admin management isn't blocked.
-    users_q = db.query(Profile)
+    # The 4 lookups below are independent reads (no shared state), so they run
+    # concurrently on separate DB sessions instead of 4 sequential round-trips.
+    # Each round-trip costs ~150-800ms of real network latency to the remote
+    # Supabase region — sequentially that summed to ~1.5-2.5s; concurrently it's
+    # roughly the slowest single query.
     scoped_wh = active_warehouse_id(current_user)
-    if scoped_wh:
-        users_q = users_q.filter(
-            (Profile.warehouse_id == scoped_wh) | (Profile.warehouse_id.is_(None))
-        )
-    users = users_q.order_by(Profile.full_name).offset(offset).limit(limit).all()
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        dept_future = executor.submit(get_department_names)
+        wh_future = executor.submit(get_warehouse_names)
+        assets_future = executor.submit(_fetch_asset_counts)
+        users_future = executor.submit(_fetch_users, scoped_wh, limit, offset)
+
+        dept_names = dept_future.result()
+        warehouse_names = wh_future.result()
+        asset_counts = assets_future.result()
+        users = users_future.result()
+
     return [_build_item(u, dept_names, warehouse_names, asset_counts) for u in users]
 
 

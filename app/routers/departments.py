@@ -11,6 +11,7 @@ from app.deps import (
 )
 from app.models import Department, Profile
 from app.schemas.department import DepartmentCreate, DepartmentUpdate, DepartmentOut
+from app.services.reference_data_cache import invalidate_department_names
 
 router = APIRouter(
     prefix="/departments",
@@ -25,6 +26,7 @@ def create_department(payload: DepartmentCreate, db: Session = Depends(get_db)):
     db.add(obj)
     db.commit()
     db.refresh(obj)
+    invalidate_department_names()
     return obj
 
 
@@ -66,6 +68,7 @@ def update_department(department_id: str, payload: DepartmentUpdate, db: Session
 
     db.commit()
     db.refresh(obj)
+    invalidate_department_names()
     return obj
 
 
@@ -76,4 +79,5 @@ def delete_department(department_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Department not found")
     db.delete(obj)
     db.commit()
+    invalidate_department_names()
     return {"message": "Department deleted"}
