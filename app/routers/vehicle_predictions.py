@@ -10,7 +10,6 @@ router = APIRouter(
     dependencies=[Depends(require_user)],
 )
 
-from app.schemas.prediction import VehiclePredictionStoredResponse
 
 @router.post("/{asset_id}")
 def predict_vehicle(asset_id: str, requested_by: str | None = None, db: Session = Depends(get_db)):
