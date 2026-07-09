@@ -52,38 +52,43 @@ def predict_ticket_priority(
     if override:
         return override
 
-    space_url = _get_space_url()
-    r1 = requests.post(
-        f"{space_url}/gradio_api/call/prioritize",
-        json={"data": [combined]},
-        timeout=30,
-    )
-    if r1.status_code >= 400:
-        raise RuntimeError(f"Priority Space error {r1.status_code}: {r1.text[:200]}")
-    event_id = r1.json().get("event_id")
+    # Prefer the remote Space; if it isn't configured/reachable, default to
+    # "Medium" so the priority field always populates (High/Low come from the
+    # keyword rules above).
+    try:
+        space_url = _get_space_url()
+        r1 = requests.post(
+            f"{space_url}/gradio_api/call/prioritize",
+            json={"data": [combined]},
+            timeout=30,
+        )
+        if r1.status_code >= 400:
+            raise RuntimeError(f"Priority Space error {r1.status_code}: {r1.text[:200]}")
+        event_id = r1.json().get("event_id")
 
-    r2 = requests.get(
-        f"{space_url}/gradio_api/call/prioritize/{event_id}",
-        stream=True,
-        timeout=120,
-    )
-    result = None
-    for line in r2.iter_lines():
-        if line:
-            decoded = line.decode()
-            if decoded.startswith("data:"):
-                result = json.loads(decoded[5:])
-                break
+        r2 = requests.get(
+            f"{space_url}/gradio_api/call/prioritize/{event_id}",
+            stream=True,
+            timeout=120,
+        )
+        result = None
+        for line in r2.iter_lines():
+            if line:
+                decoded = line.decode()
+                if decoded.startswith("data:"):
+                    result = json.loads(decoded[5:])
+                    break
 
-    if not result:
-        raise RuntimeError("Priority Space returned no data")
-    data = result[0] if isinstance(result, list) else result
-    if isinstance(data, dict) and "error" in data:
-        raise RuntimeError(f"Priority model error: {data['error']}")
-    if isinstance(data, dict) and "priority" in data:
-        return data["priority"]
-
-    raise RuntimeError(f"Unexpected priority response: {result!r}")
+        if not result:
+            raise RuntimeError("Priority Space returned no data")
+        data = result[0] if isinstance(result, list) else result
+        if isinstance(data, dict) and "error" in data:
+            raise RuntimeError(f"Priority model error: {data['error']}")
+        if isinstance(data, dict) and "priority" in data:
+            return data["priority"]
+        raise RuntimeError(f"Unexpected priority response: {result!r}")
+    except Exception:
+        return "Medium"
 
 
 def warmup_ticket_priority() -> None:
