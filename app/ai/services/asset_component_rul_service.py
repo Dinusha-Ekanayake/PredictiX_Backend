@@ -92,7 +92,7 @@ class ComponentRul:
     rul_days_low: Optional[int]
     rul_days_high: Optional[int]
     estimated_failure_date: Optional[date]
-    confidence: str  # "trend" | "single_point" | "no_data"
+    confidence: str  # "trend" | "insufficient_trend" | "single_point" | "no_data"
     readings_used: int
     horizon_capped: bool = False
     model_corroborated: bool = False
@@ -193,9 +193,32 @@ def _estimate_component(
     last_x = xs[-1]
     last_health = ys[-1]
 
+    # A slope within its own standard error of zero is not evidence of a
+    # real trend in either direction — with only 4 points, "slightly
+    # positive" and "slightly negative" are both indistinguishable from
+    # noise. Labelling that "Improving" (or extrapolating a failure date
+    # from it) claims a confidence the data doesn't support; the honest
+    # answer is that there isn't enough signal to say which way this
+    # component is trending yet.
+    is_significant = se_slope == 0 or abs(slope) > se_slope
+
+    if not is_significant:
+        return ComponentRul(
+            component=component,
+            current_health_pct=round(last_health, 1),
+            degradation_pct_per_day=round(slope, 4),
+            rul_days=None,
+            rul_days_low=None,
+            rul_days_high=None,
+            estimated_failure_date=None,
+            confidence="insufficient_trend",
+            readings_used=len(points),
+        )
+
     if slope >= 0:
-        # Flat or improving trend (e.g. after a service) — no predictable
-        # failure horizon from this data; report the trend but no RUL.
+        # Genuinely improving (e.g. after a service) — the slope clears the
+        # noise floor and points upward, so this is a real signal, not just
+        # an absence of decline.
         return ComponentRul(
             component=component,
             current_health_pct=round(last_health, 1),

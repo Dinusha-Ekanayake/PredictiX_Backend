@@ -11,7 +11,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel
 
 
-Confidence = Literal["trend", "single_point", "no_data"]
+Confidence = Literal["trend", "insufficient_trend", "single_point", "no_data"]
 
 
 class ComponentRulOut(BaseModel):
