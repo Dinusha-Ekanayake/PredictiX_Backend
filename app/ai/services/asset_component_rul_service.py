@@ -264,6 +264,12 @@ def _apply_model_grounding(
       likely being wrong (noise), not the model. Surfaced rather than
       silently trusting the weaker signal, same philosophy as the
       classifier/health-score `agreement` check in the decision layer.
+
+      Uses a proportional gap (component RUL more than double the model's
+      ceiling, plus a fixed absolute floor) rather than a fixed "only when
+      the model says <=60 days" cutoff — a component claiming 730+ days
+      while the model's own ceiling is 98 days is just as much a real
+      disagreement as one claiming 200 days while the model says 20.
     """
     if batch_prediction is None or batch_prediction.predicted_days_until_maintenance is None:
         return
@@ -281,12 +287,12 @@ def _apply_model_grounding(
         if r.rul_days is None:
             continue
 
-        model_says_urgent = model_days <= 60
-        # Flag when the model already sees near-term maintenance risk but
-        # this component's own trend claims a much longer runway — the
-        # component estimate is the one built on 4 points, so treat the
-        # disagreement as a reason to distrust it, not a coin flip.
-        r.disagrees_with_model = model_says_urgent and r.rul_days > model_days + 60
+        # Flag when the component's own trend claims a runway meaningfully
+        # longer than the model's whole-asset ceiling — both an absolute
+        # margin (so a 35d vs 20d gap isn't flagged as "disagreement") and a
+        # relative one (so the gap scales with the model's own horizon).
+        gap = r.rul_days - model_days
+        r.disagrees_with_model = gap > 60 and r.rul_days > model_days * 2
 
 
 def compute_asset_component_rul(
