@@ -1,7 +1,10 @@
-import sqlalchemy
-from sqlalchemy import create_engine, text
+"""Manual debug script — check for a pgrst pre_request hook in Postgres settings.
 
-engine = create_engine('postgresql+psycopg2://postgres.ulpjoljukculqqrwlwup:udCV%40bTGj.Ah38L@aws-1-ap-southeast-2.pooler.supabase.com:6543/postgres')
+Run with: python -m scripts.manual.test_log_api
+"""
+from sqlalchemy import text
+
+from app.db.session import engine
 with engine.connect() as conn:
     try:
         # get definition
