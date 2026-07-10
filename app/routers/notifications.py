@@ -21,7 +21,6 @@ def list_user_notifications(
     current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    print(f"DEBUG: list_user_notifications called with status={status}")
     """
     Get all notifications for current authenticated user.
     Optional filter by status (unread, read, etc.)
@@ -31,13 +30,8 @@ def list_user_notifications(
 
     if status:
         q = q.filter(cast(Notification.status, String) == status)
-<<<<<<< HEAD
-    
-    return q.order_by(Notification.created_at.desc()).all()
-=======
 
     return q.order_by(Notification.created_at.desc()).offset(offset).limit(limit).all()
->>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 
 
 @router.get("/unread", response_model=list[NotificationOut])

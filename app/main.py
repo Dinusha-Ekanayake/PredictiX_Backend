@@ -75,12 +75,6 @@ log = logging.getLogger("predictix")
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_DIR = BASE_DIR / "ai" / "models"
 
-<<<<<<< HEAD
-CLF_MODEL_PATH    = MODEL_DIR / "pdm_classifier_model" / "predictix_xgboost_classifier_v6.pkl"
-CLF_FEATURES_PATH = MODEL_DIR / "pdm_classifier_model" / "maintenance_classifier_features.pkl"
-REG_MODEL_PATH    = MODEL_DIR / "pdm_regressor_model"  / "predictix_pm_model_v5.pkl"
-REG_FEATURES_PATH = MODEL_DIR / "pdm_regressor_model"  / "regression_selected_features.pkl"
-=======
 # v7 LightGBM boosters (current). Old v5/v6 CatBoost/XGBoost bundles are kept
 # on disk under each model folder's old/ subdirectory as an archive — not
 # loaded anywhere in the app.
@@ -88,7 +82,6 @@ CLF_MODEL_PATH = MODEL_DIR / "pdm_classifier_model" / "predictix_pdm_classifier_
 REG_MODEL_PATH = MODEL_DIR / "pdm_regressor_model"  / "predictix_pdm_regressor_v7.txt"
 CLF_DECISION_LOG_PATH = MODEL_DIR / "pdm_classifier_model" / "classifier_v7_decision_log.json"
 REG_DECISION_LOG_PATH = MODEL_DIR / "pdm_regressor_model"  / "regressor_v7_decision_log.json"
->>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 
 # Same names used as the model_registry.model_name keys throughout the app —
 # kept in sync with app.ai.services.vehicle_prediction_service.
@@ -107,14 +100,6 @@ scheduler: BackgroundScheduler | None = None
 _model_load_lock = __import__('threading').Lock()
 
 
-<<<<<<< HEAD
-def _load_pickle(path: Path):
-    try:
-        with open(path, "rb") as fh:
-            return pickle.load(fh)
-    except Exception:
-        return joblib.load(path)
-=======
 def _load_decision_log(path: Path) -> dict:
     try:
         with open(path, "r", encoding="utf-8") as fh:
@@ -177,7 +162,6 @@ def _register_active_models() -> None:
         log.exception("Failed to register active PdM models in model_registry")
     finally:
         db.close()
->>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 
 
 def _load_pdm_models():
@@ -191,33 +175,6 @@ def _load_pdm_models():
         if clf_model is not None and reg_model is not None:
             return
         try:
-<<<<<<< HEAD
-            # ── Classifier bundle (pickle) ──────────────────────────────
-            clf_bundle = _load_pickle(CLF_MODEL_PATH)
-            if isinstance(clf_bundle, dict):
-                clf_model            = clf_bundle["model"]
-                clf_features         = list(clf_bundle.get("feature_cols", []))
-                clf_threshold        = float(clf_bundle.get("threshold", 0.5))
-                clf_categorical_cols = list(clf_bundle.get("categorical_cols", []))
-            else:
-                clf_model    = clf_bundle
-                clf_features = _load_pickle(CLF_FEATURES_PATH)
-
-            # ── Regressor bundle (joblib) ───────────────────────────────
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                reg_bundle = _load_pickle(REG_MODEL_PATH)
-            if isinstance(reg_bundle, dict):
-                reg_model            = reg_bundle["explainer_model"]
-                reg_features         = list(reg_bundle.get("feature_cols", []))
-                reg_categorical_cols = list(reg_bundle.get("categorical_cols", []))
-            else:
-                reg_model    = reg_bundle
-                reg_features = _load_pickle(REG_FEATURES_PATH)
-
-            log.info("PdM models loaded — clf: %d features, reg: %d features",
-                     len(clf_features), len(reg_features))
-=======
             from app.ai.services.lgb_model_adapter import LgbModelBundle
 
             clf_model = LgbModelBundle(CLF_MODEL_PATH)
@@ -240,7 +197,6 @@ def _load_pdm_models():
                 _register_active_models()
             except Exception:
                 log.exception("model_registry upsert failed (non-fatal)")
->>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
         except Exception as exc:
             log.warning("Local PdM model loading failed (non-fatal): %s", exc)
 
@@ -427,11 +383,6 @@ _dev_origins = [
     "http://127.0.0.1:5173",
     "http://192.168.56.1:3000",
     "http://192.168.56.1:3001",
-<<<<<<< HEAD
-    "https://predicti-x-frontend.vercel.app",
-    "https://predicti-x-frontend-dinusha-ekanayakes-projects.vercel.app",
-=======
->>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 ]
 
 _is_production = os.getenv("ENV", "").strip().lower() == "production"

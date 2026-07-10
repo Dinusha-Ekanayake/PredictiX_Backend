@@ -21,8 +21,6 @@ warehouse_dashboard_router = APIRouter(
 
 _cache = DashboardCache("warehouse", ttl=int(__import__("os").getenv("WAREHOUSE_DASHBOARD_TTL", "60")))
 
-_cache = DashboardCache("warehouse", ttl=int(__import__("os").getenv("WAREHOUSE_DASHBOARD_TTL", "60")))
-
 @warehouse_dashboard_router.get("/summary")
 def get_warehouse_summary(
     db: Session = Depends(get_db),
@@ -30,13 +28,10 @@ def get_warehouse_summary(
 ):
     """
     Returns unified summary data for the Warehouse Dashboard (cached).
-<<<<<<< HEAD
-=======
 
     Scoped to the caller's active warehouse: a regular admin sees their own
     warehouse; a super_admin sees the warehouse they selected at login. The
     cache is keyed per warehouse so views never bleed across warehouses.
->>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
     """
     if db is None:
         raise HTTPException(
@@ -46,39 +41,17 @@ def get_warehouse_summary(
 
     wh_id = active_warehouse_id(current_user)
     try:
-<<<<<<< HEAD
-        return _cache.get_or_refresh(db, _build_warehouse_summary)
-=======
         return _cache.get_or_refresh(
             db,
             lambda d: _build_warehouse_summary(d, wh_id),
             key=wh_id,
         )
->>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
     except Exception as e:
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Warehouse summary failed: {e}")
 
 
-<<<<<<< HEAD
-def _build_warehouse_summary(db: Session):
-    # ── Query 1: all scalar KPIs from predictions + tickets + assets in one shot
-    kpi_row = db.execute(text("""
-        SELECT
-            (SELECT ROUND(AVG(health_score)::numeric, 1)
-             FROM asset_failure_predictions)                                      AS avg_health,
-            (SELECT COUNT(*) FROM asset_failure_predictions
-             WHERE health_score >= 80)                                            AS healthy_assets,
-            (SELECT COUNT(*) FROM asset_failure_predictions
-             WHERE health_score < 60)                                             AS at_risk_assets,
-            (SELECT COUNT(*) FROM assets)                                         AS total_assets,
-            (SELECT COUNT(*) FROM tickets WHERE status != 'closed')               AS active_tickets,
-            (SELECT COUNT(*) FROM tickets)                                        AS total_tickets,
-            (SELECT COALESCE(SUM(estimated_cost), 0) FROM asset_cost_predictions) AS total_cost
-    """)).fetchone()
-
-=======
 def _build_warehouse_summary(db: Session, warehouse_id: str | None = None):
     # When a warehouse is set (admin / super_admin), every metric below is
     # restricted to that warehouse. Entities that have no warehouse column of
@@ -111,7 +84,6 @@ def _build_warehouse_summary(db: Session, warehouse_id: str | None = None):
              WHERE {_assets_in})                                                   AS total_cost
     """), _wh).fetchone()
 
->>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
     avg_health_score     = float(kpi_row[0] or 0)
     healthy_assets       = int(kpi_row[1] or 0)
     at_risk_assets       = int(kpi_row[2] or 0)
@@ -139,12 +111,6 @@ def _build_warehouse_summary(db: Session, warehouse_id: str | None = None):
 
     # ── Query 2: asset status, type, ticket priority+category — all GROUP BYs ─
     # Run as four cheap grouped queries (all indexed scans, tiny result sets).
-<<<<<<< HEAD
-    status_counts    = db.query(Asset.status, func.count(Asset.id)).group_by(Asset.status).all()
-    priority_counts  = db.query(Ticket.priority, func.count(Ticket.id)).group_by(Ticket.priority).all()
-    category_counts  = db.query(Ticket.final_category, func.count(Ticket.id)).group_by(Ticket.final_category).all()
-    type_counts      = db.query(Asset.vehicle_type, func.count(Asset.id)).group_by(Asset.vehicle_type).all()
-=======
     _asset_q  = db.query(Asset.status, func.count(Asset.id))
     _type_q   = db.query(Asset.vehicle_type, func.count(Asset.id))
     _prio_q   = db.query(Ticket.priority, func.count(Ticket.id))
@@ -158,7 +124,6 @@ def _build_warehouse_summary(db: Session, warehouse_id: str | None = None):
     priority_counts  = _prio_q.group_by(Ticket.priority).all()
     category_counts  = _cat_q.group_by(Ticket.final_category).all()
     type_counts      = _type_q.group_by(Asset.vehicle_type).all()
->>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 
     asset_status       = [{"name": s.title() if s else "Unknown",                                "value": c} for s, c in status_counts]
     ticket_priority    = [{"name": p.title() if p else "Unassigned",                             "value": c} for p, c in priority_counts]
@@ -166,12 +131,6 @@ def _build_warehouse_summary(db: Session, warehouse_id: str | None = None):
     assets_by_type     = [{"type": str(t).replace("_", " ").title() if t else "Other",           "count": c} for t, c in type_counts]
 
     # 6. Health Score Distribution — bucketed in SQL (no full-table fetch into Python)
-<<<<<<< HEAD
-    bucket_rows = db.query(
-        func.width_bucket(AssetFailurePrediction.health_score, 60, 100, 4).label("b"),
-        func.count(AssetFailurePrediction.id),
-    ).filter(AssetFailurePrediction.health_score.isnot(None)).group_by("b").all()
-=======
     _bucket_q = db.query(
         func.width_bucket(AssetFailurePrediction.health_score, 60, 100, 4).label("b"),
         func.count(AssetFailurePrediction.id),
@@ -181,7 +140,6 @@ def _build_warehouse_summary(db: Session, warehouse_id: str | None = None):
             Asset.warehouse_id == warehouse_id
         )
     bucket_rows = _bucket_q.group_by("b").all()
->>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
     # width_bucket(score, 60, 100, 4) → 0:<60, 1:60–69, 2:70–79, 3:80–89, 4&5:90–100
     buckets = {"90–100%": 0, "80–89%": 0, "70–79%": 0, "60–69%": 0, "< 60%": 0}
     _bucket_map = {0: "< 60%", 1: "60–69%", 2: "70–79%", 3: "80–89%", 4: "90–100%", 5: "90–100%"}
@@ -191,12 +149,6 @@ def _build_warehouse_summary(db: Session, warehouse_id: str | None = None):
 
     # 7. Monthly Ticket Volume & Health/Maintenance Trends
     # Ticket counts per month — aggregated in SQL instead of pulling every row.
-<<<<<<< HEAD
-    ticket_month_rows = db.query(
-        extract("month", Ticket.created_at).label("m"),
-        func.count(Ticket.id),
-    ).filter(Ticket.created_at.isnot(None)).group_by("m").all()
-=======
     _tm_q = db.query(
         extract("month", Ticket.created_at).label("m"),
         func.count(Ticket.id),
@@ -204,7 +156,6 @@ def _build_warehouse_summary(db: Session, warehouse_id: str | None = None):
     if warehouse_id:
         _tm_q = _tm_q.filter(Ticket.warehouse_id == warehouse_id)
     ticket_month_rows = _tm_q.group_by("m").all()
->>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
     months_dict = {m: 0 for m in calendar.month_abbr[1:]}
     for m_num, cnt in ticket_month_rows:
         months_dict[calendar.month_abbr[int(m_num)]] += cnt
@@ -221,12 +172,6 @@ def _build_warehouse_summary(db: Session, warehouse_id: str | None = None):
 
     current_avg_health = int(avg_health_score) if avg_health_score else 0
     # Per-month avg health in ONE grouped query instead of one query per month.
-<<<<<<< HEAD
-    health_month_rows = db.query(
-        extract("month", AssetFailurePrediction.created_at).label("m"),
-        func.avg(AssetFailurePrediction.health_score),
-    ).filter(AssetFailurePrediction.created_at.isnot(None)).group_by("m").all()
-=======
     _hm_q = db.query(
         extract("month", AssetFailurePrediction.created_at).label("m"),
         func.avg(AssetFailurePrediction.health_score),
@@ -236,7 +181,6 @@ def _build_warehouse_summary(db: Session, warehouse_id: str | None = None):
             Asset.warehouse_id == warehouse_id
         )
     health_month_rows = _hm_q.group_by("m").all()
->>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
     avg_health_by_month = {int(m_num): avg_h for m_num, avg_h in health_month_rows}
     health_trends = []
     for m in recent_months:
@@ -409,71 +353,6 @@ def _build_warehouse_summary(db: Session, warehouse_id: str | None = None):
         )
     except Exception:
         log.warning("[warehouse] executive summary build failed", exc_info=True)
-    finally:
-        _s.close()
-
-    # ── Executive overview narrative (deterministic, data-grounded) ──────────
-    # Mirrors the LLM report's insight_summary but is computed instantly here so
-    # it can render on the dashboard with no LLM call. It rides along on the
-    # already-cached summary payload, so there is no extra per-request cost.
-    executive_summary = None
-    # Use a FRESH session for these reads: an earlier swallowed query above
-    # (component_health / recent_maintenance) can leave `db` in an aborted-
-    # transaction state, which would otherwise fail every query here.
-    from app.db.session import SessionLocal
-    _s = SessionLocal()
-    try:
-        wh_row = _s.execute(text(
-            "SELECT w.name FROM warehouses w "
-            "LEFT JOIN assets a ON a.warehouse_id = w.id "
-            "GROUP BY w.id, w.name ORDER BY COUNT(a.id) DESC LIMIT 1"
-        )).fetchone()
-        warehouse_name = wh_row[0] if wh_row and wh_row[0] else "PredictiX"
-
-        avg_age = _s.execute(text(
-            "SELECT ROUND(AVG(vehicle_age_years)::numeric, 1) FROM assets "
-            "WHERE vehicle_age_years IS NOT NULL"
-        )).scalar()
-        active_users = _s.execute(text(
-            "SELECT COUNT(*) FROM profiles WHERE status::text = 'active'"
-        )).scalar() or 0
-        dept_count = _s.execute(text("SELECT COUNT(*) FROM departments")).scalar() or 0
-
-        status_map = {s["name"].lower(): s["value"] for s in asset_status}
-        active_assets  = status_map.get("active", 0)
-        maint_assets   = status_map.get("maintenance", status_map.get("under maintenance", 0))
-        retired_assets = status_map.get("retired", 0)
-
-        top_types = [t["type"].lower() for t in sorted(assets_by_type, key=lambda x: x["count"], reverse=True)[:3]]
-        types_text = (
-            ", ".join(top_types[:-1]) + ", and " + top_types[-1] if len(top_types) > 1
-            else (top_types[0] if top_types else "various assets")
-        )
-
-        crit_rate = round(at_risk_assets / total_assets * 100, 1) if total_assets else 0.0
-        iso_clause = (
-            f"which exceeds the ISO 55000 5% critical target, with a critical rate of {crit_rate}%"
-            if crit_rate > 5 else
-            f"within the ISO 55000 5% critical target, with a critical rate of {crit_rate}%"
-        )
-        age_text = f"an average vehicle age of {avg_age} years" if avg_age is not None else "mixed vehicle ages"
-
-        executive_summary = (
-            f"The {warehouse_name} warehouse has a total fleet size of {total_assets} assets, "
-            f"comprising various types such as {types_text}, with {age_text}. "
-            f"The average fleet health score is {int(avg_health_score)}%, and there are "
-            f"{at_risk_assets} critical assets, {iso_clause}. "
-            f"The estimated maintenance cost is LKR {total_cost:,}, and there are "
-            f"{active_tickets_count} active tickets, with {active_users} active users. "
-            f"The warehouse status is active, with {dept_count} departments, and the fleet "
-            f"composition includes {active_assets} active assets, {maint_assets} under maintenance, "
-            f"and {retired_assets} retired assets."
-        )
-    except Exception:
-        import logging
-        logging.getLogger("predictix").warning(
-            "[warehouse] executive summary build failed", exc_info=True
-        )
     finally:
         _s.close()
 

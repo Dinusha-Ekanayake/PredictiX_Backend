@@ -28,10 +28,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-<<<<<<< HEAD
-=======
 import numpy as np
->>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 from sqlalchemy import String, cast, text
 from sqlalchemy.orm import Session
 
@@ -254,59 +251,10 @@ def _run_classifier_batch(
     df = clf_model.build_frame(feature_dicts)
 
     try:
-<<<<<<< HEAD
-        probas = clf_model.predict_proba(df)[0]
-        prob = float(probas[-1]) if len(probas) > 1 else float(probas[0])
-    except Exception as e:
-        import logging
-        logging.getLogger("predictix.ai").warning(f"XGBoost classification failed (likely unknown category): {e}. Falling back to 0.05.")
-        prob = 0.05
-
-    return round(prob, 4), bool(prob >= clf_threshold)
-
-
-
-
-
-
-
-def _run_regressor(fd: dict, reg_model, reg_features: list[str], reg_categorical_cols: list[str], snapshot_date: date) -> tuple[int, date, list[dict]]:
-    """Returns (days_until_maintenance, predicted_date, top_explanations)."""
-    import numpy as np
-    import pandas as pd
-    from catboost import Pool
-
-    cat_feature_names = set(reg_categorical_cols or [])
-
-    row = {f: fd.get(f, "") if f in cat_feature_names else fd.get(f, 0)
-           for f in reg_features}
-    df = pd.DataFrame([row])
-
-    for col in df.columns:
-        if col in cat_feature_names:
-            df[col] = df[col].astype(str)
-        else:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-
-    cat_indices = [df.columns.get_loc(c) for c in cat_feature_names if c in df.columns]
-
-    try:
-        pool = Pool(df, cat_features=cat_indices)
-        raw_days = float(reg_model.predict(pool)[0])
-
-        # SHAP explanations from CatBoost
-        shap_vals = reg_model.get_feature_importance(type="ShapValues", data=pool)
-        row_shap = shap_vals[0][:-1]
-        ranked = sorted(zip(list(df.columns), row_shap), key=lambda x: abs(x[1]), reverse=True)
-        top_explanations = [
-            {"feature": feat, "impact": round(float(imp), 4)}
-            for feat, imp in ranked[:5]
-=======
         probas = clf_model.predict_proba_positive(df)
         return [
             (round(float(p), 4), bool(p >= clf_threshold))
             for p in probas
->>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
         ]
     except Exception as e:
         log.warning("Batched LightGBM classification failed: %s. Falling back to per-row.", e)
@@ -684,13 +632,8 @@ def run_batch_for_asset(
         (failure_probability, maintenance_required), = _run_classifier_batch(
             [fd], clf_model, clf_features, clf_threshold, clf_categorical_cols
         )
-<<<<<<< HEAD
-        days_until, pred_date, top_explanations = _run_regressor(
-            fd, reg_model, reg_features, reg_categorical_cols, today
-=======
         (days_until, pred_date, top_explanations, horizon_saturated), = _run_regressor_batch(
             [fd], reg_model, reg_features, reg_categorical_cols, today
->>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
         )
         health_score, health_status = _compute_health_score(fd, failure_probability, days_until)
         contributing_factors = _compute_contributing_factors(fd, failure_probability)
@@ -818,11 +761,7 @@ def run_batch_for_all_assets(
     # retired from the fleet) are skipped.
     assets = (
         db.query(Asset)
-<<<<<<< HEAD
-        .filter(cast(Asset.status, String) == "active")
-=======
         .filter(cast(Asset.status, String) != "decommissioned")
->>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
         .order_by(Asset.asset_code)
         .all()
     )
@@ -855,27 +794,9 @@ def run_batch_for_all_assets(
     feature_dicts: list[dict[str, Any]] = []
 
     for asset in assets:
-<<<<<<< HEAD
-        result = run_batch_for_asset(
-            db=db,
-            asset=asset,
-            clf_model=clf_model,
-            clf_features=clf_features,
-            clf_threshold=clf_threshold,
-            clf_categorical_cols=clf_categorical_cols,
-            reg_model=reg_model,
-            reg_features=reg_features,
-            reg_categorical_cols=reg_categorical_cols,
-        )
-        s = result.get("status")
-        if s == "ok":
-            ok_count += 1
-        elif s == "no_data":
-=======
         asset_id_str = str(asset.id)
         reading = readings_by_asset.get(asset_id_str)
         if reading is None:
->>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
             no_data_count += 1
             upsert_rows.append({
                 "asset_id": asset_id_str,

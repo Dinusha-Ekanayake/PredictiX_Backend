@@ -15,11 +15,7 @@ import logging
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
-<<<<<<< HEAD
-from fastapi import APIRouter, Depends, HTTPException
-=======
 from fastapi import APIRouter, Depends, HTTPException, Query
->>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 from sqlalchemy import String, cast, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -191,20 +187,6 @@ def _user_to_item(
     return _build_item(user, dept_names, warehouse_names, asset_counts)
 
 
-<<<<<<< HEAD
-@router.get("/", response_model=list[UserItemOut])
-def list_users(db: Session = Depends(get_db)):
-    # Pre-fetch lookup maps once — avoids per-user N+1 queries.
-    dept_names = {d.id: d.name for d in db.query(Department.id, Department.name).all()}
-    warehouse_names = {w.id: w.name for w in db.query(Warehouse.id, Warehouse.name).all()}
-    asset_counts = {
-        str(assigned_to): count
-        for assigned_to, count in db.query(Asset.assigned_to, func.count(Asset.id))
-        .filter(Asset.assigned_to.isnot(None), cast(Asset.status, String) == "active")
-        .group_by(Asset.assigned_to)
-        .all()
-    }
-=======
 def _fetch_asset_counts() -> dict:
     with SessionLocal() as s:
         return {
@@ -248,7 +230,6 @@ def list_users(
         warehouse_names = wh_future.result()
         asset_counts = assets_future.result()
         users = users_future.result()
->>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 
     return [_build_item(u, dept_names, warehouse_names, asset_counts) for u in users]
 

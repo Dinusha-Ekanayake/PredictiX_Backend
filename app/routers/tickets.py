@@ -102,11 +102,7 @@ def get_ticket_status_counts(
     counts = {"open": 0, "in-progress": 0, "resolved": 0, "closed": 0}
     q = db.query(Ticket.status, func.count(Ticket.id)).group_by(Ticket.status)
 
-<<<<<<< HEAD
-    if str(current_user.role).lower() != "admin":
-=======
     if not is_admin_role(current_user):
->>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
         q = q.filter((Ticket.assigned_to == current_user.id) | (Ticket.created_by == current_user.id))
 
     rows = q.all()

@@ -99,24 +99,6 @@ def chatbot_agent(
     history = [t.model_dump() for t in (request.history or [])]
 
     result = run_agent(question=request.question, history=history, ctx=ctx)
-<<<<<<< HEAD
-    
-    # Ensure args is always a dict
-    if "tool_trace" in result:
-        for trace in result["tool_trace"]:
-            if trace.get("args") is None:
-                trace["args"] = {}
-                
-    try:
-        return AgentResponse(**result)
-    except Exception as e:
-        # Fallback if validation fails
-        return AgentResponse(
-            answer=result.get("answer", "I encountered an error processing the response."),
-            tool_trace=[],
-            iterations=result.get("iterations", 1)
-        )
-=======
 
     # Normalize tool_trace: ensure args is always a dict
     clean_trace = []
@@ -140,4 +122,3 @@ def chatbot_agent(
         tool_trace=clean_trace,
         iterations=result.get("iterations", 1),
     )
->>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b

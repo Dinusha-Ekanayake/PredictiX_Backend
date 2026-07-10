@@ -499,9 +499,6 @@ class PdmBatchPrediction(Base):
     predicted_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     run_duration_ms = Column(Integer)
     error_message = Column(Text)
-<<<<<<< HEAD
-    status = Column(Text, nullable=False, default="ok")
-=======
     status = Column(Text, nullable=False, default="ok")
 
     # Auditability — which model generation + exact input produced this row.
@@ -576,4 +573,3 @@ class ServiceReminderLog(Base):
     error_message = Column(Text, nullable=True)
 
     sent_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
->>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
