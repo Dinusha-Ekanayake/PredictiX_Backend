@@ -1,7 +1,10 @@
-import sqlalchemy
-from sqlalchemy import create_engine, text
+"""Manual debug script — inspect the log_api_request PostgREST function/policies.
 
-engine = create_engine('postgresql+psycopg2://postgres.ulpjoljukculqqrwlwup:udCV%40bTGj.Ah38L@aws-1-ap-southeast-2.pooler.supabase.com:6543/postgres')
+Run with: python -m scripts.manual.test_pgrst
+"""
+from sqlalchemy import text
+
+from app.db.session import engine
 with engine.connect() as conn:
     try:
         res = conn.execute(text("SHOW ALL"))
