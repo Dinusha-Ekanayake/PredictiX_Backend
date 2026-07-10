@@ -74,6 +74,13 @@ MIN_POINTS_FOR_TREND = 2
 # flag instead of showing e.g. "3096 days left" / a 2034 failure date.
 MAX_HORIZON_DAYS = 730
 
+# A jump this large between two consecutive monthly readings (e.g. oil life
+# jumping from 53% to 85%) is almost certainly a maintenance/service event,
+# not gradual physical change — a straight-line fit across it produces a
+# large slope that is real (not noise) but describes a one-time step, not
+# an ongoing trend. Detected and relabelled rather than blended into the fit.
+SERVICE_EVENT_JUMP_PCT = 15.0
+
 COMPONENTS: dict[str, str] = {
     "tire": "tire_health_pct",
     "brake": "brake_health_pct",
@@ -92,12 +99,17 @@ class ComponentRul:
     rul_days_low: Optional[int]
     rul_days_high: Optional[int]
     estimated_failure_date: Optional[date]
-    confidence: str  # "trend" | "insufficient_trend" | "single_point" | "no_data"
+    confidence: str  # "trend" | "insufficient_trend" | "single_point" | "no_data" | "recently_serviced"
     readings_used: int
     horizon_capped: bool = False
     model_corroborated: bool = False
     model_days_ceiling: Optional[int] = None
     disagrees_with_model: bool = False
+    # True when this estimate was refit on the window *since* a detected
+    # service-event jump rather than the asset's full reading history —
+    # i.e. "recently serviced, and here's the trend since then" instead of
+    # "recently serviced, no post-service trend available yet".
+    post_service: bool = False
 
 
 def _linear_fit_with_se(xs: list[float], ys: list[float]) -> tuple[float, float, float]:
@@ -134,6 +146,115 @@ def _rul_from_slope(last_health: float, threshold: float, slope: float) -> Optio
         return None
     days = (threshold - last_health) / slope
     return max(0, int(days))
+
+
+def _detect_jump_index(points: list[tuple[datetime, float]]) -> Optional[int]:
+    """Index of the reading right after the largest jump between consecutive
+    points, if that jump is large enough to look like a service event.
+    Returns None if no jump clears the threshold."""
+    if len(points) < 2:
+        return None
+    deltas = [abs(points[i][1] - points[i - 1][1]) for i in range(1, len(points))]
+    best_i = max(range(len(deltas)), key=lambda i: deltas[i])
+    if deltas[best_i] >= SERVICE_EVENT_JUMP_PCT:
+        return best_i + 1  # points[] index of the reading after the jump
+    return None
+
+
+def _fit_trend_from_points(
+    component: str,
+    threshold: float,
+    points: list[tuple[datetime, float]],
+    post_service: bool,
+) -> ComponentRul:
+    """OLS-fit a trend on `points` and classify it into a ComponentRul.
+
+    Shared by the whole-history fit and the post-service-jump refit — same
+    significance test and RUL/uncertainty-band logic either way, just a
+    different (and possibly shorter) window of readings.
+    """
+    t0 = points[0][0]
+    xs = [(t - t0).total_seconds() / 86400.0 for t, _ in points]
+    ys = [v for _, v in points]
+    slope, intercept, se_slope = _linear_fit_with_se(xs, ys)
+
+    last_health = ys[-1]
+
+    # A slope within its own standard error of zero is not evidence of a
+    # real trend in either direction — with only a handful of points,
+    # "slightly positive" and "slightly negative" are both indistinguishable
+    # from noise. Labelling that "Improving" (or extrapolating a failure
+    # date from it) claims a confidence the data doesn't support; the honest
+    # answer is that there isn't enough signal to say which way this
+    # component is trending yet.
+    is_significant = se_slope == 0 or abs(slope) > se_slope
+
+    if not is_significant:
+        return ComponentRul(
+            component=component,
+            current_health_pct=round(last_health, 1),
+            degradation_pct_per_day=round(slope, 4),
+            rul_days=None,
+            rul_days_low=None,
+            rul_days_high=None,
+            estimated_failure_date=None,
+            confidence="insufficient_trend",
+            readings_used=len(points),
+            post_service=post_service,
+        )
+
+    if slope >= 0:
+        # Genuinely improving (e.g. component condition recovering) — the
+        # slope clears the noise floor and points upward, a real signal.
+        return ComponentRul(
+            component=component,
+            current_health_pct=round(last_health, 1),
+            degradation_pct_per_day=round(slope, 4),
+            rul_days=None,
+            rul_days_low=None,
+            rul_days_high=None,
+            estimated_failure_date=None,
+            confidence="trend",
+            readings_used=len(points),
+            post_service=post_service,
+        )
+
+    rul_days = _rul_from_slope(last_health, threshold, slope)
+    assert rul_days is not None  # slope < 0 here, so this always resolves
+
+    # Uncertainty band from the slope's standard error (±1 SE on the slope,
+    # propagated through the same extrapolation). With few points this is
+    # necessarily wide — that width is the honest signal, not a defect.
+    rul_low, rul_high = rul_days, rul_days
+    if se_slope > 0:
+        slope_low = slope - se_slope   # steeper decline → shorter RUL
+        slope_high = slope + se_slope  # shallower decline → longer RUL
+        if slope_low < 0:
+            rul_high = _rul_from_slope(last_health, threshold, slope_low) or rul_days
+        if slope_high < 0:
+            rul_low = _rul_from_slope(last_health, threshold, slope_high) or rul_days
+        else:
+            rul_low = rul_days  # shallow-side SE flips to improving — can't bound further out
+        rul_low, rul_high = min(rul_low, rul_high), max(rul_low, rul_high)
+
+    capped = rul_days > MAX_HORIZON_DAYS
+    rul_days_final = min(rul_days, MAX_HORIZON_DAYS)
+    rul_low = min(rul_low, MAX_HORIZON_DAYS)
+    rul_high = min(rul_high, MAX_HORIZON_DAYS)
+
+    return ComponentRul(
+        component=component,
+        current_health_pct=round(last_health, 1),
+        degradation_pct_per_day=round(slope, 4),
+        rul_days=rul_days_final,
+        rul_days_low=rul_low,
+        rul_days_high=rul_high,
+        estimated_failure_date=date.today().fromordinal(date.today().toordinal() + rul_days_final),
+        confidence="trend",
+        readings_used=len(points),
+        horizon_capped=capped,
+        post_service=post_service,
+    )
 
 
 def _estimate_component(
@@ -185,87 +306,36 @@ def _estimate_component(
             horizon_capped=capped,
         )
 
-    t0 = points[0][0]
-    xs = [(t - t0).total_seconds() / 86400.0 for t, _ in points]
-    ys = [v for _, v in points]
-    slope, intercept, se_slope = _linear_fit_with_se(xs, ys)
+    # A large jump between two consecutive readings (e.g. an oil change
+    # taking oil_life_pct from 53% to 85%) is almost certainly a maintenance
+    # event, not gradual physical change. A straight-line fit across it
+    # would produce a slope that IS statistically real (not noise) but
+    # describes that one-time step rather than an ongoing trend. Rather
+    # than just flagging and giving up, refit the trend using only the
+    # readings from that event onward — that's the component's actual
+    # current trajectory, not one blended with its stale pre-service history.
+    jump_idx = _detect_jump_index(points)
+    if jump_idx is not None:
+        post_service_points = points[jump_idx:]
+        if len(post_service_points) >= MIN_POINTS_FOR_TREND:
+            return _fit_trend_from_points(component, threshold, post_service_points, post_service=True)
 
-    last_x = xs[-1]
-    last_health = ys[-1]
-
-    # A slope within its own standard error of zero is not evidence of a
-    # real trend in either direction — with only 4 points, "slightly
-    # positive" and "slightly negative" are both indistinguishable from
-    # noise. Labelling that "Improving" (or extrapolating a failure date
-    # from it) claims a confidence the data doesn't support; the honest
-    # answer is that there isn't enough signal to say which way this
-    # component is trending yet.
-    is_significant = se_slope == 0 or abs(slope) > se_slope
-
-    if not is_significant:
+        # Only one reading since the service event — can't fit a line yet,
+        # so there's genuinely no trend to report, just the fact of the
+        # recent service and its single follow-up reading.
         return ComponentRul(
             component=component,
-            current_health_pct=round(last_health, 1),
-            degradation_pct_per_day=round(slope, 4),
+            current_health_pct=round(current_health, 1),
+            degradation_pct_per_day=None,
             rul_days=None,
             rul_days_low=None,
             rul_days_high=None,
             estimated_failure_date=None,
-            confidence="insufficient_trend",
+            confidence="recently_serviced",
             readings_used=len(points),
         )
 
-    if slope >= 0:
-        # Genuinely improving (e.g. after a service) — the slope clears the
-        # noise floor and points upward, so this is a real signal, not just
-        # an absence of decline.
-        return ComponentRul(
-            component=component,
-            current_health_pct=round(last_health, 1),
-            degradation_pct_per_day=round(slope, 4),
-            rul_days=None,
-            rul_days_low=None,
-            rul_days_high=None,
-            estimated_failure_date=None,
-            confidence="trend",
-            readings_used=len(points),
-        )
-
-    rul_days = _rul_from_slope(last_health, threshold, slope)
-    assert rul_days is not None  # slope < 0 here, so this always resolves
-
-    # Uncertainty band from the slope's standard error (±1 SE on the slope,
-    # propagated through the same extrapolation). With 4 points this is
-    # necessarily wide — that width is the honest signal, not a defect.
-    rul_low, rul_high = rul_days, rul_days
-    if se_slope > 0:
-        slope_low = slope - se_slope   # steeper decline → shorter RUL
-        slope_high = slope + se_slope  # shallower decline → longer RUL
-        if slope_low < 0:
-            rul_high = _rul_from_slope(last_health, threshold, slope_low) or rul_days
-        if slope_high < 0:
-            rul_low = _rul_from_slope(last_health, threshold, slope_high) or rul_days
-        else:
-            rul_low = rul_days  # shallow-side SE flips to improving — can't bound further out
-        rul_low, rul_high = min(rul_low, rul_high), max(rul_low, rul_high)
-
-    capped = rul_days > MAX_HORIZON_DAYS
-    rul_days_final = min(rul_days, MAX_HORIZON_DAYS)
-    rul_low = min(rul_low, MAX_HORIZON_DAYS)
-    rul_high = min(rul_high, MAX_HORIZON_DAYS)
-
-    return ComponentRul(
-        component=component,
-        current_health_pct=round(last_health, 1),
-        degradation_pct_per_day=round(slope, 4),
-        rul_days=rul_days_final,
-        rul_days_low=rul_low,
-        rul_days_high=rul_high,
-        estimated_failure_date=date.today().fromordinal(date.today().toordinal() + rul_days_final),
-        confidence="trend",
-        readings_used=len(points),
-        horizon_capped=capped,
-    )
+    return _fit_trend_from_points(component, threshold, points, post_service=False)
 
 
 def _apply_model_grounding(

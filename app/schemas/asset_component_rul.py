@@ -11,7 +11,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel
 
 
-Confidence = Literal["trend", "insufficient_trend", "single_point", "no_data"]
+Confidence = Literal["trend", "insufficient_trend", "single_point", "no_data", "recently_serviced"]
 
 
 class ComponentRulOut(BaseModel):
@@ -31,6 +31,10 @@ class ComponentRulOut(BaseModel):
     model_corroborated: bool = False
     model_days_ceiling: Optional[int] = None
     disagrees_with_model: bool = False
+    # True when a service-event jump was detected in this component's
+    # history and this trend/RUL was refit on only the readings since that
+    # jump (see asset_component_rul_service._detect_jump_index).
+    post_service: bool = False
 
 
 class AssetComponentRulResponse(BaseModel):
