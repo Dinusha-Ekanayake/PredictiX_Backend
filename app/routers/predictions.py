@@ -1,7 +1,7 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from sqlalchemy.orm import Session
 
-from app.deps import get_db
+from app.deps import get_db, require_user
 from app.models import (
     PredictionRun,
     AssetFailurePrediction,
@@ -28,7 +28,11 @@ from app.ai.services.prediction_service import (
     run_full_prediction,
 )
 
-router = APIRouter(prefix="/predictions", tags=["Predictions"])
+router = APIRouter(
+    prefix="/predictions",
+    tags=["Predictions"],
+    dependencies=[Depends(require_user)],
+)
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -103,8 +107,12 @@ def full_prediction(payload: PredictionRequest):
 
 
 @router.get("/runs", response_model=list[PredictionRunOut])
-def list_prediction_runs(db: Session = Depends(get_db)):
-    return db.query(PredictionRun).order_by(PredictionRun.run_started_at.desc()).all()
+def list_prediction_runs(
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    return db.query(PredictionRun).order_by(PredictionRun.run_started_at.desc()).offset(offset).limit(limit).all()
 
 
 @router.get("/runs/{run_id}", response_model=PredictionRunOut)

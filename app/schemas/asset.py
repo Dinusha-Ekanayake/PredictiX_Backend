@@ -106,3 +106,25 @@ class AssetOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class AssetListOut(BaseModel):
+    """Trimmed projection for the assets list view (table + summary cards +
+    warehouse-option extraction). Only the fields that screen actually
+    renders — the full AssetOut (34 fields) is reserved for the single-asset
+    detail endpoint, which is what the detail panel needs."""
+    id: UUID
+    asset_code: str
+    asset_name: str
+    asset_type: str
+    vehicle_type: Optional[str] = None
+    make: Optional[str] = None
+    model: Optional[str] = None
+    manufacture_year: Optional[int] = None
+    status: str
+    health_band: Optional[str] = None
+    warehouse_id: UUID
+    meta: Optional[Any] = None
+
+    class Config:
+        from_attributes = True

@@ -1,10 +1,30 @@
 import logging
-from typing import Dict
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from typing import Dict, Optional
+
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, status
+from jose import JWTError, jwt
+
+from app.core.config import jwt_secret, jwt_algorithm
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _verify_ws_token(token: Optional[str], user_id: str) -> bool:
+    """Return True only if `token` is a valid JWT whose subject matches user_id.
+
+    The notification socket used to trust the path user_id alone, so anyone
+    could subscribe to anyone else's stream. Now the caller must present their
+    own JWT (as a ?token= query param) and it must belong to that same user.
+    """
+    if not token:
+        return False
+    try:
+        payload = jwt.decode(token, jwt_secret(), algorithms=[jwt_algorithm()])
+    except JWTError:
+        return False
+    return str(payload.get("sub") or "") == str(user_id)
 
 class ConnectionManager:
     def __init__(self):
@@ -43,7 +63,18 @@ class ConnectionManager:
 notifier = ConnectionManager()
 
 @router.websocket("/ws/notifications/{user_id}")
-async def websocket_endpoint(websocket: WebSocket, user_id: str):
+async def websocket_endpoint(
+    websocket: WebSocket,
+    user_id: str,
+    token: Optional[str] = Query(default=None),
+):
+    # Authenticate BEFORE accepting: the token must be valid and belong to the
+    # same user_id in the path, otherwise reject the handshake.
+    if not _verify_ws_token(token, user_id):
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        logger.warning("WebSocket auth rejected for user_id=%s", user_id)
+        return
+
     await notifier.connect(websocket, user_id)
     try:
         while True:

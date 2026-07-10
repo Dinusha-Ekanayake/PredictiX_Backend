@@ -1,5 +1,7 @@
 from sqlalchemy import Column, String, Text, Integer, Boolean, Date, DateTime, ForeignKey, Numeric
 from sqlalchemy.dialects.postgresql import ENUM, UUID, JSONB
+from sqlalchemy import Boolean, Column, Date, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 from app.db import Base
 import uuid
@@ -497,4 +499,81 @@ class PdmBatchPrediction(Base):
     predicted_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     run_duration_ms = Column(Integer)
     error_message = Column(Text)
+<<<<<<< HEAD
     status = Column(Text, nullable=False, default="ok")
+=======
+    status = Column(Text, nullable=False, default="ok")
+
+    # Auditability — which model generation + exact input produced this row.
+    model_version = Column(Text)
+    feature_snapshot = Column(JSONB, default={})
+
+    # Decision layer (app.ai.services.pdm_decision_service.build_decision).
+    tier = Column(Text)
+    agreement = Column(Boolean)
+    display_mode = Column(Text)
+    horizon_text = Column(Text)
+    recommended_action = Column(Text)
+    horizon_saturated = Column(Boolean, default=False)
+
+
+class PdmPredictionHistory(Base):
+    """Append-only log of every batch prediction run — never upserted or
+    overwritten, unlike PdmBatchPrediction (which only ever holds the latest
+    row per asset).
+
+    Exists so that predictions made today can eventually be checked against
+    what actually happened afterward (a real maintenance_event within N days,
+    an unplanned "repair" event, etc.) — the validation this system currently
+    cannot do because PdmBatchPrediction discards prior predictions on every
+    upsert. One row is inserted per asset per batch run; nothing here is ever
+    updated or deleted by the app itself.
+    """
+    __tablename__ = "pdm_prediction_history"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id", ondelete="CASCADE"), nullable=False)
+
+    failure_probability = Column(Numeric(10, 4))
+    predicted_days_until_maintenance = Column(Integer)
+    predicted_maintenance_date = Column(Date)
+    health_score = Column(Numeric(10, 4))
+    tier = Column(Text)
+    model_version = Column(Text)
+
+    predicted_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class ServiceReminderLog(Base):
+    """One row per service-reminder email send attempt."""
+    __tablename__ = "service_reminder_log"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    asset_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("assets.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("profiles.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+
+    service_date = Column(Date, nullable=False)
+    reminder_offset_days = Column(Integer, nullable=False)
+
+    trigger = Column(String, nullable=False)
+    sent_by = Column(
+        UUID(as_uuid=True),
+        ForeignKey("profiles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    email_to = Column(String, nullable=False)
+    success = Column(Boolean, nullable=False, default=True)
+    error_message = Column(Text, nullable=True)
+
+    sent_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b

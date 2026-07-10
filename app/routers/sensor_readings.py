@@ -1,12 +1,16 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from app.deps import get_db
+from app.deps import get_db, require_admin, require_user
 from app.models import SensorReading, Asset
 from app.schemas.sensor import SensorReadingCreate, SensorReadingOut
 
-router = APIRouter(prefix="/sensor-readings", tags=["Sensor Readings"])
+router = APIRouter(
+    prefix="/sensor-readings",
+    tags=["Sensor Readings"],
+    dependencies=[Depends(require_user)],
+)
 
-@router.post("/")
+@router.post("/", dependencies=[Depends(require_admin)])
 def create_sensor_reading(payload: SensorReadingCreate, db: Session = Depends(get_db)):
     asset = db.query(Asset).filter(Asset.id == payload.asset_id).first()
     if not asset:

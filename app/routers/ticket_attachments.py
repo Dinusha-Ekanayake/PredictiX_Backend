@@ -1,7 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from app.deps import get_db, get_current_user
+<<<<<<< HEAD
 from app.models import TicketAttachment, Profile
+=======
+from app.models import Ticket, TicketAttachment, Profile
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 from app.schemas.misc import TicketAttachmentCreate, TicketAttachmentOut
 
 router = APIRouter(prefix="/ticket-attachments", tags=["Ticket Attachments"])
@@ -9,6 +13,13 @@ router = APIRouter(prefix="/ticket-attachments", tags=["Ticket Attachments"])
 
 @router.post("/", response_model=TicketAttachmentOut)
 def create_ticket_attachment(payload: TicketAttachmentCreate, db: Session = Depends(get_db), current_user: Profile = Depends(get_current_user)):
+<<<<<<< HEAD
+=======
+    ticket = db.query(Ticket).filter(Ticket.id == payload.ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
     obj = TicketAttachment(**payload.model_dump())
     db.add(obj)
     db.commit()

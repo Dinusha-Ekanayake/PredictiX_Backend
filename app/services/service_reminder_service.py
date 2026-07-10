@@ -11,12 +11,19 @@ from datetime import date, timedelta
 from typing import Optional
 from uuid import UUID
 
+<<<<<<< HEAD
 from sqlalchemy import String, cast
+=======
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 from sqlalchemy.orm import Session
 
 from app.models import Asset, Profile, ServiceReminderLog
 from app.services.reminder_email_sender import EmailSendError, send_email
 from app.services.reminder_email_template import service_reminder_html
+<<<<<<< HEAD
+=======
+
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 log = logging.getLogger(__name__)
 
 
@@ -47,6 +54,30 @@ def _already_sent_auto(
     )
 
 
+<<<<<<< HEAD
+=======
+def _already_sent_auto_keys(db: Session, asset_ids: list[UUID]) -> set[tuple[UUID, date, int]]:
+    """Batch version of _already_sent_auto — one query for the whole sweep
+    instead of one query per due asset."""
+    if not asset_ids:
+        return set()
+    rows = (
+        db.query(
+            ServiceReminderLog.asset_id,
+            ServiceReminderLog.service_date,
+            ServiceReminderLog.reminder_offset_days,
+        )
+        .filter(
+            ServiceReminderLog.asset_id.in_(asset_ids),
+            ServiceReminderLog.trigger == "auto",
+            ServiceReminderLog.success.is_(True),
+        )
+        .all()
+    )
+    return {(asset_id, service_date, offset_days) for asset_id, service_date, offset_days in rows}
+
+
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 def _resolve_warehouse_name(db: Session, warehouse_id) -> Optional[str]:
     try:
         from app.models import Warehouse
@@ -70,6 +101,10 @@ def _send_and_log(
     offset_days: int,
     trigger: str,
     sent_by: Optional[UUID] = None,
+<<<<<<< HEAD
+=======
+    admin_note: Optional[str] = None,
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 ) -> dict:
     if not user.email:
         log.warning("Asset %s assignee %s has no email — skipping", asset.id, user.id)
@@ -88,6 +123,10 @@ def _send_and_log(
         days_remaining=days_remaining,
         warehouse_name=warehouse_name,
         dashboard_url=os.getenv("FRONTEND_URL"),
+<<<<<<< HEAD
+=======
+        admin_note=admin_note,
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
     )
 
     if days_remaining <= 1:
@@ -130,7 +169,17 @@ def _send_and_log(
     }
 
 
+<<<<<<< HEAD
 def send_manual_reminder(db: Session, *, asset_id: UUID, sent_by: UUID) -> dict:
+=======
+def send_manual_reminder(
+    db: Session,
+    *,
+    asset_id: UUID,
+    sent_by: UUID,
+    admin_note: Optional[str] = None,
+) -> dict:
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
     """Admin button-triggered: send a reminder for one asset, immediately."""
     asset = db.query(Asset).filter(Asset.id == asset_id).first()
     if not asset:
@@ -146,8 +195,18 @@ def send_manual_reminder(db: Session, *, asset_id: UUID, sent_by: UUID) -> dict:
 
     offset_days = max((asset.next_service_date - date.today()).days, 0)
     return _send_and_log(
+<<<<<<< HEAD
         db, asset=asset, user=user,
         offset_days=offset_days, trigger="manual", sent_by=sent_by,
+=======
+        db,
+        asset=asset,
+        user=user,
+        offset_days=offset_days,
+        trigger="manual",
+        sent_by=sent_by,
+        admin_note=admin_note,
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
     )
 
 
@@ -164,13 +223,18 @@ def run_auto_reminder_sweep(db: Session) -> dict:
         .filter(
             Asset.next_service_date.in_(list(target_dates.keys())),
             Asset.assigned_to.isnot(None),
+<<<<<<< HEAD
             cast(Asset.status, String) == "active",
+=======
+            Asset.status == "active",
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
         )
         .all()
     )
 
     stats = {"checked": len(due_assets), "sent": 0, "skipped": 0, "failed": 0}
 
+<<<<<<< HEAD
     for asset in due_assets:
         offset = target_dates[asset.next_service_date]
 
@@ -179,6 +243,29 @@ def run_auto_reminder_sweep(db: Session) -> dict:
             continue
 
         user = db.query(Profile).filter(Profile.id == asset.assigned_to).first()
+=======
+    if not due_assets:
+        log.info("Service reminder sweep complete — %s", stats)
+        return stats
+
+    # Batch both lookups that were previously issued once per due asset:
+    # already-sent dedup checks and assignee profile resolution.
+    already_sent_keys = _already_sent_auto_keys(db, [a.id for a in due_assets])
+    assignee_ids = {a.assigned_to for a in due_assets if a.assigned_to is not None}
+    profiles_by_id = {
+        p.id: p
+        for p in db.query(Profile).filter(Profile.id.in_(assignee_ids)).all()
+    } if assignee_ids else {}
+
+    for asset in due_assets:
+        offset = target_dates[asset.next_service_date]
+
+        if (asset.id, asset.next_service_date, offset) in already_sent_keys:
+            stats["skipped"] += 1
+            continue
+
+        user = profiles_by_id.get(asset.assigned_to)
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
         if not user:
             log.warning("Asset %s assigned_to=%s but profile not found", asset.id, asset.assigned_to)
             stats["skipped"] += 1

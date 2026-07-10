@@ -1,27 +1,30 @@
+"""Single-asset, on-demand PDM prediction ("/vehicle-predictions/{asset_id}").
+
+Historically this ran its own separate copy of the classifier/regressor
+inference logic against ``asset_failure_predictions`` /
+``asset_cost_predictions`` — a second pipeline alongside the scheduled batch
+job, using different feature-building code that could (and did) drift out of
+sync with it. It now delegates to
+``app.ai.services.batch_prediction_service.run_batch_for_asset`` — the exact
+same feature builder, v7 LightGBM models, and decision layer used by the
+daily scheduler — so an on-demand "refresh this asset now" always agrees
+with what the next scheduled run would have produced, and both write to the
+single source of truth, ``pdm_batch_predictions``.
+"""
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
-import uuid
 
-import pandas as pd
 from sqlalchemy.orm import Session
 
-from app.models import (
-    Asset,
-    SensorReading,
-    ModelRegistry,
-    PredictionRun,
-    AssetFailurePrediction,
-    AssetCostPrediction,
-)
+from app.models import Asset, SensorReading
+from app.ai.services.batch_prediction_service import run_batch_for_asset
 
 
-CLASSIFIER_MODEL_NAME = "pdm_classifier_model"
-REGRESSOR_MODEL_NAME = "pdm_regressor_model"
-
-
+# Kept here (rather than moved) because app.ai.services.survival_service
+# imports these four generic helpers — unrelated to which PdM model
+# generation is loaded, so they don't need to change with the v7 swap.
 def _to_float(value: Any, default: float = 0.0) -> float:
     if value is None:
         return default
@@ -42,6 +45,10 @@ def _to_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _get_asset(db: Session, asset_id: str):
+    return db.query(Asset).filter(Asset.id == asset_id).first()
+
+
 def _get_latest_sensor_reading(db: Session, asset_id: str):
     return (
         db.query(SensorReading)
@@ -49,185 +56,6 @@ def _get_latest_sensor_reading(db: Session, asset_id: str):
         .order_by(SensorReading.recorded_at.desc())
         .first()
     )
-
-
-def _get_asset(db: Session, asset_id: str):
-    return db.query(Asset).filter(Asset.id == asset_id).first()
-
-
-def _get_model_registry(db: Session, model_name: str):
-    return (
-        db.query(ModelRegistry)
-        .filter(ModelRegistry.model_name == model_name)
-        .order_by(ModelRegistry.created_at.desc())
-        .first()
-    )
-
-
-def build_vehicle_feature_dict(db: Session, asset_id: str) -> dict[str, Any]:
-    asset = _get_asset(db, asset_id)
-    if not asset:
-        raise ValueError("Asset not found")
-
-    reading = _get_latest_sensor_reading(db, asset_id)
-    if not reading:
-        raise ValueError("No sensor reading found for asset")
-
-    feature_dict: dict[str, Any] = {}
-
-    # asset-level features
-    feature_dict["vehicle_role"] = asset.vehicle_role or asset.vehicle_type or "transport"
-    feature_dict["payload_capacity_kg"] = _to_float(asset.payload_capacity_kg)
-    feature_dict["vehicle_age_years"] = _to_int(asset.vehicle_age_years)
-    feature_dict["lifetime_service_count"] = _to_int(asset.lifetime_service_count)
-    feature_dict["lifetime_breakdown_count"] = _to_int(asset.lifetime_breakdown_count)
-
-    # sensor / engineered features
-    columns = [
-        "engine_hours_since_last_service",
-        "days_since_last_service",
-        "tire_health_pct",
-        "brake_health_pct",
-        "mileage_since_last_service_km",
-        "battery_health_pct",
-        "oil_life_pct",
-        "hydraulic_health_pct",
-        "vibration_rms_mm_s",
-        "fuel_price_lkr_per_l",
-        "engine_hours_total",
-        "coolant_temp_max_c",
-        "engine_temp_avg_c",
-        "battery_voltage_v",
-        "odometer_km",
-        "downtime_hours_last_90d",
-        "active_fault_code_count",
-        "distance_last_30d_km",
-        "payload_utilization_pct",
-        "trip_count_30d",
-        "ambient_humidity_avg_pct",
-        "rough_road_pct",
-        "idle_hours_last_30d",
-        "port_route_pct",
-        "overload_events_30d",
-        "fuel_rate_lph",
-        "avg_payload_kg",
-    ]
-
-    for col in columns:
-        feature_dict[col] = getattr(reading, col, None)
-
-    # fallback defaults / harmonization
-    feature_dict["engine_hours_since_last_service"] = _to_float(feature_dict.get("engine_hours_since_last_service"))
-    feature_dict["days_since_last_service"] = _to_int(feature_dict.get("days_since_last_service"))
-    feature_dict["tire_health_pct"] = _to_float(feature_dict.get("tire_health_pct"))
-    feature_dict["brake_health_pct"] = _to_float(feature_dict.get("brake_health_pct"))
-    feature_dict["mileage_since_last_service_km"] = _to_float(feature_dict.get("mileage_since_last_service_km"))
-    feature_dict["battery_health_pct"] = _to_float(feature_dict.get("battery_health_pct"))
-    feature_dict["oil_life_pct"] = _to_float(feature_dict.get("oil_life_pct"))
-    feature_dict["hydraulic_health_pct"] = _to_float(feature_dict.get("hydraulic_health_pct"))
-    feature_dict["vibration_rms_mm_s"] = _to_float(feature_dict.get("vibration_rms_mm_s"))
-    feature_dict["fuel_price_lkr_per_l"] = _to_float(feature_dict.get("fuel_price_lkr_per_l"))
-    feature_dict["engine_hours_total"] = _to_float(feature_dict.get("engine_hours_total"))
-    feature_dict["coolant_temp_max_c"] = _to_float(feature_dict.get("coolant_temp_max_c"))
-    feature_dict["engine_temp_avg_c"] = _to_float(feature_dict.get("engine_temp_avg_c"))
-    feature_dict["battery_voltage_v"] = _to_float(feature_dict.get("battery_voltage_v"))
-    feature_dict["odometer_km"] = _to_float(feature_dict.get("odometer_km"))
-    feature_dict["downtime_hours_last_90d"] = _to_float(feature_dict.get("downtime_hours_last_90d"))
-    feature_dict["active_fault_code_count"] = _to_int(feature_dict.get("active_fault_code_count"))
-    feature_dict["distance_last_30d_km"] = _to_float(feature_dict.get("distance_last_30d_km"))
-    feature_dict["payload_utilization_pct"] = _to_float(feature_dict.get("payload_utilization_pct"))
-    feature_dict["trip_count_30d"] = _to_int(feature_dict.get("trip_count_30d"))
-    feature_dict["ambient_humidity_avg_pct"] = _to_float(feature_dict.get("ambient_humidity_avg_pct"))
-    feature_dict["rough_road_pct"] = _to_float(feature_dict.get("rough_road_pct"))
-    feature_dict["idle_hours_last_30d"] = _to_float(feature_dict.get("idle_hours_last_30d"))
-    feature_dict["port_route_pct"] = _to_float(feature_dict.get("port_route_pct"))
-    feature_dict["overload_events_30d"] = _to_int(feature_dict.get("overload_events_30d"))
-    feature_dict["fuel_rate_lph"] = _to_float(feature_dict.get("fuel_rate_lph"))
-    feature_dict["avg_payload_kg"] = _to_float(feature_dict.get("avg_payload_kg"))
-
-    return feature_dict
-
-
-def build_dataframe_for_features(
-    feature_dict: dict[str, Any],
-    feature_names: list[str],
-    categorical_cols: list[str] | None = None,
-) -> pd.DataFrame:
-    """Build a properly-typed DataFrame for XGBoost / CatBoost inference.
-
-    Columns in ``categorical_cols`` are cast to ``pd.Categorical``.
-    Any remaining object-dtype column is also cast to Categorical —
-    XGBoost trained with ``enable_categorical=True`` rejects object columns.
-    All other columns are coerced to float64.
-    """
-    cat_set = set(categorical_cols or [])
-    row = {f: feature_dict.get(f, "" if f in cat_set else 0) for f in feature_names}
-    df = pd.DataFrame([row])
-
-    for col in df.columns:
-        if col in cat_set:
-            df[col] = pd.Categorical([str(df[col].iloc[0]).lower()])
-        else:
-            converted = pd.to_numeric(df[col], errors="coerce")
-            if converted.isna().all():
-                df[col] = pd.Categorical([str(df[col].iloc[0]).lower()])
-            else:
-                df[col] = converted.fillna(0)
-
-    for col in df.select_dtypes(include="object").columns:
-        df[col] = pd.Categorical(df[col].astype(str).str.lower())
-
-    return df
-
-
-def compute_health_score(feature_dict: dict[str, Any], failure_probability: float, days_until: float) -> tuple[float, str]:
-    battery = feature_dict.get("battery_health_pct", 0.0) or 0.0
-    brake = feature_dict.get("brake_health_pct", 0.0) or 0.0
-    tire = feature_dict.get("tire_health_pct", 0.0) or 0.0
-    oil = feature_dict.get("oil_life_pct", 0.0) or 0.0
-    hydraulic = feature_dict.get("hydraulic_health_pct", 0.0) or 0.0
-
-    base = (battery + brake + tire + oil + hydraulic) / 5.0 if any([battery, brake, tire, oil, hydraulic]) else 60.0
-    penalty = (failure_probability * 35.0) + max(0.0, (30.0 - min(days_until, 30.0))) * 0.5
-    health_score = max(0.0, min(100.0, base - penalty))
-
-    if health_score >= 85:
-        band = "excellent"
-    elif health_score >= 70:
-        band = "good"
-    elif health_score >= 50:
-        band = "moderate"
-    elif health_score >= 30:
-        band = "poor"
-    else:
-        band = "critical"
-
-    return round(health_score, 2), band
-
-
-def compute_risk_level(failure_probability: float, days_until: float) -> str:
-    if failure_probability >= 0.8 or days_until <= 7:
-        return "critical"
-    if failure_probability >= 0.6 or days_until <= 14:
-        return "high"
-    if failure_probability >= 0.35 or days_until <= 30:
-        return "medium"
-    return "low"
-
-
-def estimate_cost(feature_dict: dict[str, Any], failure_probability: float, days_until: float) -> tuple[float, float, float]:
-    base_cost = 15000.0
-    vibration_factor = _to_float(feature_dict.get("vibration_rms_mm_s")) * 1200.0
-    fault_factor = _to_int(feature_dict.get("active_fault_code_count")) * 2500.0
-    downtime_factor = _to_float(feature_dict.get("downtime_hours_last_90d")) * 300.0
-    urgency_factor = max(0.0, (30.0 - min(days_until, 30.0))) * 250.0
-    probability_factor = failure_probability * 22000.0
-
-    estimate = base_cost + vibration_factor + fault_factor + downtime_factor + urgency_factor + probability_factor
-    min_cost = max(5000.0, estimate * 0.85)
-    max_cost = estimate * 1.20
-
-    return round(estimate, 2), round(min_cost, 2), round(max_cost, 2)
 
 
 def run_vehicle_prediction_and_store(
@@ -239,10 +67,13 @@ def run_vehicle_prediction_and_store(
     reg_model,
     reg_features: list[str],
 ) -> dict[str, Any]:
-    asset = _get_asset(db, asset_id)
+    from app.main import clf_threshold, clf_categorical_cols, reg_categorical_cols
+
+    asset = db.query(Asset).filter(Asset.id == asset_id).first()
     if not asset:
         raise ValueError("Asset not found")
 
+<<<<<<< HEAD
     feature_dict = build_vehicle_feature_dict(db, asset_id)
 
     clf_df = build_dataframe_for_features(feature_dict, clf_features)
@@ -306,61 +137,23 @@ def run_vehicle_prediction_and_store(
         run_finished_at=datetime.utcnow(),
         status="completed",
         error_message=None,
+=======
+    result = run_batch_for_asset(
+        db=db,
+        asset=asset,
+        clf_model=clf_model,
+        clf_features=clf_features,
+        clf_threshold=clf_threshold,
+        clf_categorical_cols=clf_categorical_cols,
+        reg_model=reg_model,
+        reg_features=reg_features,
+        reg_categorical_cols=reg_categorical_cols,
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
     )
-    db.add(run)
-    db.flush()
 
-    failure_row = AssetFailurePrediction(
-        id=uuid.uuid4(),
-        run_id=run.id,
-        asset_id=asset.id,
-        health_score=health_score,
-        failure_probability=round(failure_probability, 4),
-        confidence=round(confidence, 4),
-        risk_level=risk_level,
-        predicted_maintenance_date=predicted_maintenance_date,
-        days_until_maintenance=int(round(predicted_days_until)),
-        top_explanations={
-            "top_factors": [
-                {"feature": "vibration_rms_mm_s", "value": feature_dict.get("vibration_rms_mm_s")},
-                {"feature": "active_fault_code_count", "value": feature_dict.get("active_fault_code_count")},
-                {"feature": "days_since_last_service", "value": feature_dict.get("days_since_last_service")},
-            ]
-        },
-    )
-    db.add(failure_row)
+    if result.get("status") == "no_data":
+        raise ValueError("No sensor reading found for asset")
+    if result.get("status") == "error":
+        raise ValueError(result.get("error", "Prediction failed"))
 
-    cost_row = AssetCostPrediction(
-        id=uuid.uuid4(),
-        run_id=run.id,
-        asset_id=asset.id,
-        estimated_cost=estimated_cost,
-        min_cost=min_cost,
-        max_cost=max_cost,
-        currency="LKR",
-        confidence_score=round(confidence, 4),
-    )
-    db.add(cost_row)
-
-    db.commit()
-    db.refresh(run)
-    db.refresh(failure_row)
-    db.refresh(cost_row)
-
-    return {
-        "run_id": str(run.id),
-        "asset_id": str(asset.id),
-        "predicted_class": predicted_class,
-        "predicted_label": "maintenance_required" if predicted_class == 1 else "maintenance_not_required",
-        "failure_probability": round(failure_probability, 4),
-        "confidence": round(confidence, 4),
-        "predicted_days_until_maintenance": predicted_days_until,
-        "predicted_maintenance_date": str(predicted_maintenance_date),
-        "health_score": health_score,
-        "health_band": health_band,
-        "risk_level": risk_level,
-        "estimated_cost_lkr": estimated_cost,
-        "min_cost_lkr": min_cost,
-        "max_cost_lkr": max_cost,
-        "features_used": feature_dict,
-    }
+    return result

@@ -19,7 +19,11 @@ GET  /auth/warehouses
 """
 from __future__ import annotations
 
+<<<<<<< HEAD
 from datetime import datetime, timedelta
+=======
+from datetime import datetime, timedelta, timezone
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 from typing import Optional
 import logging
 import os
@@ -30,6 +34,7 @@ from jose import JWTError, jwt
 from pydantic import BaseModel
 
 from app.core.security import verify_password
+from app.core.config import jwt_secret, jwt_algorithm
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 log = logging.getLogger(__name__)
@@ -41,10 +46,18 @@ def _default_password() -> str:
     return raw.strip().strip('"').strip("'").strip() or "Predictix@123"
 
 def _secret() -> str:
+<<<<<<< HEAD
     return os.getenv("JWT_SECRET", "supersecret")
 
 def _algorithm() -> str:
     return os.getenv("JWT_ALGORITHM", "HS256")
+=======
+    # Centralised: fails fast if JWT_SECRET is unset (no public-constant fallback).
+    return jwt_secret()
+
+def _algorithm() -> str:
+    return jwt_algorithm()
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 
 # ─── schemas ──────────────────────────────────────────────────────────────────
 
@@ -387,11 +400,17 @@ def _resolve_user_id(email: str) -> str:
 
 def _create_token(user_id: str, email: str, role: str, *, warehouse_id: Optional[str] = None) -> str:
     """Issue a 24-hour JWT. Includes warehouse_id when provided."""
+<<<<<<< HEAD
+=======
+    now = datetime.now(timezone.utc)
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
     payload: dict = {
         "sub": user_id,
         "email": email,
         "role": role,
-        "exp": datetime.utcnow() + timedelta(hours=24),
+        "iat": now,
+        "nbf": now,
+        "exp": now + timedelta(hours=24),
     }
     if warehouse_id:
         payload["warehouse_id"] = warehouse_id
@@ -400,12 +419,22 @@ def _create_token(user_id: str, email: str, role: str, *, warehouse_id: Optional
 
 def _create_selection_token(user_id: str, email: str, full_name: str) -> str:
     """Issue a short-lived (5-min) intermediate token for the warehouse picker."""
+<<<<<<< HEAD
+=======
+    now = datetime.now(timezone.utc)
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
     payload = {
         "sub": user_id,
         "email": email,
         "full_name": full_name,
         "type": "warehouse_selection",
+<<<<<<< HEAD
         "exp": datetime.utcnow() + timedelta(minutes=5),
+=======
+        "iat": now,
+        "nbf": now,
+        "exp": now + timedelta(minutes=5),
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
     }
     return jwt.encode(payload, _secret(), algorithm=_algorithm())
 

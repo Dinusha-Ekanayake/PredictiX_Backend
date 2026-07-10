@@ -38,10 +38,17 @@ PredictiX is a predictive maintenance platform for fleet and warehouse operation
 | Explainability | SHAP |
 | NLP / GenAI | Groq Llama-3.3-70B, LangChain, HuggingFace Transformers + PyTorch |
 | PDF Generation | ReportLab |
+<<<<<<< HEAD
 | Task Scheduling | APScheduler (hourly PDM batch) |
 | Data Processing | pandas, numpy |
 | Config | pydantic-settings |
 | Python Version | 3.12 |
+=======
+| Task Scheduling | APScheduler (configurable PDM batch + daily service reminders) |
+| Data Processing | pandas, numpy |
+| Config | pydantic-settings |
+| Python Version | 3.12+ |
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 
 ---
 
@@ -54,9 +61,15 @@ Client (Frontend / IoT Devices)
   FastAPI Application (app/main.py)
          │
   ┌──────┴──────────────────────────────────────────┐
+<<<<<<< HEAD
   │  36 Routers (one per domain)                    │
   │  17 Pydantic Schema modules (validation)        │
   │  11 Service modules (business logic)            │
+=======
+  │  37 Routers (one per domain)                    │
+  │  17 Pydantic Schema modules (validation)        │
+  │  Service modules (business logic + caching)     │
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
   │  Repository layer (data access)                 │
   └──────┬──────────────────────────────────────────┘
          │
@@ -96,7 +109,11 @@ PredictiX_backend/
 │   │   ├── base.py                  # SQLAlchemy declarative base
 │   │   ├── session.py               # Engine and SessionLocal initialization
 │   │   └── supabase_client.py       # Supabase Python client setup
+<<<<<<< HEAD
 │   ├── routers/                     # 36 API router modules (one per domain)
+=======
+│   ├── routers/                     # 37 API router modules (one per domain)
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 │   ├── schemas/                     # Pydantic request/response models (17 files)
 │   ├── services/
 │   │   ├── dashboard_cache.py       # TTL-based full-response payload cache
@@ -106,7 +123,12 @@ PredictiX_backend/
 │   │   ├── pdf_styles.py            # PDF styling templates
 │   │   ├── notification_service.py  # Multi-channel notifications
 │   │   ├── in_app_notification_service.py
+<<<<<<< HEAD
 │   │   └── user_ticket_service.py
+=======
+│   │   ├── user_ticket_service.py
+│   │   └── reference_data_cache.py  # Low-churn lookup cache
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 │   ├── agents/
 │   │   └── report_agents.py         # Groq RAG agent for warehouse reports
 │   ├── ai/
@@ -115,7 +137,11 @@ PredictiX_backend/
 │   │   │   ├── pdm_regressor_model/
 │   │   │   ├── cost_estimation_model/
 │   │   │   └── survival_analysis/
+<<<<<<< HEAD
 │   │   ├── services/                # AI orchestration (12 modules)
+=======
+│   │   ├── services/                # AI orchestration, HF/Gradio clients, batch PDM
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 │   │   └── agent/                   # Tool-calling Groq agent loop + tools
 │   ├── kb/                          # Knowledge base & vector store (WIP)
 │   └── tests/                       # Unit tests
@@ -123,10 +149,13 @@ PredictiX_backend/
 ├── alembic/                         # Database migration scripts
 ├── docs/                            # Developer notes and lessons
 ├── requirements.txt
+<<<<<<< HEAD
 ├── Procfile                         # Heroku / Railway deployment config
 ├── railway.toml
 ├── render.yaml
 ├── nixpacks.toml
+=======
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 └── alembic.ini
 ```
 
@@ -294,6 +323,15 @@ PredictiX_backend/
 | POST | `/chatbot/ask` | Legacy RAG Q&A (no auth) |
 | POST | `/chatbot/agent` | Tool-calling Groq agent (JWT required) |
 | WS | `/ws` | Real-time WebSocket connection |
+<<<<<<< HEAD
+=======
+
+### Warmup
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/warmup/inference-space` | Public, non-blocking ping that wakes the Gradio/HuggingFace ticket inference Space before a real user action needs it |
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 
 ---
 
@@ -306,9 +344,22 @@ PredictiX_backend/
 | PDM Classifier | `app/ai/models/pdm_classifier_model/predictive_maintenance_model.pkl` | Failure probability | 0–1 score, risk level, recommended action |
 | PDM Regressor | `app/ai/models/pdm_regressor_model/days_until_next_maintenance_regressor.pkl` | Days until maintenance | Numeric estimate + SHAP importances |
 | Survival Analysis | `app/ai/models/survival_analysis/` | Component RUL (Weibull AFT) | Survival curves, 30/90-day risk flags |
+<<<<<<< HEAD
+=======
 
-### Remote HuggingFace Models (optional, disabled by default)
+### Remote HuggingFace / Gradio Models (optional)
 
+Set `DISABLE_HF_MODELS=false` in `.env` to enable. Models load lazily on first request and are cached in memory. GPU is used automatically when available.
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
+
+| Purpose | Repo |
+|---|---|
+| Ticket categorisation | `Dinusha-Ekanayake/predictix-ticket_categorization_model` |
+| Ticket summarisation | `Dinusha-Ekanayake/predictix-ticket_summarization_model` |
+| Ticket prioritisation | `AroshN/priority_classif_xgb` |
+| Asset summarisation | `Dinusha-Ekanayake/predictix-asset_summarization_model` |
+
+<<<<<<< HEAD
 Set `DISABLE_HF_MODELS=false` in `.env` to enable. Models load lazily on first request and are cached in memory. GPU is used automatically when available.
 
 | Purpose | Repo |
@@ -320,6 +371,12 @@ Set `DISABLE_HF_MODELS=false` in `.env` to enable. Models load lazily on first r
 
 ### Groq LLM Agent
 
+=======
+Ticket categorisation and priority can also route through the external Gradio Space configured by `HF_AI_SPACE_URL`. The `/warmup/inference-space` endpoint pings that Space's `/config` route so the login page can wake it without blocking authentication.
+
+### Groq LLM Agent
+
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 - **Model:** `llama-3.3-70b-versatile`
 - **Warehouse reports:** `GET /warehouse-dashboard/generate-report` — queries 8 live PostgreSQL tables, injects context into Groq, returns structured JSON with 5 AI sections
 - **Chatbot agent:** `POST /chatbot/agent` — tool-calling loop with 11+ tools (asset lookup, prediction run, ticket query, etc.)
@@ -345,12 +402,21 @@ The admin dashboard AI summary is managed separately by `ai_summary_cache.py`:
 - Never blocks the request path
 - Falls back to a data-driven KPI string when no LLM summary is available
 
+<<<<<<< HEAD
 Configure TTL via environment variables:
 
 ```env
 ADMIN_DASHBOARD_TTL=60         # seconds (default 60)
 WAREHOUSE_DASHBOARD_TTL=60
 ADMIN_AI_SUMMARY_TTL=600       # seconds (default 600)
+=======
+Configure TTL via environment variables. The code defaults are short for development (`60`, `60`, and `600` seconds), but EC2/free-tier deployments should use longer TTLs to reduce Supabase request volume:
+
+```env
+ADMIN_DASHBOARD_TTL=1800
+WAREHOUSE_DASHBOARD_TTL=1800
+ADMIN_AI_SUMMARY_TTL=21600
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 ```
 
 ---
@@ -395,9 +461,14 @@ SUPABASE_SERVICE_ROLE_KEY=<service-role-jwt>
 PROJECT_REF=<project-ref>
 
 # Database
+<<<<<<< HEAD
 DATABASE_URL=postgresql+psycopg2://postgres:<password>@db.<project-ref>.supabase.co:5432/postgres
+=======
+DATABASE_URL=postgresql+psycopg2://postgres.<project-ref>:<password>@aws-1-ap-southeast-2.pooler.supabase.com:5432/postgres
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 DATABASE_PASSWORD=<your-db-password>
 DATABASE_KEY=sb_secret_...
+# If DATABASE_URL is omitted, the backend builds the pooler URL from PROJECT_REF and DATABASE_PASSWORD.
 
 # Groq (AI reports and chatbot agent — required for LLM features)
 GROQ_API_KEY=gsk_...
@@ -405,6 +476,7 @@ GROQ_API_KEY=gsk_...
 # HuggingFace (required only if DISABLE_HF_MODELS=false)
 DISABLE_HF_MODELS=true
 HF_TOKEN=hf_...
+HF_AI_SPACE_URL=https://<your-space>.hf.space
 HF_TICKET_CATEGORIZATION_REPO=Dinusha-Ekanayake/predictix-ticket_categorization_model
 HF_TICKET_SUMMARIZATION_REPO=Dinusha-Ekanayake/predictix-ticket_summarization_model
 HF_TICKET_PRIORITIZATION_REPO=AroshN/priority_classif_xgb
@@ -413,12 +485,27 @@ ENABLE_HF_WARMER=false
 
 # PDM Batch Job
 BATCH_RUN_ON_STARTUP=false
+<<<<<<< HEAD
 BATCH_INTERVAL_HOURS=1
 
 # Dashboard Cache TTLs (seconds)
 ADMIN_DASHBOARD_TTL=60
 WAREHOUSE_DASHBOARD_TTL=60
 ADMIN_AI_SUMMARY_TTL=600
+=======
+BATCH_INTERVAL_HOURS=24
+
+# Service Reminder Job
+SERVICE_REMINDER_HOUR=9
+SERVICE_REMINDER_TZ=Asia/Colombo
+SERVICE_REMINDER_OFFSETS=14,7,3,1
+SERVICE_REMINDER_RUN_ON_STARTUP=false
+
+# Dashboard Cache TTLs (seconds; production/free-tier friendly)
+ADMIN_DASHBOARD_TTL=1800
+WAREHOUSE_DASHBOARD_TTL=1800
+ADMIN_AI_SUMMARY_TTL=21600
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 
 # CORS (comma-separated)
 ALLOWED_ORIGINS=http://localhost:3000,https://your-frontend.vercel.app
@@ -427,6 +514,11 @@ ALLOWED_ORIGINS=http://localhost:3000,https://your-frontend.vercel.app
 DEFAULT_PASSWORD=Predictix@123
 ```
 
+<<<<<<< HEAD
+=======
+Never commit `.env`. On EC2, systemd loads the same values through the service `EnvironmentFile`.
+
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 **CORS** is pre-configured for `localhost:3000`, `localhost:3001`, `localhost:5173`, `127.0.0.1:*`, `192.168.56.1:*`, and the Vercel deployment URL.
 
 ---
@@ -435,7 +527,11 @@ DEFAULT_PASSWORD=Predictix@123
 
 ### Prerequisites
 
+<<<<<<< HEAD
 - Python 3.12
+=======
+- Python 3.12+
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 - A Supabase project (PostgreSQL database)
 - Groq API key — free tier at [console.groq.com](https://console.groq.com)
 - (Optional) CUDA-capable GPU for HuggingFace inference
@@ -456,8 +552,13 @@ source venv/bin/activate     # macOS / Linux
 pip install -r requirements.txt
 
 # 4. Configure environment
+<<<<<<< HEAD
 cp .env.example .env
 # Edit .env with your Supabase credentials, JWT secret, and Groq API key
+=======
+# Create .env in the project root using the variables listed above.
+# Add your Supabase credentials, JWT secret, Groq API key, and frontend origins.
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 
 # 5. Apply database migrations
 alembic upgrade head
@@ -507,6 +608,7 @@ python seed_data/seed.py
 
 ## Deployment
 
+<<<<<<< HEAD
 The backend is pre-configured for one-command deployment on several platforms:
 
 ```bash
@@ -515,11 +617,50 @@ uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
 ```
 
 Set all required environment variables in your platform's dashboard. The `railway.toml`, `render.yaml`, `Procfile`, and `nixpacks.toml` are committed and ready to use.
+=======
+The backend is deployed on AWS EC2 — see `EC2 Backend Deployment by Dinusha.md` for the full setup.
+
+```bash
+# Production command
+/home/ubuntu/PredictiX_Backend/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+```
+
+Set all required environment variables in `.env` on the EC2 instance.
+
+Typical systemd service settings:
+
+```ini
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/PredictiX_Backend
+EnvironmentFile=/home/ubuntu/PredictiX_Backend/.env
+ExecStart=/home/ubuntu/PredictiX_Backend/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+Restart=always
+RestartSec=5
+```
+
+Useful EC2 commands:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart predictix
+sudo systemctl status predictix
+journalctl -u predictix -n 100 --no-pager
+```
+
+After changing `.env`, restart the service and confirm the live process has the expected values:
+
+```bash
+PID=$(systemctl show -p MainPID --value predictix)
+sudo strings /proc/$PID/environ | grep BATCH_INTERVAL_HOURS
+```
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 
 ---
 
 ## Background Jobs
 
+<<<<<<< HEAD
 APScheduler runs a PDM batch prediction job at startup (if enabled) and then on an hourly interval:
 
 1. Reads the latest sensor readings for every asset
@@ -531,6 +672,25 @@ APScheduler runs a PDM batch prediction job at startup (if enabled) and then on 
 BATCH_RUN_ON_STARTUP=true    # Run immediately on server start
 BATCH_INTERVAL_HOURS=1       # Repeat every N hours
 ```
+=======
+APScheduler runs these jobs inside the FastAPI process:
+
+- **PDM batch predictions** - reads the latest sensor readings for each asset, runs the local classifier/regressor, writes results to `asset_failure_predictions` and `asset_cost_predictions`, and creates notifications for newly critical assets.
+- **Service reminder sweep** - runs daily at the configured local hour and sends reminder notifications/emails based on upcoming service dates.
+- **Optional HF/Gradio warmer** - pings the external inference Space only when explicitly enabled.
+
+```env
+BATCH_RUN_ON_STARTUP=false
+BATCH_INTERVAL_HOURS=24
+SERVICE_REMINDER_HOUR=9
+SERVICE_REMINDER_TZ=Asia/Colombo
+SERVICE_REMINDER_OFFSETS=14,7,3,1
+SERVICE_REMINDER_RUN_ON_STARTUP=false
+ENABLE_HF_WARMER=false
+```
+
+For Supabase free-tier protection, keep `BATCH_INTERVAL_HOURS=24`, keep startup batch runs disabled unless you intentionally need an immediate rebuild, and keep `ENABLE_HF_WARMER=false` unless the Space cold-start cost is more important than the extra traffic.
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 
 ---
 

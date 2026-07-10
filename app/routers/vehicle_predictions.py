@@ -1,12 +1,15 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.deps import get_db
+from app.deps import get_db, require_user
 from app.ai.services.vehicle_prediction_service import run_vehicle_prediction_and_store
 
-router = APIRouter(prefix="/vehicle-predictions", tags=["Vehicle Predictions"])
+router = APIRouter(
+    prefix="/vehicle-predictions",
+    tags=["Vehicle Predictions"],
+    dependencies=[Depends(require_user)],
+)
 
-from app.schemas.prediction import VehiclePredictionStoredResponse
 
 @router.post("/{asset_id}")
 def predict_vehicle(asset_id: str, requested_by: str | None = None, db: Session = Depends(get_db)):

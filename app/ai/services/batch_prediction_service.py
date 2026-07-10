@@ -5,12 +5,22 @@ estimation) for **every active asset** and upserts one row per asset into the
 ``pdm_batch_predictions`` table.
 
 Designed to be invoked:
- - By the APScheduler inside FastAPI every hour (started in ``main.py``).
+ - By the APScheduler inside FastAPI every N hours (started in ``main.py``).
  - Via the ``POST /batch-predictions/run`` REST endpoint for manual triggers.
  - Via the ``POST /batch-predictions/run/{asset_id}`` endpoint for a single asset.
+
+Performance note
+----------------
+The whole-fleet run fetches every asset's latest sensor reading in a single
+set-based query (``DISTINCT ON``), runs both models once on a batched
+DataFrame (classifier + regressor + SHAP all support multi-row input), and
+upserts every result in one multi-row ``INSERT ... ON CONFLICT`` statement
+with a single commit — instead of one query + one insert + one commit per
+asset. For ~1000 assets this turns ~3000 DB round-trips/run into ~3.
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 import uuid
@@ -18,12 +28,66 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+<<<<<<< HEAD
+=======
+import numpy as np
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 from sqlalchemy import String, cast, text
 from sqlalchemy.orm import Session
 
 from app.models import Asset, PdmBatchPrediction
+from app.ai.services.pdm_decision_service import build_decision
+
+# v7 regressor was trained on days_until_next_maintenance up to 365 (see
+# regressor_v7_decision_log.json) — the old 180-day clamp was arbitrary and
+# not something this model generation was trained to respect. Predictions at
+# or past this ceiling are flagged via horizon_saturated instead of being
+# rendered as a literal (and misleadingly precise) date.
+REGRESSOR_HORIZON_DAYS = 365
 
 log = logging.getLogger("predictix.batch")
+
+
+def _model_version_tag() -> str:
+    """``"classifier=<version>,regressor=<version>"`` read from main's loaded
+    decision-log metadata, for the model_version audit column. Falls back to
+    "unknown" for either side if main.py's models aren't loaded/registered
+    yet (e.g. this service imported outside the app's normal boot path)."""
+    try:
+        from app.main import CLF_DECISION_LOG_PATH, REG_DECISION_LOG_PATH, _load_decision_log
+        clf_version = _load_decision_log(CLF_DECISION_LOG_PATH).get("version", "unknown")
+        reg_version = _load_decision_log(REG_DECISION_LOG_PATH).get("version", "unknown")
+        return f"classifier={clf_version},regressor={reg_version}"
+    except Exception:
+        return "unknown"
+
+
+def _empty_prediction_fields() -> dict[str, Any]:
+    """All ``_UPSERT_COLUMNS`` set to their "nothing computed" default —
+    shared by the no-sensor-data and error branches so both stay in sync
+    with the column list as it grows."""
+    return {
+        "failure_probability": None,
+        "maintenance_required": None,
+        "risk_level": None,
+        "predicted_days_until_maintenance": None,
+        "predicted_maintenance_date": None,
+        "health_score": None,
+        "health_status": None,
+        "contributing_factors": "[]",
+        "estimated_cost_lkr": None,
+        "min_cost_lkr": None,
+        "max_cost_lkr": None,
+        "top_explanations": "[]",
+        "model_version": None,
+        "feature_snapshot": "{}",
+        "tier": None,
+        "agreement": None,
+        "display_mode": None,
+        "horizon_text": None,
+        "recommended_action": None,
+        "horizon_saturated": False,
+    }
 
 # ── sklearn compatibility shim ──────────────────────────────────────────────
 # The regressor bundle was pickled with an older sklearn that had _RemainderColsList.
@@ -39,7 +103,7 @@ except Exception:  # pragma: no cover
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Internal helpers (mirror vehicle_prediction_service without the DB write loop)
+# Small scalar helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _to_float(value: Any, default: float = 0.0) -> float:
@@ -62,9 +126,77 @@ def _to_int(value: Any, default: int = 0) -> int:
         return default
 
 
-def _build_feature_dict(asset: Asset, reading) -> dict[str, Any]:
-    """Build the feature dict from an Asset ORM row + its latest SensorReading."""
+# ──────────────────────────────────────────────────────────────────────────────
+# Feature dict (same shape as before — one dict per asset)
+# ──────────────────────────────────────────────────────────────────────────────
+
+_SENSOR_FLOAT_COLS = [
+    "engine_hours_since_last_service",
+    "tire_health_pct",
+    "brake_health_pct",
+    "mileage_since_last_service_km",
+    "battery_health_pct",
+    "oil_life_pct",
+    "hydraulic_health_pct",
+    "vibration_rms_mm_s",
+    "fuel_price_lkr_per_l",
+    "engine_hours_total",
+    "coolant_temp_max_c",
+    "engine_temp_avg_c",
+    "battery_voltage_v",
+    "odometer_km",
+    "downtime_hours_last_90d",
+    "distance_last_30d_km",
+    "payload_utilization_pct",
+    "ambient_humidity_avg_pct",
+    "rough_road_pct",
+    "idle_hours_last_30d",
+    "port_route_pct",
+    "fuel_rate_lph",
+    "avg_payload_kg",
+    "ambient_temp_avg_c",
+    "avg_trip_distance_km",
+    "fuel_efficiency_km_per_l",
+    "maintenance_cost_last_service_lkr",
+    "rainfall_mm_30d",
+    "tire_pressure_psi",
+    "operating_hours_last_30d",
+    "urban_route_pct",
+]
+_SENSOR_INT_COLS = [
+    "days_since_last_service",
+    "active_fault_code_count",
+    "trip_count_30d",
+    "overload_events_30d",
+    "start_stop_burden_30d",
+]
+_SENSOR_BOOL_COLS = [
+    "sensor_fault_flag",
+    "is_home_warehouse_service",
+]
+_SENSOR_STR_COLS = [
+    "route_type",
+    "cargo_type",
+    "operating_shift",
+    "last_service_type",
+    "parts_replaced_last_service",
+    "major_component_replaced",
+]
+
+
+def _build_feature_dict(asset: Asset, reading, snapshot_date: date | None = None) -> dict[str, Any]:
+    """Build the feature dict from an Asset ORM row + its latest SensorReading.
+
+    ``snapshot_date`` seeds the ``month``/``year`` engineered features the v7
+    models were trained on (see predictix_pm_model_v7_*.ipynb: ``df['month']
+    = df.snapshot_date.dt.month; df['year'] = df.snapshot_date.dt.year``).
+    Defaults to today when not given (i.e. every live batch/single-asset run).
+    """
     fd: dict[str, Any] = {}
+
+    snapshot_date = snapshot_date or date.today()
+    fd["month"] = snapshot_date.month
+    fd["year"] = snapshot_date.year
 
     # Asset-level features
     fd["vehicle_role"] = str(asset.vehicle_role or asset.vehicle_type or "transport")
@@ -80,92 +212,49 @@ def _build_feature_dict(asset: Asset, reading) -> dict[str, Any]:
     fd["lifetime_service_count"] = _to_int(asset.lifetime_service_count)
     fd["lifetime_breakdown_count"] = _to_int(asset.lifetime_breakdown_count)
 
-    # All sensor/engineered features from SensorReading
-    sensor_float_cols = [
-        "engine_hours_since_last_service",
-        "tire_health_pct",
-        "brake_health_pct",
-        "mileage_since_last_service_km",
-        "battery_health_pct",
-        "oil_life_pct",
-        "hydraulic_health_pct",
-        "vibration_rms_mm_s",
-        "fuel_price_lkr_per_l",
-        "engine_hours_total",
-        "coolant_temp_max_c",
-        "engine_temp_avg_c",
-        "battery_voltage_v",
-        "odometer_km",
-        "downtime_hours_last_90d",
-        "distance_last_30d_km",
-        "payload_utilization_pct",
-        "ambient_humidity_avg_pct",
-        "rough_road_pct",
-        "idle_hours_last_30d",
-        "port_route_pct",
-        "fuel_rate_lph",
-        "avg_payload_kg",
-        "ambient_temp_avg_c",
-        "avg_trip_distance_km",
-        "fuel_efficiency_km_per_l",
-        "maintenance_cost_last_service_lkr",
-        "rainfall_mm_30d",
-        "tire_pressure_psi",
-        "operating_hours_last_30d",
-    ]
-    sensor_int_cols = [
-        "days_since_last_service",
-        "active_fault_code_count",
-        "trip_count_30d",
-        "overload_events_30d",
-        "start_stop_burden_30d",
-    ]
-    sensor_bool_cols = [
-        "sensor_fault_flag",
-        "is_home_warehouse_service",
-    ]
-    sensor_str_cols = [
-        "route_type",
-        "cargo_type",
-        "operating_shift",
-        "last_service_type",
-        "parts_replaced_last_service",
-        "major_component_replaced",
-    ]
-
-    for col in sensor_float_cols:
+    for col in _SENSOR_FLOAT_COLS:
         fd[col] = _to_float(getattr(reading, col, None))
-    for col in sensor_int_cols:
+    for col in _SENSOR_INT_COLS:
         fd[col] = _to_int(getattr(reading, col, None))
-    for col in sensor_bool_cols:
+    for col in _SENSOR_BOOL_COLS:
         val = getattr(reading, col, None)
         fd[col] = bool(val) if val is not None else False
-    for col in sensor_str_cols:
+    for col in _SENSOR_STR_COLS:
         fd[col] = str(getattr(reading, col, None) or "")
 
     return fd
 
 
-def _run_classifier(fd: dict, clf_model, clf_features: list[str], clf_threshold: float, clf_categorical_cols: list[str]) -> tuple[float, bool]:
-    """Returns (failure_probability, maintenance_required).
+# ──────────────────────────────────────────────────────────────────────────────
+# Vectorized model inference — runs on a DataFrame of N assets at once
+#
+# clf_model / reg_model are app.ai.services.lgb_model_adapter.LgbModelBundle
+# instances (loaded once in main.py._load_pdm_models). clf_features /
+# clf_categorical_cols / reg_features / reg_categorical_cols are still passed
+# through from main.py for backward compatibility with callers, but the
+# bundle's own .feature_names / .categorical_cols are authoritative — they
+# come straight from the booster file, so they can't drift out of sync with
+# what the model was actually trained on.
+# ──────────────────────────────────────────────────────────────────────────────
 
-    The XGBoost v6 model was trained with `enable_categorical=True`, so
-    categorical columns must be passed as pandas Categorical dtype (not str/object).
+def _run_classifier_batch(
+    feature_dicts: list[dict[str, Any]],
+    clf_model,
+    clf_features: list[str],
+    clf_threshold: float,
+    clf_categorical_cols: list[str],
+) -> list[tuple[float, bool]]:
+    """Vectorized classifier inference — one predict() call for all assets.
+
+    Returns a list of (failure_probability, maintenance_required), same order
+    as feature_dicts. Falls back to a conservative default per-row if the
+    batch call fails (e.g. an unseen category), mirroring the previous
+    single-row fallback behaviour.
     """
-    import pandas as pd
-
-    cat_set = set(clf_categorical_cols or [])
-    row = {f: fd.get(f, "") if f in cat_set else fd.get(f, 0)
-           for f in clf_features}
-    df = pd.DataFrame([row])
-
-    for col in df.columns:
-        if col in cat_set:
-            df[col] = pd.Categorical([df[col].iloc[0]])
-        else:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    df = clf_model.build_frame(feature_dicts)
 
     try:
+<<<<<<< HEAD
         probas = clf_model.predict_proba(df)[0]
         prob = float(probas[-1]) if len(probas) > 1 else float(probas[0])
     except Exception as e:
@@ -212,18 +301,66 @@ def _run_regressor(fd: dict, reg_model, reg_features: list[str], reg_categorical
         top_explanations = [
             {"feature": feat, "impact": round(float(imp), 4)}
             for feat, imp in ranked[:5]
+=======
+        probas = clf_model.predict_proba_positive(df)
+        return [
+            (round(float(p), 4), bool(p >= clf_threshold))
+            for p in probas
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
         ]
-    except Exception:
-        # Fallback: plain predict if Pool construction fails
-        raw_days = float(reg_model.predict(df)[0])
-        top_explanations = []
+    except Exception as e:
+        log.warning("Batched LightGBM classification failed: %s. Falling back to per-row.", e)
 
-    days = int(np.clip(round(raw_days), 1, 180))
-    pred_date = snapshot_date + timedelta(days=days)
+    # Fallback: try row-by-row so one bad asset doesn't blank out the whole batch.
+    results = []
+    for i in range(len(df)):
+        try:
+            prob = float(clf_model.predict_proba_positive(df.iloc[[i]])[0])
+        except Exception:
+            prob = 0.05
+        results.append((round(prob, 4), bool(prob >= clf_threshold)))
+    return results
 
-    return days, pred_date, top_explanations
 
+def _run_regressor_batch(
+    feature_dicts: list[dict[str, Any]],
+    reg_model,
+    reg_features: list[str],
+    reg_categorical_cols: list[str],
+    snapshot_date: date,
+) -> list[tuple[int, date, list[dict], bool]]:
+    """Vectorized regressor inference — one predict() + one SHAP call for all assets.
 
+    Returns a list of (days_until_maintenance, predicted_date, top_explanations,
+    horizon_saturated).
+    """
+    df = reg_model.build_frame(feature_dicts)
+
+    try:
+        raw_days = reg_model.predict(df)
+        shap_rows = reg_model.shap_top_factors(df, top_n=5)
+
+        results = []
+        for i in range(len(df)):
+            raw = float(raw_days[i])
+            saturated = raw >= REGRESSOR_HORIZON_DAYS
+            days = int(np.clip(round(raw), 1, REGRESSOR_HORIZON_DAYS))
+            pred_date = snapshot_date + timedelta(days=days)
+            results.append((days, pred_date, shap_rows[i], saturated))
+        return results
+    except Exception as e:
+        log.warning("Batched LightGBM regression/SHAP failed: %s. Falling back to plain predict.", e)
+
+    # Fallback: plain predict, no SHAP.
+    raw_days = reg_model.predict(df)
+    results = []
+    for i in range(len(df)):
+        raw = float(raw_days[i])
+        saturated = raw >= REGRESSOR_HORIZON_DAYS
+        days = int(np.clip(round(raw), 1, REGRESSOR_HORIZON_DAYS))
+        pred_date = snapshot_date + timedelta(days=days)
+        results.append((days, pred_date, [], saturated))
+    return results
 
 
 def _compute_health_score(fd: dict, failure_probability: float, days_until: float) -> tuple[float, str]:
@@ -319,51 +456,188 @@ def _compute_risk_level(failure_probability: float, days_until: float) -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Public API
+# DB access — batched fetch + batched upsert
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _upsert_batch_prediction(db: Session, asset_id: str, payload: dict) -> None:
-    """Insert or update (upsert) one row in pdm_batch_predictions."""
-    db.execute(
-        text("""
-            INSERT INTO pdm_batch_predictions (
-                id, asset_id,
-                failure_probability, maintenance_required, risk_level,
-                predicted_days_until_maintenance, predicted_maintenance_date,
-                health_score, health_status, contributing_factors,
-                estimated_cost_lkr, min_cost_lkr, max_cost_lkr,
-                top_explanations,
-                predicted_at, run_duration_ms, error_message, status
-            ) VALUES (
-                gen_random_uuid(), :asset_id,
-                :failure_probability, :maintenance_required, :risk_level,
-                :predicted_days_until_maintenance, :predicted_maintenance_date,
-                :health_score, :health_status, CAST(:contributing_factors AS jsonb),
-                :estimated_cost_lkr, :min_cost_lkr, :max_cost_lkr,
-                CAST(:top_explanations AS jsonb),
-                now(), :run_duration_ms, :error_message, :status
+def _fetch_latest_readings(db: Session, asset_ids: list[str]) -> dict[str, Any]:
+    """Fetch each asset's single latest SensorReading in ONE query.
+
+    Uses Postgres ``DISTINCT ON`` — one round-trip regardless of fleet size,
+    instead of one ``ORDER BY ... LIMIT 1`` query per asset.
+    """
+    from app.models import SensorReading
+
+    if not asset_ids:
+        return {}
+
+    rows = (
+        db.query(SensorReading)
+        .filter(SensorReading.asset_id.in_(asset_ids))
+        .order_by(SensorReading.asset_id, SensorReading.recorded_at.desc())
+        .distinct(SensorReading.asset_id)
+        .all()
+    )
+    return {str(r.asset_id): r for r in rows}
+
+
+# Postgres caps bind parameters per statement at 65535. Each row uses 16
+# params (18 columns minus the 2 generated via gen_random_uuid()/now()), so
+# this keeps every chunk far under the limit even as the fleet grows well
+# past today's ~1000 assets, while still upserting in a small, constant
+# number of round trips instead of one per asset.
+_UPSERT_CHUNK_SIZE = 500
+
+
+def _upsert_batch_predictions(db: Session, rows: list[dict]) -> None:
+    """Upsert every row in a handful of multi-row INSERT ... ON CONFLICT
+    statements (chunked — see ``_UPSERT_CHUNK_SIZE``).
+
+    Falls back to the previous per-row upsert only if a chunk's batched
+    statement itself fails (e.g. a single malformed row) — keeps behaviour
+    safe while normally paying for a small constant number of round trips
+    regardless of fleet size.
+    """
+    if not rows:
+        return
+
+    for start in range(0, len(rows), _UPSERT_CHUNK_SIZE):
+        _upsert_batch_predictions_chunk(db, rows[start:start + _UPSERT_CHUNK_SIZE])
+
+
+_UPSERT_COLUMNS = [
+    "failure_probability", "maintenance_required", "risk_level",
+    "predicted_days_until_maintenance", "predicted_maintenance_date",
+    "health_score", "health_status", "contributing_factors",
+    "estimated_cost_lkr", "min_cost_lkr", "max_cost_lkr",
+    "top_explanations",
+    "run_duration_ms", "error_message", "status",
+    "model_version", "feature_snapshot",
+    "tier", "agreement", "display_mode", "horizon_text",
+    "recommended_action", "horizon_saturated",
+]
+_JSONB_COLUMNS = {"contributing_factors", "top_explanations", "feature_snapshot"}
+
+
+_HISTORY_COLUMNS = [
+    "failure_probability", "predicted_days_until_maintenance",
+    "predicted_maintenance_date", "health_score", "tier", "model_version",
+]
+
+
+def _log_prediction_history(db: Session, rows: list[dict]) -> None:
+    """Append one row per asset to pdm_prediction_history — INSERT only,
+    never UPDATE/DELETE. Failures here are logged but never allowed to
+    break the main prediction upsert; this is a secondary audit trail, not
+    the system of record for "what's the latest prediction" (that's still
+    pdm_batch_predictions).
+    """
+    if not rows:
+        return
+    try:
+        values_sql = ", ".join(
+            "(gen_random_uuid(), :asset_id_{i}, {cols}, now())".format(
+                i=i, cols=", ".join(f":{c}_{i}" for c in _HISTORY_COLUMNS)
             )
-            ON CONFLICT (asset_id) DO UPDATE SET
-                failure_probability               = EXCLUDED.failure_probability,
-                maintenance_required              = EXCLUDED.maintenance_required,
-                risk_level                        = EXCLUDED.risk_level,
-                predicted_days_until_maintenance  = EXCLUDED.predicted_days_until_maintenance,
-                predicted_maintenance_date        = EXCLUDED.predicted_maintenance_date,
-                health_score                      = EXCLUDED.health_score,
-                health_status                     = EXCLUDED.health_status,
-                contributing_factors              = EXCLUDED.contributing_factors,
-                estimated_cost_lkr                = EXCLUDED.estimated_cost_lkr,
-                min_cost_lkr                      = EXCLUDED.min_cost_lkr,
-                max_cost_lkr                      = EXCLUDED.max_cost_lkr,
-                top_explanations                  = EXCLUDED.top_explanations,
-                predicted_at                      = EXCLUDED.predicted_at,
-                run_duration_ms                   = EXCLUDED.run_duration_ms,
-                error_message                     = EXCLUDED.error_message,
-                status                            = EXCLUDED.status
-        """),
-        {**payload, "asset_id": str(asset_id)},
+            for i in range(len(rows))
+        )
+        params: dict[str, Any] = {}
+        for i, payload in enumerate(rows):
+            params[f"asset_id_{i}"] = payload["asset_id"]
+            for c in _HISTORY_COLUMNS:
+                params[f"{c}_{i}"] = payload.get(c)
+
+        columns_sql = ", ".join(_HISTORY_COLUMNS)
+        db.execute(
+            text(f"""
+                INSERT INTO pdm_prediction_history (
+                    id, asset_id, {columns_sql}, predicted_at
+                ) VALUES {values_sql}
+            """),
+            params,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        log.warning("Prediction history logging failed (non-fatal) for %d rows", len(rows))
+
+
+def _upsert_batch_predictions_chunk(db: Session, rows: list[dict]) -> None:
+    def _value_expr(col: str, i: int) -> str:
+        return f"CAST(:{col}_{i} AS jsonb)" if col in _JSONB_COLUMNS else f":{col}_{i}"
+
+    values_sql = ", ".join(
+        "(gen_random_uuid(), :asset_id_{i}, {cols}, now())".format(
+            i=i, cols=", ".join(_value_expr(c, i) for c in _UPSERT_COLUMNS)
+        )
+        for i in range(len(rows))
     )
 
+    params: dict[str, Any] = {}
+    for i, payload in enumerate(rows):
+        for key, value in payload.items():
+            params[f"{key}_{i}"] = value
+
+    columns_sql = ", ".join(_UPSERT_COLUMNS)
+    update_sql = ", ".join(f"{c} = EXCLUDED.{c}" for c in _UPSERT_COLUMNS)
+
+    sql = f"""
+        INSERT INTO pdm_batch_predictions (
+            id, asset_id, {columns_sql}, predicted_at
+        ) VALUES {values_sql}
+        ON CONFLICT (asset_id) DO UPDATE SET
+            {update_sql},
+            predicted_at = EXCLUDED.predicted_at
+    """
+
+    try:
+        db.execute(text(sql), params)
+        db.commit()
+        _log_prediction_history(db, [r for r in rows if r.get("status") == "ok"])
+    except Exception:
+        db.rollback()
+        log.warning("Batched upsert failed — falling back to per-row upsert for this run.")
+        for payload in rows:
+            asset_id = payload["asset_id"]
+            try:
+                _upsert_single(db, asset_id, {k: v for k, v in payload.items() if k != "asset_id"})
+                db.commit()
+                if payload.get("status") == "ok":
+                    _log_prediction_history(db, [{**payload, "asset_id": asset_id}])
+            except Exception:
+                db.rollback()
+                log.exception("Per-row upsert fallback also failed for asset %s", asset_id)
+
+
+def _upsert_single(db: Session, asset_id: str, payload: dict) -> None:
+    """Insert or update (upsert) one row in pdm_batch_predictions.
+
+    Kept for the single-asset trigger path and as the fallback if the
+    batched multi-row upsert fails.
+    """
+    columns_sql = ", ".join(_UPSERT_COLUMNS)
+    values_sql = ", ".join(
+        f"CAST(:{c} AS jsonb)" if c in _JSONB_COLUMNS else f":{c}" for c in _UPSERT_COLUMNS
+    )
+    update_sql = ", ".join(f"{c} = EXCLUDED.{c}" for c in _UPSERT_COLUMNS)
+
+    db.execute(
+        text(f"""
+            INSERT INTO pdm_batch_predictions (
+                id, asset_id, {columns_sql}, predicted_at
+            ) VALUES (
+                gen_random_uuid(), :asset_id, {values_sql}, now()
+            )
+            ON CONFLICT (asset_id) DO UPDATE SET
+                {update_sql},
+                predicted_at = EXCLUDED.predicted_at
+        """),
+        {**{c: payload.get(c) for c in _UPSERT_COLUMNS}, "asset_id": str(asset_id)},
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Public API
+# ──────────────────────────────────────────────────────────────────────────────
 
 def run_batch_for_asset(
     db: Session,
@@ -378,37 +652,24 @@ def run_batch_for_asset(
 ) -> dict:
     """Run the full PDM pipeline for a single asset and upsert the result.
 
+    Used by the manual single-asset trigger endpoint. Fleet-wide runs use
+    ``run_batch_for_all_assets`` instead, which batches every asset together
+    for one query + one model call + one upsert rather than calling this
+    function in a loop.
+
     Returns a summary dict with the prediction outcome (or error info).
     """
-    from app.models import SensorReading
-
     start_ms = int(time.time() * 1000)
     asset_id_str = str(asset.id)
 
     try:
-        # Fetch latest sensor reading
-        reading = (
-            db.query(SensorReading)
-            .filter(SensorReading.asset_id == asset.id)
-            .order_by(SensorReading.recorded_at.desc())
-            .first()
-        )
+        readings = _fetch_latest_readings(db, [asset_id_str])
+        reading = readings.get(asset_id_str)
 
         if reading is None:
             elapsed = int(time.time() * 1000) - start_ms
-            _upsert_batch_prediction(db, asset_id_str, {
-                "failure_probability": None,
-                "maintenance_required": None,
-                "risk_level": None,
-                "predicted_days_until_maintenance": None,
-                "predicted_maintenance_date": None,
-                "health_score": None,
-                "health_status": None,
-                "contributing_factors": "[]",
-                "estimated_cost_lkr": None,
-                "min_cost_lkr": None,
-                "max_cost_lkr": None,
-                "top_explanations": "[]",
+            _upsert_single(db, asset_id_str, {
+                **_empty_prediction_fields(),
                 "run_duration_ms": elapsed,
                 "error_message": "No sensor reading found",
                 "status": "no_data",
@@ -417,24 +678,36 @@ def run_batch_for_asset(
             log.warning("[batch] asset %s — no sensor reading, skipped", asset_id_str[:8])
             return {"asset_id": asset_id_str, "status": "no_data"}
 
-        fd = _build_feature_dict(asset, reading)
         today = date.today()
+        fd = _build_feature_dict(asset, reading, snapshot_date=today)
 
-        # Run models
-        failure_probability, maintenance_required = _run_classifier(
-            fd, clf_model, clf_features, clf_threshold, clf_categorical_cols
+        (failure_probability, maintenance_required), = _run_classifier_batch(
+            [fd], clf_model, clf_features, clf_threshold, clf_categorical_cols
         )
+<<<<<<< HEAD
         days_until, pred_date, top_explanations = _run_regressor(
             fd, reg_model, reg_features, reg_categorical_cols, today
+=======
+        (days_until, pred_date, top_explanations, horizon_saturated), = _run_regressor_batch(
+            [fd], reg_model, reg_features, reg_categorical_cols, today
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
         )
         health_score, health_status = _compute_health_score(fd, failure_probability, days_until)
         contributing_factors = _compute_contributing_factors(fd, failure_probability)
         estimated_cost, min_cost, max_cost = _estimate_cost(fd, failure_probability, days_until)
         risk_level = _compute_risk_level(failure_probability, days_until)
+        decision = build_decision(
+            failure_probability=failure_probability,
+            maintenance_required=maintenance_required,
+            days_until_maintenance=days_until,
+            predicted_maintenance_date=pred_date,
+            health_score=health_score,
+            horizon_saturated=horizon_saturated,
+            clf_threshold=clf_threshold,
+        )
 
-        import json
         elapsed = int(time.time() * 1000) - start_ms
-        _upsert_batch_prediction(db, asset_id_str, {
+        _upsert_single(db, asset_id_str, {
             "failure_probability": failure_probability,
             "maintenance_required": maintenance_required,
             "risk_level": risk_level,
@@ -450,17 +723,35 @@ def run_batch_for_asset(
             "run_duration_ms": elapsed,
             "error_message": None,
             "status": "ok",
+            "model_version": _model_version_tag(),
+            "feature_snapshot": json.dumps(fd),
+            "tier": decision["tier"],
+            "agreement": decision["agreement"],
+            "display_mode": decision["display_mode"],
+            "horizon_text": decision["horizon_text"],
+            "recommended_action": decision["recommended_action"],
+            "horizon_saturated": decision["horizon_saturated"],
         })
         db.commit()
+        _log_prediction_history(db, [{
+            "asset_id": asset_id_str,
+            "failure_probability": failure_probability,
+            "predicted_days_until_maintenance": days_until,
+            "predicted_maintenance_date": pred_date.isoformat(),
+            "health_score": health_score,
+            "tier": decision["tier"],
+            "model_version": _model_version_tag(),
+        }])
 
         log.info(
-            "[batch] asset %s (%s) — prob=%.3f days=%d health=%.1f cost=%.0f [%dms]",
+            "[batch] asset %s (%s) — prob=%.3f days=%d health=%.1f cost=%.0f tier=%s [%dms]",
             asset_id_str[:8],
             asset.asset_code or "?",
             failure_probability,
             days_until,
             health_score,
             estimated_cost,
+            decision["tier"],
             elapsed,
         )
         return {
@@ -470,6 +761,7 @@ def run_batch_for_asset(
             "risk_level": risk_level,
             "health_score": health_score,
             "days_until_maintenance": days_until,
+            "tier": decision["tier"],
         }
 
     except Exception as exc:  # noqa: BLE001
@@ -479,20 +771,8 @@ def run_batch_for_asset(
         log.exception("[batch] asset %s failed: %s", asset_id_str[:8], error_msg)
 
         try:
-            import json
-            _upsert_batch_prediction(db, asset_id_str, {
-                "failure_probability": None,
-                "maintenance_required": None,
-                "risk_level": None,
-                "predicted_days_until_maintenance": None,
-                "predicted_maintenance_date": None,
-                "health_score": None,
-                "health_status": None,
-                "contributing_factors": "[]",
-                "estimated_cost_lkr": None,
-                "min_cost_lkr": None,
-                "max_cost_lkr": None,
-                "top_explanations": "[]",
+            _upsert_single(db, asset_id_str, {
+                **_empty_prediction_fields(),
                 "run_duration_ms": elapsed,
                 "error_message": error_msg,
                 "status": "error",
@@ -516,7 +796,12 @@ def run_batch_for_all_assets(
 ) -> dict:
     """Run the full PDM batch for every active asset.
 
-    Called by the APScheduler every hour and by the manual trigger endpoint.
+    Called by the APScheduler on its configured interval and by the manual
+    trigger endpoint. Batches the whole fleet: one query for all latest
+    sensor readings, one vectorized classifier call, one vectorized
+    regressor+SHAP call, and one multi-row upsert — instead of looping
+    per-asset queries/writes.
+
     Returns a summary dict with counts.
     """
     if clf_model is None or reg_model is None:
@@ -524,19 +809,53 @@ def run_batch_for_all_assets(
         return {"status": "skipped", "reason": "models_not_loaded"}
 
     run_start = time.time()
-    log.info("[batch] Starting hourly PDM batch run…")
+    log.info("[batch] Starting PDM batch run…")
 
+    # Score every asset still in the fleet — not just "active" ones. A
+    # critical or under_maintenance asset needs fresh predictions more than
+    # an active one, not less; excluding them silently stops predictions
+    # the moment an asset needs them most. Only decommissioned assets (fully
+    # retired from the fleet) are skipped.
     assets = (
         db.query(Asset)
+<<<<<<< HEAD
         .filter(cast(Asset.status, String) == "active")
+=======
+        .filter(cast(Asset.status, String) != "decommissioned")
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
         .order_by(Asset.asset_code)
         .all()
     )
 
     total = len(assets)
-    ok_count = error_count = no_data_count = 0
+    if total == 0:
+        elapsed = round(time.time() - run_start, 2)
+        return {
+            "status": "completed",
+            "total_assets": 0,
+            "ok": 0,
+            "no_data": 0,
+            "errors": 0,
+            "elapsed_seconds": elapsed,
+            "run_at": datetime.utcnow().isoformat(),
+        }
+
+    asset_ids = [str(a.id) for a in assets]
+    readings_by_asset = _fetch_latest_readings(db, asset_ids)
+    today = date.today()
+
+    ok_count = 0
+    no_data_count = 0
+    error_count = 0
+    upsert_rows: list[dict] = []
+
+    # Assets with a sensor reading go through the vectorized model path;
+    # assets without one are recorded as "no_data" without touching the models.
+    scored_assets: list[Asset] = []
+    feature_dicts: list[dict[str, Any]] = []
 
     for asset in assets:
+<<<<<<< HEAD
         result = run_batch_for_asset(
             db=db,
             asset=asset,
@@ -552,9 +871,130 @@ def run_batch_for_all_assets(
         if s == "ok":
             ok_count += 1
         elif s == "no_data":
+=======
+        asset_id_str = str(asset.id)
+        reading = readings_by_asset.get(asset_id_str)
+        if reading is None:
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
             no_data_count += 1
-        else:
+            upsert_rows.append({
+                "asset_id": asset_id_str,
+                **_empty_prediction_fields(),
+                "run_duration_ms": 0,
+                "error_message": "No sensor reading found",
+                "status": "no_data",
+            })
+            continue
+
+        try:
+            fd = _build_feature_dict(asset, reading, snapshot_date=today)
+        except Exception as exc:  # noqa: BLE001
             error_count += 1
+            error_msg = str(exc)[:500]
+            log.exception("[batch] asset %s — feature build failed: %s", asset_id_str[:8], error_msg)
+            upsert_rows.append({
+                "asset_id": asset_id_str,
+                **_empty_prediction_fields(),
+                "run_duration_ms": 0,
+                "error_message": error_msg,
+                "status": "error",
+            })
+            continue
+
+        scored_assets.append(asset)
+        feature_dicts.append(fd)
+
+    if feature_dicts:
+        try:
+            classifier_results = _run_classifier_batch(
+                feature_dicts, clf_model, clf_features, clf_threshold, clf_categorical_cols
+            )
+            regressor_results = _run_regressor_batch(
+                feature_dicts, reg_model, reg_features, reg_categorical_cols, today
+            )
+            model_version = _model_version_tag()
+
+            for asset, fd, (failure_probability, maintenance_required), (days_until, pred_date, top_explanations, horizon_saturated) in zip(
+                scored_assets, feature_dicts, classifier_results, regressor_results
+            ):
+                asset_id_str = str(asset.id)
+                health_score, health_status = _compute_health_score(fd, failure_probability, days_until)
+                contributing_factors = _compute_contributing_factors(fd, failure_probability)
+                estimated_cost, min_cost, max_cost = _estimate_cost(fd, failure_probability, days_until)
+                risk_level = _compute_risk_level(failure_probability, days_until)
+                decision = build_decision(
+                    failure_probability=failure_probability,
+                    maintenance_required=maintenance_required,
+                    days_until_maintenance=days_until,
+                    predicted_maintenance_date=pred_date,
+                    health_score=health_score,
+                    horizon_saturated=horizon_saturated,
+                    clf_threshold=clf_threshold,
+                )
+
+                ok_count += 1
+                upsert_rows.append({
+                    "asset_id": asset_id_str,
+                    "failure_probability": failure_probability,
+                    "maintenance_required": maintenance_required,
+                    "risk_level": risk_level,
+                    "predicted_days_until_maintenance": days_until,
+                    "predicted_maintenance_date": pred_date.isoformat(),
+                    "health_score": health_score,
+                    "health_status": health_status,
+                    "contributing_factors": json.dumps(contributing_factors),
+                    "estimated_cost_lkr": estimated_cost,
+                    "min_cost_lkr": min_cost,
+                    "max_cost_lkr": max_cost,
+                    "top_explanations": json.dumps(top_explanations),
+                    "run_duration_ms": 0,
+                    "error_message": None,
+                    "status": "ok",
+                    "model_version": model_version,
+                    "feature_snapshot": json.dumps(fd),
+                    "tier": decision["tier"],
+                    "agreement": decision["agreement"],
+                    "display_mode": decision["display_mode"],
+                    "horizon_text": decision["horizon_text"],
+                    "recommended_action": decision["recommended_action"],
+                    "horizon_saturated": decision["horizon_saturated"],
+                })
+
+                log.info(
+                    "[batch] asset %s (%s) — prob=%.3f days=%d health=%.1f cost=%.0f tier=%s",
+                    asset_id_str[:8], asset.asset_code or "?",
+                    failure_probability, days_until, health_score, estimated_cost, decision["tier"],
+                )
+        except Exception as exc:  # noqa: BLE001
+            # Vectorized inference failed for the whole batch — fall back to the
+            # (slower but safe) per-asset path so a single scheduler run still
+            # produces results instead of silently failing every asset.
+            error_msg = str(exc)[:500]
+            log.exception("[batch] vectorized inference failed, falling back to per-asset: %s", error_msg)
+            for asset in scored_assets:
+                result = run_batch_for_asset(
+                    db=db,
+                    asset=asset,
+                    clf_model=clf_model,
+                    clf_features=clf_features,
+                    clf_threshold=clf_threshold,
+                    clf_categorical_cols=clf_categorical_cols,
+                    reg_model=reg_model,
+                    reg_features=reg_features,
+                    reg_categorical_cols=reg_categorical_cols,
+                )
+                s = result.get("status")
+                if s == "ok":
+                    ok_count += 1
+                elif s == "no_data":
+                    no_data_count += 1
+                else:
+                    error_count += 1
+            # These assets already got their own commit inside run_batch_for_asset.
+            feature_dicts = []  # signal: don't upsert them again below
+            upsert_rows = [r for r in upsert_rows if r["asset_id"] not in {str(a.id) for a in scored_assets}]
+
+    _upsert_batch_predictions(db, upsert_rows)
 
     elapsed = round(time.time() - run_start, 2)
     log.info(

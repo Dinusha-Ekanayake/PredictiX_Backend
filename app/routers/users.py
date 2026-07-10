@@ -13,8 +13,13 @@ from __future__ import annotations
 
 import logging
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
+<<<<<<< HEAD
 from fastapi import APIRouter, Depends, HTTPException
+=======
+from fastapi import APIRouter, Depends, HTTPException, Query
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
 from sqlalchemy import String, cast, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -22,8 +27,10 @@ from sqlalchemy.orm import Session
 import os
 
 from app.core.security import hash_password
-from app.deps import get_db
+from app.db.session import SessionLocal
+from app.deps import get_db, get_current_user, require_admin, active_warehouse_id
 from app.models import Asset, Department, Profile, Warehouse
+from app.services.reference_data_cache import get_department_names, get_warehouse_names
 from app.schemas.user_profile import (
     UserAssignedAssetOut,
     UserCreate,
@@ -33,7 +40,12 @@ from app.schemas.user_profile import (
 from app.services.notification_service import NotificationService
 
 log = logging.getLogger(__name__)
-router = APIRouter(prefix="/users", tags=["Users"])
+# User management is admin-only: every endpoint requires an admin/super_admin JWT.
+router = APIRouter(
+    prefix="/users",
+    tags=["Users"],
+    dependencies=[Depends(require_admin)],
+)
 
 
 def _default_password() -> str:
@@ -141,18 +153,34 @@ def _build_item(
     )
 
 
-def _user_to_item(user: Profile, db: Session) -> UserItemOut:
-    """Single-user variant (used by create/update). Three small scoped queries."""
+def _user_to_item(
+    user: Profile,
+    db: Session,
+    known_department_name: str | None = None,
+    known_warehouse_name: str | None = None,
+) -> UserItemOut:
+    """Single-user variant (used by create/update).
+
+    Callers that already looked up the Department/Warehouse row (e.g. to
+    resolve name -> id) can pass the name straight through via
+    known_department_name/known_warehouse_name to skip the re-fetch here.
+    """
     dept_names = {}
     if user.department_id:
-        name = db.query(Department.name).filter(Department.id == user.department_id).scalar()
-        if name is not None:
-            dept_names[user.department_id] = name
+        if known_department_name is not None:
+            dept_names[user.department_id] = known_department_name
+        else:
+            name = db.query(Department.name).filter(Department.id == user.department_id).scalar()
+            if name is not None:
+                dept_names[user.department_id] = name
     warehouse_names = {}
     if user.warehouse_id:
-        name = db.query(Warehouse.name).filter(Warehouse.id == user.warehouse_id).scalar()
-        if name is not None:
-            warehouse_names[user.warehouse_id] = name
+        if known_warehouse_name is not None:
+            warehouse_names[user.warehouse_id] = known_warehouse_name
+        else:
+            name = db.query(Warehouse.name).filter(Warehouse.id == user.warehouse_id).scalar()
+            if name is not None:
+                warehouse_names[user.warehouse_id] = name
     assigned = (
         db.query(func.count(Asset.id))
         .filter(Asset.assigned_to == str(user.id), cast(Asset.status, String) == "active")
@@ -163,6 +191,7 @@ def _user_to_item(user: Profile, db: Session) -> UserItemOut:
     return _build_item(user, dept_names, warehouse_names, asset_counts)
 
 
+<<<<<<< HEAD
 @router.get("/", response_model=list[UserItemOut])
 def list_users(db: Session = Depends(get_db)):
     # Pre-fetch lookup maps once — avoids per-user N+1 queries.
@@ -175,8 +204,52 @@ def list_users(db: Session = Depends(get_db)):
         .group_by(Asset.assigned_to)
         .all()
     }
+=======
+def _fetch_asset_counts() -> dict:
+    with SessionLocal() as s:
+        return {
+            str(assigned_to): count
+            for assigned_to, count in s.query(Asset.assigned_to, func.count(Asset.id))
+            .filter(Asset.assigned_to.isnot(None), cast(Asset.status, String) == "active")
+            .group_by(Asset.assigned_to)
+            .all()
+        }
 
-    users = db.query(Profile).all()
+
+def _fetch_users(scoped_wh: str | None, limit: int, offset: int) -> list[Profile]:
+    with SessionLocal() as s:
+        q = s.query(Profile)
+        if scoped_wh:
+            q = q.filter((Profile.warehouse_id == scoped_wh) | (Profile.warehouse_id.is_(None)))
+        users = q.order_by(Profile.full_name).offset(offset).limit(limit).all()
+        s.expunge_all()  # detach so attributes stay readable after the session closes
+        return users
+
+
+@router.get("/", response_model=list[UserItemOut])
+def list_users(
+    limit: int = Query(default=500, ge=1, le=2000),
+    offset: int = Query(default=0, ge=0),
+    current_user: Profile = Depends(get_current_user),
+):
+    # The 4 lookups below are independent reads (no shared state), so they run
+    # concurrently on separate DB sessions instead of 4 sequential round-trips.
+    # Each round-trip costs ~150-800ms of real network latency to the remote
+    # Supabase region — sequentially that summed to ~1.5-2.5s; concurrently it's
+    # roughly the slowest single query.
+    scoped_wh = active_warehouse_id(current_user)
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        dept_future = executor.submit(get_department_names)
+        wh_future = executor.submit(get_warehouse_names)
+        assets_future = executor.submit(_fetch_asset_counts)
+        users_future = executor.submit(_fetch_users, scoped_wh, limit, offset)
+
+        dept_names = dept_future.result()
+        warehouse_names = wh_future.result()
+        asset_counts = assets_future.result()
+        users = users_future.result()
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
+
     return [_build_item(u, dept_names, warehouse_names, asset_counts) for u in users]
 
 
@@ -229,7 +302,11 @@ def create_user(data: UserCreate, db: Session = Depends(get_db)):
     except Exception:
         log.exception("New-user notification failed (non-fatal)")
 
-    return _user_to_item(profile, db)
+    return _user_to_item(
+        profile, db,
+        known_department_name=dept.name if dept else None,
+        known_warehouse_name=wh.name if wh else None,
+    )
 
 
 @router.put("/{user_id}", response_model=UserItemOut)
@@ -336,9 +413,14 @@ def list_user_assets(user_id: str, db: Session = Depends(get_db)):
         .all()
     )
 
+    warehouse_ids = {a.warehouse_id for a in assets if a.warehouse_id is not None}
+    warehouse_names = {
+        w.id: w.name
+        for w in db.query(Warehouse.id, Warehouse.name).filter(Warehouse.id.in_(warehouse_ids)).all()
+    } if warehouse_ids else {}
+
     result = []
     for asset in assets:
-        wh = db.query(Warehouse).filter(Warehouse.id == asset.warehouse_id).first()
         result.append(UserAssignedAssetOut(
             assignment_id=str(asset.id),
             asset_id=str(asset.id),
@@ -346,7 +428,7 @@ def list_user_assets(user_id: str, db: Session = Depends(get_db)):
             name=asset.asset_name,
             asset_type=asset.asset_type,
             category=asset.category,
-            location=wh.name if wh else "Unknown",
+            location=warehouse_names.get(asset.warehouse_id, "Unknown"),
             status=asset.status or "active",
             healthPercent=float(asset.criticality_score or 100),
             nextServiceDate=asset.next_service_date.isoformat() if asset.next_service_date else None,

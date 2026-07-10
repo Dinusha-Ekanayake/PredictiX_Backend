@@ -9,21 +9,31 @@ from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
+from app.core.config import jwt_secret, jwt_algorithm
 
 log = logging.getLogger(__name__)
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 
-def get_db() -> Generator[Optional[Session], None, None]:
-    """Yield a SQLAlchemy session, or None if the DB is not configured.
+def get_db() -> Generator[Session, None, None]:
+    """Yield a SQLAlchemy session.
 
-    Returning None keeps dev environments without a DB password from
-    hanging on connection timeout; routers must handle the None case.
+    If the database is not configured at all (neither DATABASE_URL nor
+    DATABASE_PASSWORD set — i.e. a broken/dev environment), raise a clean
+    503 instead of yielding None. Previously this yielded None, which made
+    every router that assumed a real Session crash with an opaque 500
+    (AttributeError: 'NoneType' has no attribute 'query'). A 503 tells the
+    caller the service is unavailable, which is the accurate signal.
+
+    Endpoints that historically tolerated a None db still work: they simply
+    never reach their `if db is None` branch because this raises first.
     """
     if not os.getenv("DATABASE_PASSWORD") and not os.getenv("DATABASE_URL"):
-        yield None
-        return
+        raise HTTPException(
+            status_code=503,
+            detail="Database is not configured — set DATABASE_URL / DATABASE_PASSWORD.",
+        )
 
     db = SessionLocal()
     try:
@@ -45,8 +55,8 @@ def get_current_user(
     try:
         payload = jwt.decode(
             token,
-            os.getenv("JWT_SECRET", "supersecret"),
-            algorithms=[os.getenv("JWT_ALGORITHM", "HS256")],
+            jwt_secret(),
+            algorithms=[jwt_algorithm()],
         )
     except JWTError as exc:
         log.warning("JWT decode failed: %s", exc)
@@ -61,6 +71,15 @@ def get_current_user(
     if db is not None:
         user = db.query(Profile).filter(Profile.id == user_id).first()
         if user:
+<<<<<<< HEAD
+=======
+            # Re-check status on every request, not just at login — otherwise
+            # deactivating a user has no effect until their JWT naturally
+            # expires (up to 24h), since the token itself carries no status.
+            if (user.status or "").strip().lower() != "active":
+                raise HTTPException(status_code=401, detail="Account is not active")
+
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
             # Super admin JWT carries the warehouse they selected at login.
             # Override the profile's warehouse_id so all downstream queries
             # are automatically scoped to the chosen warehouse.
@@ -112,3 +131,67 @@ def _build_mock_profile(*, user_id: str, email: str, role: str, warehouse_id: Op
             self.employee_id = f"EMP-{user_id[:8]}"
 
     return MockProfile()
+
+
+# ─── Role-based access dependencies ────────────────────────────────────────────
+# These build on get_current_user (which already validates the JWT). Attach them
+# either per-endpoint (Depends(...)) or router-wide (router = APIRouter(
+# dependencies=[Depends(require_user)])) to gate access. require_user only
+# requires a valid token; require_admin additionally requires an admin role.
+
+# Roles allowed to perform admin actions. super_admin is included on purpose so
+# super admins are not locked out of admin-only endpoints.
+ADMIN_ROLES = {"admin", "super_admin"}
+
+
+def _role_of(user) -> str:
+    return (getattr(user, "role", "") or "").strip().lower()
+
+
+def require_user(current_user=Depends(get_current_user)):
+    """Dependency: request must carry a valid JWT (any authenticated role).
+
+    get_current_user already raises 401 on a missing/invalid token, so simply
+    depending on it is enough — this wrapper exists to give routers a clearly
+    named, intention-revealing gate.
+    """
+    return current_user
+
+
+def require_admin(current_user=Depends(get_current_user)):
+    """Dependency: request must be an authenticated admin or super_admin."""
+    if _role_of(current_user) not in ADMIN_ROLES:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return current_user
+
+
+def is_super_admin(user) -> bool:
+    return _role_of(user) == "super_admin"
+
+
+def is_admin_role(user) -> bool:
+    """True if the user is an admin OR super_admin.
+
+    Use this for inline role checks inside endpoints instead of comparing
+    role == "admin" directly, so super_admins are never locked out of the
+    admin operations they are entitled to perform.
+    """
+    return _role_of(user) in ADMIN_ROLES
+
+
+def active_warehouse_id(user) -> Optional[str]:
+    """The warehouse a request is scoped to.
+
+    Both regular admins and super_admins operate inside exactly one warehouse at
+    a time. get_current_user already resolves this: a regular admin's warehouse
+    comes from their profile, and a super_admin's comes from the warehouse they
+    picked at login (carried in the JWT and written onto user.warehouse_id).
+    Returning it as a string keeps callers uniform for filtering.
+
+    The difference between the two roles is *not* what they can do once scoped
+    (identical admin operations) but that a super_admin may pick ANY warehouse at
+    login while a regular admin is pinned to their own — so both are enforced the
+    same way here, via the single active warehouse on the token.
+    """
+    wid = getattr(user, "warehouse_id", None)
+    return str(wid) if wid else None

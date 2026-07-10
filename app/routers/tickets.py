@@ -3,7 +3,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from app.deps import get_db, get_current_user
+from app.deps import get_db, get_current_user, require_admin, require_user, is_admin_role
 from app.models import (
     Asset,
     Notification,
@@ -102,7 +102,11 @@ def get_ticket_status_counts(
     counts = {"open": 0, "in-progress": 0, "resolved": 0, "closed": 0}
     q = db.query(Ticket.status, func.count(Ticket.id)).group_by(Ticket.status)
 
+<<<<<<< HEAD
     if str(current_user.role).lower() != "admin":
+=======
+    if not is_admin_role(current_user):
+>>>>>>> 35e3ac103591052fc88dd59200e314bb3792f95b
         q = q.filter((Ticket.assigned_to == current_user.id) | (Ticket.created_by == current_user.id))
 
     rows = q.all()
@@ -126,6 +130,8 @@ def list_tickets(
     asset_id: str | None = Query(default=None),
     warehouse_id: str | None = Query(default=None),
     assigned_to: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     _: object = Depends(get_current_user),
 ):
@@ -140,7 +146,56 @@ def list_tickets(
         q = q.filter(Ticket.warehouse_id == warehouse_id)
     if assigned_to:
         q = q.filter(Ticket.assigned_to == assigned_to)
-    return q.order_by(Ticket.created_at.desc()).all()
+    return q.order_by(Ticket.created_at.desc()).offset(offset).limit(limit).all()
+
+
+@router.get("/paginated")
+def list_tickets_paginated(
+    status: str | None = Query(default=None),
+    priority: str | None = Query(default=None),
+    search: str | None = Query(default=None),
+    asset_id: str | None = Query(default=None),
+    warehouse_id: str | None = Query(default=None),
+    limit: int = Query(default=10, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: object = Depends(get_current_user),
+):
+    """Paginated ticket list with search, filters and total count.
+    Used by the frontend ticket page instead of direct Supabase client calls.
+    Admins see all tickets; regular users see only tickets they created or are assigned to.
+    """
+    from sqlalchemy import or_, cast
+    from sqlalchemy import String
+
+    q = db.query(Ticket)
+
+    # Role-based scoping
+    if not is_admin_role(current_user):
+        uid = str(getattr(current_user, "id", ""))
+        q = q.filter(
+            (cast(Ticket.created_by, String) == uid) |
+            (cast(Ticket.assigned_to, String) == uid)
+        )
+
+    if status:
+        q = q.filter(Ticket.status == _normalize_status(status))
+    if priority:
+        q = q.filter(Ticket.priority == _normalize_priority(priority))
+    if asset_id:
+        q = q.filter(Ticket.asset_id == asset_id)
+    if warehouse_id:
+        q = q.filter(Ticket.warehouse_id == warehouse_id)
+    if search and search.strip():
+        term = f"%{search.strip()}%"
+        q = q.filter(
+            Ticket.title.ilike(term) | Ticket.description.ilike(term)
+        )
+
+    total = q.count()
+    rows = q.order_by(Ticket.created_at.desc()).offset(offset).limit(limit).all()
+
+    return {"tickets": [TicketOut.model_validate(t) for t in rows], "total": total}
 
 
 # ── User (owner-scoped) ticket endpoints ──────────────────────────────────────
@@ -149,7 +204,8 @@ def list_tickets(
 # non-admin user may only read/modify tickets they created.
 
 def _is_admin(user: Profile) -> bool:
-    return (getattr(user, "role", None) or "").lower() == "admin"
+    # Includes super_admin — see app.deps.is_admin_role.
+    return is_admin_role(user)
 
 
 def _serialize_user_ticket(t: Ticket, asset_name: str | None) -> dict:
@@ -298,7 +354,7 @@ def get_ticket(ticket_id: str, db: Session = Depends(get_db), _: object = Depend
 
 @router.put("/{ticket_id}", response_model=TicketOut)
 def update_ticket(ticket_id: str, payload: TicketUpdate, db: Session = Depends(get_db), current_user: object = Depends(get_current_user)):
-    if getattr(current_user, "role", "") != "admin":
+    if not is_admin_role(current_user):
         raise HTTPException(status_code=403, detail="Only admins can update tickets")
     obj = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not obj:
@@ -339,7 +395,7 @@ def update_ticket(ticket_id: str, payload: TicketUpdate, db: Session = Depends(g
     return obj
 
 
-@router.delete("/{ticket_id}")
+@router.delete("/{ticket_id}", dependencies=[Depends(require_admin)])
 def delete_ticket(ticket_id: str, db: Session = Depends(get_db)):
     """Delete a ticket and clean up its dependent rows in one transaction.
 
@@ -418,6 +474,7 @@ def preview_ticket(payload: TicketPreviewRequest, _: object = Depends(get_curren
 @router.post(
     "/categorize",
     response_model=TicketCategorizationResponse,
+    dependencies=[Depends(require_user)],
 )
 def categorize_ticket_endpoint(payload: TicketCategorizationRequest):
     try:
@@ -437,6 +494,7 @@ def categorize_ticket_endpoint(payload: TicketCategorizationRequest):
         "Sends ticket text to the AroshN/priority_classif_xgb XGBoost model on Hugging Face "
         "and returns a single priority label (e.g. Low, Medium, High, Critical)."
     ),
+    dependencies=[Depends(require_user)],
 )
 def prioritize_ticket_endpoint(payload: TicketPriorityRequest):
     try:

@@ -1,0 +1,46 @@
+{
+  "version": "7.0.0-v11",
+  "dataset": "srilanka_single_warehouse_vehicle_maintenance_dataset_v11_realistic.csv",
+  "winner": "LightGBM",
+  "test_mae_days": 13.277045169738942,
+  "test_r2": 0.814478459037853,
+  "model comparison": [
+    {
+      "model": "LightGBM",
+      "MAE_days": 13.6559,
+      "RMSE": 21.4177,
+      "R2": 0.8037,
+      "train_s": 8.8
+    },
+    {
+      "model": "XGBoost",
+      "MAE_days": 13.7963,
+      "RMSE": 21.4533,
+      "R2": 0.803,
+      "train_s": 16.0
+    },
+    {
+      "model": "CatBoost",
+      "MAE_days": 14.4831,
+      "RMSE": 22.3131,
+      "R2": 0.7869,
+      "train_s": 44.7
+    },
+    {
+      "model": "MLP (128-64)",
+      "MAE_days": 17.6414,
+      "RMSE": 25.9203,
+      "R2": 0.7125,
+      "train_s": 35.6
+    },
+    {
+      "model": "Ridge",
+      "MAE_days": 28.2644,
+      "RMSE": 36.9291,
+      "R2": 0.4164,
+      "train_s": 1.6
+    }
+  ],
+  "split": "temporal train<=2024 / test=2025",
+  "seed": 42
+}

@@ -22,33 +22,48 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy import String, cast
 from sqlalchemy.orm import Session
 
-from app.deps import get_current_user, get_db
+from app.deps import get_current_user, get_db, require_admin, require_user, active_warehouse_id
 from app.models import Asset, Department, Profile, Warehouse
 from app.schemas.profile import ProfileOut, ProfileUpdate
 from app.schemas.user_profile import UserProfileUpdate
 from app.services.notification_service import NotificationService
 
 log = logging.getLogger(__name__)
-router = APIRouter(prefix="/profiles", tags=["Profiles"])
+# Every endpoint needs a valid token. The admin-only list/{id} endpoints add
+# require_admin individually; the /me* endpoints resolve the caller themselves.
+router = APIRouter(
+    prefix="/profiles",
+    tags=["Profiles"],
+    dependencies=[Depends(require_user)],
+)
 
 
 # ─── Admin endpoints ──────────────────────────────────────────────────────────
 
-@router.get("/", response_model=list[ProfileOut])
+@router.get("/", response_model=list[ProfileOut], dependencies=[Depends(require_admin)])
 def list_profiles(
     role: str | None = Query(default=None),
     department_id: str | None = Query(default=None),
     warehouse_id: str | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
 ):
     q = db.query(Profile)
     if role:
         q = q.filter(Profile.role == role)
     if department_id:
         q = q.filter(Profile.department_id == department_id)
+
+    # Scope to the caller's active warehouse; overrides any client-supplied
+    # warehouse_id so an admin can't enumerate another warehouse's profiles.
+    scoped_wh = active_warehouse_id(current_user)
+    if scoped_wh:
+        warehouse_id = scoped_wh
     if warehouse_id:
         q = q.filter(Profile.warehouse_id == warehouse_id)
-    return q.order_by(Profile.full_name).all()
+    return q.order_by(Profile.full_name).offset(offset).limit(limit).all()
 
 
 # ─── Self-service endpoints (/profiles/me) ────────────────────────────────────
@@ -230,15 +245,20 @@ def get_my_assets(
         .all()
     )
 
+    warehouse_ids = {a.warehouse_id for a in assets if a.warehouse_id is not None}
+    warehouses_by_id = {
+        w.id: w
+        for w in db.query(Warehouse.id, Warehouse.name, Warehouse.city).filter(Warehouse.id.in_(warehouse_ids)).all()
+    } if warehouse_ids else {}
+
     result = []
     for asset in assets:
         location = ""
-        if asset.warehouse_id:
-            wh = db.query(Warehouse).filter(Warehouse.id == asset.warehouse_id).first()
-            if wh:
-                location = wh.name
-                if wh.city:
-                    location += f" - {wh.city}"
+        wh = warehouses_by_id.get(asset.warehouse_id)
+        if wh:
+            location = wh.name
+            if wh.city:
+                location += f" - {wh.city}"
 
         result.append({
             "assignment_id": str(asset.id),
@@ -286,9 +306,13 @@ def get_my_colleagues(
         .all()
     )
 
+    # All colleagues share real_user.department_id — resolve the name once
+    # instead of one Department query per colleague (removes the N+1).
+    dept = db.query(Department).filter(Department.id == real_user.department_id).first()
+    dept_name = dept.name if dept else "Unknown"
+
     result = []
     for member in colleagues:
-        dept = db.query(Department).filter(Department.id == member.department_id).first()
         first_name, last_name = _split_name(member.full_name)
         result.append({
             "id": str(member.id),
@@ -298,7 +322,7 @@ def get_my_colleagues(
             "name": member.full_name,
             "email": member.email,
             "contactNumber": member.phone,
-            "department": dept.name if dept else "Unknown",
+            "department": dept_name,
             "role": member.role,
             "status": member.status,
         })
@@ -309,7 +333,7 @@ def get_my_colleagues(
 # Must come after the literal "/me*" routes above, otherwise "/{profile_id}"
 # greedily matches "me" and shadows the self-service profile endpoint.
 
-@router.get("/{profile_id}", response_model=ProfileOut)
+@router.get("/{profile_id}", response_model=ProfileOut, dependencies=[Depends(require_admin)])
 def get_profile(profile_id: str, db: Session = Depends(get_db)):
     obj = db.query(Profile).filter(Profile.id == profile_id).first()
     if not obj:
@@ -317,7 +341,7 @@ def get_profile(profile_id: str, db: Session = Depends(get_db)):
     return obj
 
 
-@router.put("/{profile_id}", response_model=ProfileOut)
+@router.put("/{profile_id}", response_model=ProfileOut, dependencies=[Depends(require_admin)])
 def update_profile(profile_id: str, payload: ProfileUpdate, db: Session = Depends(get_db)):
     obj = db.query(Profile).filter(Profile.id == profile_id).first()
     if not obj:

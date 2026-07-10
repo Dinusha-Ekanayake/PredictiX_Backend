@@ -11,17 +11,21 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from app.deps import get_db
+from app.deps import get_db, require_admin, require_user
 from app.models import Asset, PdmBatchPrediction
 from app.ai.services.batch_prediction_service import (
     run_batch_for_all_assets,
     run_batch_for_asset,
 )
 
-router = APIRouter(prefix="/batch-predictions", tags=["Batch Predictions"])
+router = APIRouter(
+    prefix="/batch-predictions",
+    tags=["Batch Predictions"],
+    dependencies=[Depends(require_user)],
+)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -46,18 +50,31 @@ def _serialize(row: PdmBatchPrediction) -> dict[str, Any]:
         "run_duration_ms": row.run_duration_ms,
         "status": row.status,
         "error_message": row.error_message,
+        "model_version": row.model_version,
+        "tier": row.tier,
+        "agreement": row.agreement,
+        "display_mode": row.display_mode,
+        "horizon_text": row.horizon_text,
+        "recommended_action": row.recommended_action,
+        "horizon_saturated": row.horizon_saturated,
     }
 
 
 # ── read endpoints ─────────────────────────────────────────────────────────────
 
 @router.get("/", summary="Latest cached PDM predictions for all assets")
-def list_batch_predictions(db: Session = Depends(get_db)) -> list[dict]:
+def list_batch_predictions(
+    limit: int = Query(default=1000, ge=1, le=5000),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+) -> list[dict]:
     """Returns the most recent pre-computed prediction for every asset that
     has been processed by the batch scheduler."""
     rows = (
         db.query(PdmBatchPrediction)
         .order_by(PdmBatchPrediction.predicted_at.desc())
+        .offset(offset)
+        .limit(limit)
         .all()
     )
     return [_serialize(r) for r in rows]
@@ -82,10 +99,10 @@ def get_batch_prediction(asset_id: str, db: Session = Depends(get_db)) -> dict:
 
 # ── trigger endpoints ──────────────────────────────────────────────────────────
 
-@router.post("/run", summary="Trigger a full batch prediction run for all assets")
+@router.post("/run", summary="Trigger a full batch prediction run for all assets", dependencies=[Depends(require_admin)])
 def trigger_full_batch(db: Session = Depends(get_db)) -> dict:
     """Immediately runs the PDM pipeline for every active asset and upserts
-    results.  Useful as a Render/Railway cron job target or for manual refresh.
+    results.  Useful as a cron job target on the EC2 host, or for manual refresh.
 
     This is a *synchronous* endpoint — it blocks until the run completes.
     For large fleets this may take a while; consider calling from a cron job
@@ -93,7 +110,10 @@ def trigger_full_batch(db: Session = Depends(get_db)) -> dict:
     """
     from app.main import _load_pdm_models
     _load_pdm_models()
-    from app.main import clf_model, clf_features, clf_threshold, clf_categorical_cols, reg_model, reg_features
+    from app.main import (
+        clf_model, clf_features, clf_threshold, clf_categorical_cols,
+        reg_model, reg_features, reg_categorical_cols,
+    )
 
     if clf_model is None or reg_model is None:
         raise HTTPException(status_code=503, detail="ML models are not loaded yet")
@@ -106,17 +126,21 @@ def trigger_full_batch(db: Session = Depends(get_db)) -> dict:
         clf_categorical_cols=clf_categorical_cols,
         reg_model=reg_model,
         reg_features=reg_features,
+        reg_categorical_cols=reg_categorical_cols,
     )
     return result
 
 
-@router.post("/run/{asset_id}", summary="Trigger a fresh prediction for one asset")
+@router.post("/run/{asset_id}", summary="Trigger a fresh prediction for one asset", dependencies=[Depends(require_admin)])
 def trigger_single_asset(asset_id: str, db: Session = Depends(get_db)) -> dict:
     """Re-runs the full PDM pipeline for a single asset and upserts the result.
     Returns the prediction summary."""
     from app.main import _load_pdm_models
     _load_pdm_models()
-    from app.main import clf_model, clf_features, clf_threshold, clf_categorical_cols, reg_model, reg_features
+    from app.main import (
+        clf_model, clf_features, clf_threshold, clf_categorical_cols,
+        reg_model, reg_features, reg_categorical_cols,
+    )
 
     if clf_model is None or reg_model is None:
         raise HTTPException(status_code=503, detail="ML models are not loaded yet")
@@ -134,6 +158,7 @@ def trigger_single_asset(asset_id: str, db: Session = Depends(get_db)) -> dict:
         clf_categorical_cols=clf_categorical_cols,
         reg_model=reg_model,
         reg_features=reg_features,
+        reg_categorical_cols=reg_categorical_cols,
     )
 
     if result.get("status") == "error":

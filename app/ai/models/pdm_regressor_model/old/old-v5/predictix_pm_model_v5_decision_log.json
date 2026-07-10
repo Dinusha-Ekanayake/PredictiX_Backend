@@ -1,0 +1,61 @@
+{
+  "version": "v6.0-regressor",
+  "predictor": "CatBoost",
+  "explainer": "CatBoost",
+  "test_metrics": {
+    "MLP": {
+      "MAE": 21.3655,
+      "RMSE": 30.028,
+      "R\u00b2": 0.4553,
+      "MedAE": 15.0922,
+      "MAPE%": 44.0691
+    },
+    "CatBoost": {
+      "MAE": 17.2431,
+      "RMSE": 24.9528,
+      "R\u00b2": 0.6239,
+      "MedAE": 11.841,
+      "MAPE%": 36.2137
+    },
+    "LightGBM": {
+      "MAE": 17.5959,
+      "RMSE": 25.3388,
+      "R\u00b2": 0.6122,
+      "MedAE": 12.1628,
+      "MAPE%": 37.0428
+    },
+    "XGBoost": {
+      "MAE": 17.5149,
+      "RMSE": 25.2461,
+      "R\u00b2": 0.615,
+      "MedAE": 12.0571,
+      "MAPE%": 36.8583
+    },
+    "Ensemble": {
+      "MAE": 17.1972,
+      "RMSE": 24.893,
+      "R\u00b2": 0.6257,
+      "MedAE": 11.7599,
+      "MAPE%": 36.1764
+    }
+  },
+  "surrogate_spearman_rho": 0.7639,
+  "bootstrap_top2": {
+    "A": "Ensemble",
+    "B": "CatBoost",
+    "delta_mae_mean": 0.0459,
+    "ci95": [
+      0.0239,
+      0.0681
+    ],
+    "p_value": 0.0004
+  },
+  "feature_count": 55,
+  "dropped_constants": [
+    "climate_zone",
+    "is_home_warehouse_service"
+  ],
+  "catboost_loss": "RMSE",
+  "train_end": "2024-01-01",
+  "val_end": "2024-07-01"
+}

@@ -5,12 +5,16 @@ import logging
 
 from app.schemas.asset_summary import AssetSummaryRequest, AssetSummaryResponse
 from app.ai.services.asset_summary_service import generate_asset_summary, get_asset_summary_repo, get_hf_credentials
-from app.deps import get_db
+from app.deps import get_db, require_user
 from app.models import Asset
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/asset-summaries", tags=["Asset Summaries"])
+router = APIRouter(
+    prefix="/asset-summaries",
+    tags=["Asset Summaries"],
+    dependencies=[Depends(require_user)],
+)
 
 
 def _build_asset_input_text(asset: Asset) -> str:
