@@ -514,6 +514,33 @@ class PdmBatchPrediction(Base):
     horizon_saturated = Column(Boolean, default=False)
 
 
+class PdmPredictionHistory(Base):
+    """Append-only log of every batch prediction run — never upserted or
+    overwritten, unlike PdmBatchPrediction (which only ever holds the latest
+    row per asset).
+
+    Exists so that predictions made today can eventually be checked against
+    what actually happened afterward (a real maintenance_event within N days,
+    an unplanned "repair" event, etc.) — the validation this system currently
+    cannot do because PdmBatchPrediction discards prior predictions on every
+    upsert. One row is inserted per asset per batch run; nothing here is ever
+    updated or deleted by the app itself.
+    """
+    __tablename__ = "pdm_prediction_history"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id", ondelete="CASCADE"), nullable=False)
+
+    failure_probability = Column(Numeric(10, 4))
+    predicted_days_until_maintenance = Column(Integer)
+    predicted_maintenance_date = Column(Date)
+    health_score = Column(Numeric(10, 4))
+    tier = Column(Text)
+    model_version = Column(Text)
+
+    predicted_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
 class ServiceReminderLog(Base):
     """One row per service-reminder email send attempt."""
     __tablename__ = "service_reminder_log"

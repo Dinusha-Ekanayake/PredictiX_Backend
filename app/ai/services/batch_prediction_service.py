@@ -466,6 +466,49 @@ _UPSERT_COLUMNS = [
 _JSONB_COLUMNS = {"contributing_factors", "top_explanations", "feature_snapshot"}
 
 
+_HISTORY_COLUMNS = [
+    "failure_probability", "predicted_days_until_maintenance",
+    "predicted_maintenance_date", "health_score", "tier", "model_version",
+]
+
+
+def _log_prediction_history(db: Session, rows: list[dict]) -> None:
+    """Append one row per asset to pdm_prediction_history — INSERT only,
+    never UPDATE/DELETE. Failures here are logged but never allowed to
+    break the main prediction upsert; this is a secondary audit trail, not
+    the system of record for "what's the latest prediction" (that's still
+    pdm_batch_predictions).
+    """
+    if not rows:
+        return
+    try:
+        values_sql = ", ".join(
+            "(gen_random_uuid(), :asset_id_{i}, {cols}, now())".format(
+                i=i, cols=", ".join(f":{c}_{i}" for c in _HISTORY_COLUMNS)
+            )
+            for i in range(len(rows))
+        )
+        params: dict[str, Any] = {}
+        for i, payload in enumerate(rows):
+            params[f"asset_id_{i}"] = payload["asset_id"]
+            for c in _HISTORY_COLUMNS:
+                params[f"{c}_{i}"] = payload.get(c)
+
+        columns_sql = ", ".join(_HISTORY_COLUMNS)
+        db.execute(
+            text(f"""
+                INSERT INTO pdm_prediction_history (
+                    id, asset_id, {columns_sql}, predicted_at
+                ) VALUES {values_sql}
+            """),
+            params,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        log.warning("Prediction history logging failed (non-fatal) for %d rows", len(rows))
+
+
 def _upsert_batch_predictions_chunk(db: Session, rows: list[dict]) -> None:
     def _value_expr(col: str, i: int) -> str:
         return f"CAST(:{col}_{i} AS jsonb)" if col in _JSONB_COLUMNS else f":{col}_{i}"
@@ -497,6 +540,7 @@ def _upsert_batch_predictions_chunk(db: Session, rows: list[dict]) -> None:
     try:
         db.execute(text(sql), params)
         db.commit()
+        _log_prediction_history(db, [r for r in rows if r.get("status") == "ok"])
     except Exception:
         db.rollback()
         log.warning("Batched upsert failed — falling back to per-row upsert for this run.")
@@ -505,6 +549,8 @@ def _upsert_batch_predictions_chunk(db: Session, rows: list[dict]) -> None:
             try:
                 _upsert_single(db, asset_id, {k: v for k, v in payload.items() if k != "asset_id"})
                 db.commit()
+                if payload.get("status") == "ok":
+                    _log_prediction_history(db, [{**payload, "asset_id": asset_id}])
             except Exception:
                 db.rollback()
                 log.exception("Per-row upsert fallback also failed for asset %s", asset_id)
@@ -630,6 +676,15 @@ def run_batch_for_asset(
             "horizon_saturated": decision["horizon_saturated"],
         })
         db.commit()
+        _log_prediction_history(db, [{
+            "asset_id": asset_id_str,
+            "failure_probability": failure_probability,
+            "predicted_days_until_maintenance": days_until,
+            "predicted_maintenance_date": pred_date.isoformat(),
+            "health_score": health_score,
+            "tier": decision["tier"],
+            "model_version": _model_version_tag(),
+        }])
 
         log.info(
             "[batch] asset %s (%s) — prob=%.3f days=%d health=%.1f cost=%.0f tier=%s [%dms]",
@@ -699,9 +754,14 @@ def run_batch_for_all_assets(
     run_start = time.time()
     log.info("[batch] Starting PDM batch run…")
 
+    # Score every asset still in the fleet — not just "active" ones. A
+    # critical or under_maintenance asset needs fresh predictions more than
+    # an active one, not less; excluding them silently stops predictions
+    # the moment an asset needs them most. Only decommissioned assets (fully
+    # retired from the fleet) are skipped.
     assets = (
         db.query(Asset)
-        .filter(cast(Asset.status, String) == "active")
+        .filter(cast(Asset.status, String) != "decommissioned")
         .order_by(Asset.asset_code)
         .all()
     )

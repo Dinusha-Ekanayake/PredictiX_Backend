@@ -1,7 +1,10 @@
-import sqlalchemy
-from sqlalchemy import create_engine, text
+"""Manual smoke test — insert a throwaway ticket row and roll it back.
 
-engine = create_engine('postgresql+psycopg2://postgres.ulpjoljukculqqrwlwup:udCV%40bTGj.Ah38L@aws-1-ap-southeast-2.pooler.supabase.com:6543/postgres')
+Run with: python -m scripts.manual.test_insert
+"""
+from sqlalchemy import text
+
+from app.db.session import engine
 with engine.connect() as conn:
     try:
         res = conn.execute(text("INSERT INTO tickets (title, description, created_by) VALUES ('test', 'test', '00000000-0000-0000-0000-000000000000') RETURNING id"))
