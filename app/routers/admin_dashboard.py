@@ -21,10 +21,9 @@ from sqlalchemy.orm import Session
 from ..deps import get_db, require_admin, get_current_user, active_warehouse_id
 from ..models import (
     Asset,
-    AssetCostPrediction,
-    AssetFailurePrediction,
     MaintenanceEvent,
     Notification,
+    PdmBatchPrediction,
     Profile,
     Ticket,
     Warehouse,
@@ -93,7 +92,12 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
     _assets_where = "WHERE warehouse_id = :wh" if warehouse_id else ""
     _tickets_where = "WHERE warehouse_id = :wh" if warehouse_id else ""
 
-    # ── Query 1: all asset_failure_predictions aggregates in one pass ─────────
+    # ── Query 1: all pdm_batch_predictions aggregates in one pass ──────────────
+    # pdm_batch_predictions is the single source of truth for PdM output
+    # (populated by the daily scheduler + the asset-page "Run AI" trigger) —
+    # asset_failure_predictions was the old on-demand-only table, unused by
+    # the asset detail page since the v7/decision-layer unification and left
+    # stale here (~1 month old) until this fix.
     pred_agg = db.execute(text(f"""
         SELECT
             COUNT(*)                                                        AS total_preds,
@@ -106,8 +110,8 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
             COUNT(*) FILTER (WHERE health_score >= 60 AND health_score < 75) AS h_moderate,
             COUNT(*) FILTER (WHERE health_score >= 40 AND health_score < 60) AS h_poor,
             COUNT(*) FILTER (WHERE health_score < 40)                       AS h_critical
-        FROM asset_failure_predictions
-        WHERE health_score IS NOT NULL AND {_assets_in}
+        FROM pdm_batch_predictions
+        WHERE status = 'ok' AND health_score IS NOT NULL AND {_assets_in}
     """), _wh).fetchone()
 
     critical_alerts     = int(pred_agg[1] or 0)
@@ -150,8 +154,9 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
             (SELECT COUNT(*) FROM assets {_assets_where})             AS total_assets,
             (SELECT MAX(performed_at) FROM maintenance_events
              WHERE {_assets_in})                                      AS max_maint_at,
-            (SELECT COALESCE(SUM(estimated_cost), 0)
-             FROM asset_cost_predictions WHERE {_assets_in})          AS est_cost
+            (SELECT COALESCE(SUM(estimated_cost_lkr), 0)
+             FROM pdm_batch_predictions
+             WHERE status = 'ok' AND {_assets_in})                    AS est_cost
     """), _wh).fetchone()
 
     total_assets          = int(misc_agg[0] or 0)
@@ -307,19 +312,24 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
 
     # ── Query 7: top 8 risk assets (worst health first) ───────────────────────
     _risk_q = (
-        db.query(Asset, AssetFailurePrediction, Warehouse.name)
-        .join(AssetFailurePrediction, Asset.id == AssetFailurePrediction.asset_id)
+        db.query(Asset, PdmBatchPrediction, Warehouse.name)
+        .join(PdmBatchPrediction, Asset.id == PdmBatchPrediction.asset_id)
         .outerjoin(Warehouse, Asset.warehouse_id == Warehouse.id)
+        .filter(PdmBatchPrediction.status == "ok")
     )
     if warehouse_id:
         _risk_q = _risk_q.filter(Asset.warehouse_id == warehouse_id)
-    risk_rows = _risk_q.order_by(AssetFailurePrediction.health_score.asc()).limit(8).all()
+    risk_rows = _risk_q.order_by(PdmBatchPrediction.health_score.asc()).limit(8).all()
     today = now.date()
     top_risk_assets = []
     for asset, pred, wh_name in risk_rows:
         days_to_maint = (asset.next_service_date - today).days if asset.next_service_date else None
         top_risk_assets.append({
-            "id":               asset.asset_code or str(asset.id),
+            # Real asset UUID — the frontend uses this to navigate to the
+            # asset detail page. asset_code is shown separately as the
+            # human-readable label, not used as an identifier.
+            "id":               str(asset.id),
+            "code":             asset.asset_code,
             "name":             asset.asset_name or asset.model or "Asset",
             "location":         wh_name or "Unknown",
             "healthScore":      int(round(float(pred.health_score))) if pred.health_score is not None else 0,
