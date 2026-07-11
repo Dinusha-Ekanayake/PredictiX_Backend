@@ -11,12 +11,15 @@ try/except -> HTTPException).
 from __future__ import annotations
 
 import calendar
+import logging
 import traceback
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
+
+log = logging.getLogger("predictix")
 
 from ..deps import get_db, require_admin, get_current_user, active_warehouse_id
 from ..models import (
@@ -98,10 +101,18 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
     # asset_failure_predictions was the old on-demand-only table, unused by
     # the asset detail page since the v7/decision-layer unification and left
     # stale here (~1 month old) until this fix.
+    # "Critical Alerts" previously counted health_score < 60 — which is
+    # actually Poor (40-59) + Critical (<40) combined, per the health
+    # distribution bands computed in this same query. That inflated the KPI
+    # card (438) far above what the "Critical" band in the Health
+    # Distribution chart on the same page shows (267) — the same word
+    # meaning two different things on one screen. Now uses the same <40
+    # cutoff as h_critical below, so the headline number and the chart
+    # agree.
     pred_agg = db.execute(text(f"""
         SELECT
             COUNT(*)                                                        AS total_preds,
-            COUNT(*) FILTER (WHERE health_score < 60)                       AS critical_alerts,
+            COUNT(*) FILTER (WHERE health_score < 40)                       AS critical_alerts,
             ROUND(AVG(health_score)::numeric, 2)                            AS avg_health,
             COUNT(*) FILTER (WHERE failure_probability >= 0.5)              AS predicted_failures,
             -- health distribution bands (Excellent/Good/Moderate/Poor/Critical)
@@ -114,10 +125,16 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
         WHERE status = 'ok' AND health_score IS NOT NULL AND {_assets_in}
     """), _wh).fetchone()
 
+    total_preds         = int(pred_agg[0] or 0)
     critical_alerts     = int(pred_agg[1] or 0)
     avg_health_raw      = pred_agg[2]
     fleet_health        = int(round(float(avg_health_raw))) if avg_health_raw is not None else 0
     predicted_failures  = int(pred_agg[3] or 0)
+    # A brand-new warehouse with zero PdM predictions run yet would show
+    # "0% Fleet Health" indistinguishable from a real, alarming 0% score —
+    # this flag lets the frontend show a distinct "no predictions yet"
+    # empty state instead of a false alarm.
+    has_prediction_data = total_preds > 0
     health_distribution = [
         {"name": "Excellent", "count": int(pred_agg[4] or 0)},
         {"name": "Good",      "count": int(pred_agg[5] or 0)},
@@ -127,14 +144,22 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
     ]
 
     # ── Query 2: all ticket aggregates + anchors in one pass ──────────────────
+    # Real ticket_status enum: open, in_progress, pending, resolved, closed,
+    # cancelled. "Open" (operationally still needs attention) excludes both
+    # closed AND cancelled — a cancelled ticket isn't open, but the previous
+    # `status != 'closed'` counted it (and inflated the "Open Tickets" KPI/
+    # banner). Resolution time now falls back to resolved_at when closed_at
+    # isn't set yet, so a ticket sitting in "resolved" status (already
+    # counted in tickets_resolved) isn't silently excluded from the
+    # avg-resolution-days sample that stat is paired with in the footer.
     ticket_agg = db.execute(text(f"""
         SELECT
-            COUNT(*) FILTER (WHERE status != 'closed')                          AS open_tickets,
-            COUNT(*) FILTER (WHERE priority = 'high' AND status != 'closed')    AS high_priority,
+            COUNT(*) FILTER (WHERE status NOT IN ('closed', 'cancelled'))       AS open_tickets,
+            COUNT(*) FILTER (WHERE priority = 'high' AND status NOT IN ('closed', 'cancelled')) AS high_priority,
             COUNT(*) FILTER (WHERE status IN ('resolved','closed'))              AS tickets_resolved,
             ROUND(AVG(
-                CASE WHEN closed_at IS NOT NULL AND created_at IS NOT NULL
-                     THEN EXTRACT(EPOCH FROM (closed_at - created_at)) / 86400.0
+                CASE WHEN COALESCE(closed_at, resolved_at) IS NOT NULL AND created_at IS NOT NULL
+                     THEN EXTRACT(EPOCH FROM (COALESCE(closed_at, resolved_at) - created_at)) / 86400.0
                 END
             )::numeric, 1)                                                       AS avg_resolution_days,
             MAX(created_at)                                                      AS max_created_at
@@ -171,6 +196,7 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
         "fleetHealth":        fleet_health,
         "predictedFailures":  predicted_failures,
         "estMaintenanceCost": est_maintenance_cost,
+        "hasPredictionData":  has_prediction_data,
     }
     footer_stats = {
         "avgHealthScore":    fleet_health,
@@ -199,9 +225,17 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
     ticket_rows = _tt_q.group_by("ym", Ticket.status).all()
     ticket_by_ym: dict[str, dict[str, int]] = {}
     for ym, status, cnt in ticket_rows:
+        # "opened" = every ticket created that month regardless of current
+        # status (a running total, not a same-kind category alongside the
+        # other two) — inProgress/resolved are subsets of it by CURRENT
+        # status, not separate buckets that sum to it. Every real status
+        # (open, in_progress, pending, resolved, closed, cancelled) is now
+        # accounted for in at least the "opened" total; previously "open"/
+        # "pending"/"cancelled" tickets silently contributed to "opened"
+        # but had no bucket of their own at all.
         b = ticket_by_ym.setdefault(ym, {"opened": 0, "inProgress": 0, "resolved": 0})
         b["opened"] += cnt
-        if status == "in_progress":
+        if status in ("in_progress", "pending"):
             b["inProgress"] += cnt
         if status in ("resolved", "closed"):
             b["resolved"] += cnt
@@ -311,31 +345,38 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
         downtime_scope = "warehouse"
 
     # ── Query 7: top 8 risk assets (worst health first) ───────────────────────
-    _risk_q = (
-        db.query(Asset, PdmBatchPrediction, Warehouse.name)
-        .join(PdmBatchPrediction, Asset.id == PdmBatchPrediction.asset_id)
-        .outerjoin(Warehouse, Asset.warehouse_id == Warehouse.id)
-        .filter(PdmBatchPrediction.status == "ok")
-    )
-    if warehouse_id:
-        _risk_q = _risk_q.filter(Asset.warehouse_id == warehouse_id)
-    risk_rows = _risk_q.order_by(PdmBatchPrediction.health_score.asc()).limit(8).all()
-    today = now.date()
-    top_risk_assets = []
-    for asset, pred, wh_name in risk_rows:
-        days_to_maint = (asset.next_service_date - today).days if asset.next_service_date else None
-        top_risk_assets.append({
-            # Real asset UUID — the frontend uses this to navigate to the
-            # asset detail page. asset_code is shown separately as the
-            # human-readable label, not used as an identifier.
-            "id":               str(asset.id),
-            "code":             asset.asset_code,
-            "name":             asset.asset_name or asset.model or "Asset",
-            "location":         wh_name or "Unknown",
-            "healthScore":      int(round(float(pred.health_score))) if pred.health_score is not None else 0,
-            "failureProbability": float(pred.failure_probability) if pred.failure_probability is not None else 0.0,
-            "daysToMaintenance": days_to_maint,
-        })
+    # Wrapped: this is a secondary widget, not core to the dashboard. A
+    # failure here (e.g. a transient join issue) previously 500'd the ENTIRE
+    # dashboard — contradicting this module's own docstring promise that
+    # "every list may be empty... frontend degrades gracefully."
+    top_risk_assets: list[dict] = []
+    try:
+        _risk_q = (
+            db.query(Asset, PdmBatchPrediction, Warehouse.name)
+            .join(PdmBatchPrediction, Asset.id == PdmBatchPrediction.asset_id)
+            .outerjoin(Warehouse, Asset.warehouse_id == Warehouse.id)
+            .filter(PdmBatchPrediction.status == "ok")
+        )
+        if warehouse_id:
+            _risk_q = _risk_q.filter(Asset.warehouse_id == warehouse_id)
+        risk_rows = _risk_q.order_by(PdmBatchPrediction.health_score.asc()).limit(8).all()
+        today = now.date()
+        for asset, pred, wh_name in risk_rows:
+            days_to_maint = (asset.next_service_date - today).days if asset.next_service_date else None
+            top_risk_assets.append({
+                # Real asset UUID — the frontend uses this to navigate to the
+                # asset detail page. asset_code is shown separately as the
+                # human-readable label, not used as an identifier.
+                "id":               str(asset.id),
+                "code":             asset.asset_code,
+                "name":             asset.asset_name or asset.model or "Asset",
+                "location":         wh_name or "Unknown",
+                "healthScore":      int(round(float(pred.health_score))) if pred.health_score is not None else 0,
+                "failureProbability": float(pred.failure_probability) if pred.failure_probability is not None else 0.0,
+                "daysToMaintenance": days_to_maint,
+            })
+    except Exception:
+        log.warning("Admin dashboard: top-risk-assets query failed (non-fatal)", exc_info=True)
 
     # ── Query 8: recent alerts (latest 5 notifications) ───────────────────────
     def _severity_for(ntype: str | None, nstatus: str | None) -> str:
@@ -346,73 +387,97 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
             return "warning"
         return "info"
 
-    _notif_q = (
-        db.query(
-            Notification.id,
-            Notification.type,
-            Notification.status,
-            Notification.title,
-            Notification.message,
-            Notification.created_at,
-            Asset.asset_name,
-            Warehouse.name,
+    recent_alerts: list[dict] = []
+    try:
+        # notifications.user_id is NOT NULL — every row is addressed to one
+        # specific person, so this is a personal inbox table, not a shared
+        # fleet-alerts feed. This endpoint's response is cached per-WAREHOUSE
+        # (DashboardCache), not per-user, so it cannot be filtered to "the
+        # viewing admin's own notifications" without leaking whichever admin's
+        # request happened to trigger the cache build to every other admin
+        # sharing that warehouse — that would trade one cross-tenant leak for a
+        # worse one. Restricted to notifications addressed to an admin/
+        # super_admin role instead, which keeps this a fleet-oversight feed
+        # (not an arbitrary technician's personal notification) while staying
+        # correctly shareable across everyone viewing the same cached payload.
+        _notif_q = (
+            db.query(
+                Notification.id,
+                Notification.type,
+                Notification.status,
+                Notification.title,
+                Notification.message,
+                Notification.created_at,
+                Asset.asset_name,
+                Warehouse.name,
+            )
+            .join(Profile, Notification.user_id == Profile.id)
+            .filter(Profile.role.in_(("admin", "super_admin")))
+            .outerjoin(Asset, Notification.related_asset_id == Asset.id)
+            .outerjoin(Warehouse, Asset.warehouse_id == Warehouse.id)
         )
-        .outerjoin(Asset, Notification.related_asset_id == Asset.id)
-        .outerjoin(Warehouse, Asset.warehouse_id == Warehouse.id)
-    )
-    if warehouse_id:
-        # Keep this warehouse's asset-linked alerts plus system/fleet-wide alerts
-        # that aren't tied to any asset (so system notices still show).
-        _notif_q = _notif_q.filter(
-            (Asset.warehouse_id == warehouse_id)
-            | (Notification.related_asset_id.is_(None))
-        )
-    notif_rows = _notif_q.order_by(Notification.created_at.desc()).limit(5).all()
-    recent_alerts = [
-        {
-            "id":       str(nid),
-            "severity": _severity_for(ntype, nstatus),
-            "asset":    asset_name or ntitle or "System",
-            "location": (wh_name or "Unknown") if asset_name else "Fleet-wide",
-            "message":  nmessage or ntitle or "",
-            "createdAt": ncreated.isoformat() if ncreated else None,
-        }
-        for nid, ntype, nstatus, ntitle, nmessage, ncreated, asset_name, wh_name in notif_rows
-    ]
+        if warehouse_id:
+            # Keep this warehouse's asset-linked alerts plus system/fleet-wide alerts
+            # that aren't tied to any asset (so system notices still show).
+            _notif_q = _notif_q.filter(
+                (Asset.warehouse_id == warehouse_id)
+                | (Notification.related_asset_id.is_(None))
+            )
+        notif_rows = _notif_q.order_by(Notification.created_at.desc()).limit(5).all()
+        recent_alerts = [
+            {
+                "id":       str(nid),
+                "severity": _severity_for(ntype, nstatus),
+                "asset":    asset_name or ntitle or "System",
+                "location": (wh_name or "Unknown") if asset_name else "Fleet-wide",
+                "message":  nmessage or ntitle or "",
+                "createdAt": ncreated.isoformat() if ncreated else None,
+            }
+            for nid, ntype, nstatus, ntitle, nmessage, ncreated, asset_name, wh_name in notif_rows
+        ]
+    except Exception:
+        log.warning("Admin dashboard: recent-alerts query failed (non-fatal)", exc_info=True)
 
     # ── Query 9: latest 5 tickets ─────────────────────────────────────────────
-    assignee = Profile.__table__.alias("assignee")
-    _tl_q = (
-        db.query(
-            Ticket.id,
-            Ticket.ticket_number,
-            Ticket.title,
-            Ticket.priority,
-            Ticket.final_priority,
-            Ticket.status,
-            Asset.asset_name,
-            assignee.c.full_name,
+    latest_tickets: list[dict] = []
+    try:
+        assignee = Profile.__table__.alias("assignee")
+        _tl_q = (
+            db.query(
+                Ticket.id,
+                Ticket.ticket_number,
+                Ticket.title,
+                Ticket.priority,
+                Ticket.final_priority,
+                Ticket.status,
+                Asset.asset_name,
+                assignee.c.full_name,
+            )
+            .outerjoin(Asset, Ticket.asset_id == Asset.id)
+            .outerjoin(assignee, Ticket.assigned_to == assignee.c.id)
         )
-        .outerjoin(Asset, Ticket.asset_id == Asset.id)
-        .outerjoin(assignee, Ticket.assigned_to == assignee.c.id)
-    )
-    if warehouse_id:
-        _tl_q = _tl_q.filter(Ticket.warehouse_id == warehouse_id)
-    ticket_list_rows = _tl_q.order_by(Ticket.created_at.desc()).limit(5).all()
-    valid_priorities = {"critical", "high", "medium", "low"}
-    valid_statuses   = {"open", "in_progress", "resolved", "closed"}
-    latest_tickets = []
-    for tid, tnum, ttitle, tprio, tfprio, tstatus, asset_name, assignee_name in ticket_list_rows:
-        prio   = (tfprio or tprio or "medium").lower()
-        status = (tstatus or "open").lower()
-        latest_tickets.append({
-            "id":         tnum or str(tid)[:8],
-            "title":      ttitle or "Untitled",
-            "asset":      asset_name or "—",
-            "priority":   prio   if prio   in valid_priorities else "medium",
-            "status":     status if status in valid_statuses   else "open",
-            "assignedTo": assignee_name or "—",
-        })
+        if warehouse_id:
+            _tl_q = _tl_q.filter(Ticket.warehouse_id == warehouse_id)
+        ticket_list_rows = _tl_q.order_by(Ticket.created_at.desc()).limit(5).all()
+        valid_priorities = {"critical", "high", "medium", "low"}
+        valid_statuses   = {"open", "in_progress", "resolved", "closed"}
+        for tid, tnum, ttitle, tprio, tfprio, tstatus, asset_name, assignee_name in ticket_list_rows:
+            prio   = (tfprio or tprio or "medium").lower()
+            status = (tstatus or "open").lower()
+            latest_tickets.append({
+                "id":         tnum or str(tid)[:8],
+                # Real ticket UUID — "id" above is the human-readable
+                # ticket_number (display label), not a usable identifier.
+                # The frontend needs this to navigate to the actual ticket.
+                "ticketId":   str(tid),
+                "title":      ttitle or "Untitled",
+                "asset":      asset_name or "—",
+                "priority":   prio   if prio   in valid_priorities else "medium",
+                "status":     status if status in valid_statuses   else "open",
+                "assignedTo": assignee_name or "—",
+            })
+    except Exception:
+        log.warning("Admin dashboard: latest-tickets query failed (non-fatal)", exc_info=True)
 
     # ── aiInsights (rule-based, derived from the numbers) ─────────────────────
     ai_insights = []
@@ -421,7 +486,7 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
             {
                 "tone": "critical",
                 "title": "Critical assets need attention",
-                "body": f"{critical_alerts} assets are below 60% health and should be prioritised for inspection.",
+                "body": f"{critical_alerts} assets are below 40% health and should be prioritised for inspection.",
             }
         )
     if high_priority_tickets > 0:
@@ -457,10 +522,27 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
     # stale. Until the first refresh lands (or if the LLM is unavailable) we fall
     # back to the instant, data-grounded KPI summary below — so the dashboard is
     # always sub-second and the AI text appears automatically once ready.
-    from app.services.ai_summary_cache import get_cached_summary, maybe_refresh
+    #
+    # IMPORTANT: run_warehouse_agent() (and the cache wrapping it) has no
+    # warehouse scoping at all — it summarizes across the whole fleet and
+    # picks an arbitrary single warehouse for display. That's fine for a
+    # super_admin viewing the unscoped/fleet-wide view (warehouse_id is None
+    # here), but showing it to a regular admin locked to one warehouse would
+    # present another warehouse's (or the whole fleet's) data as if it were
+    # theirs. Only use the cached LLM summary when this request itself isn't
+    # warehouse-scoped; a scoped admin always gets the data-grounded fallback
+    # below, which IS built from this function's own correctly-scoped kpis.
+    ai_summary = None
+    if warehouse_id is None:
+        from app.services.ai_summary_cache import get_cached_summary, maybe_refresh
+        maybe_refresh()  # non-blocking; no-op if fresh or already running
+        ai_summary = get_cached_summary()
 
-    maybe_refresh()  # non-blocking; no-op if fresh or already running
-    ai_summary = get_cached_summary()
+    # Lets the frontend show an honest "AI-generated" badge only when the
+    # text really did come from the LLM — the fallback below is a plain
+    # f-string, not RAG/BERT/XGBoost-derived, and was previously always
+    # labeled as if it were regardless of which one actually produced it.
+    ai_summary_is_generated = ai_summary is not None
 
     if not ai_summary:
         ai_summary = (
@@ -484,5 +566,6 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
         "latestTickets": latest_tickets,
         "footerStats": footer_stats,
         "aiSummary": ai_summary,
+        "aiSummaryIsGenerated": ai_summary_is_generated,
         "aiInsights": ai_insights,
     }

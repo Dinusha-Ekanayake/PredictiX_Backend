@@ -19,11 +19,11 @@ import os
 import uuid as _uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
-from sqlalchemy import String, cast
+from sqlalchemy import String, cast, or_
 from sqlalchemy.orm import Session
 
 from app.deps import get_current_user, get_db, require_admin, require_user, active_warehouse_id
-from app.models import Asset, Department, Profile, Warehouse
+from app.models import Asset, AssetAssignment, Department, Profile, Warehouse
 from app.schemas.profile import ProfileOut, ProfileUpdate
 from app.schemas.user_profile import UserProfileUpdate
 from app.services.notification_service import NotificationService
@@ -239,9 +239,27 @@ def get_my_assets(
     if not db:
         return []
 
+    # Assigned via either the direct assets.assigned_to column OR an active
+    # row in asset_assignments — an asset reassigned only through the
+    # assignments table (without updating assigned_to) would otherwise
+    # silently be missing from this list despite showing up elsewhere
+    # (get_my_profile's asset count already checks both sources via
+    # max(direct, via_table)). Only decommissioned (fully retired) assets
+    # are excluded — critical/under_maintenance assets must still show up,
+    # since those are exactly what most need the user's attention.
+    assigned_asset_ids_subq = (
+        db.query(AssetAssignment.asset_id)
+        .filter(AssetAssignment.user_id == current_user.id, AssetAssignment.is_active == True)
+    )
     assets = (
         db.query(Asset)
-        .filter(Asset.assigned_to == str(current_user.id), cast(Asset.status, String) == "active")
+        .filter(
+            or_(
+                Asset.assigned_to == str(current_user.id),
+                Asset.id.in_(assigned_asset_ids_subq),
+            ),
+            cast(Asset.status, String) != "decommissioned",
+        )
         .all()
     )
 
@@ -283,12 +301,40 @@ def get_my_stats(
     if not db:
         return {"assignedAssets": 0, "activeAssets": 0}
 
-    count = (
+    # assignedAssets = everything assigned to this user (direct assigned_to
+    # OR an active asset_assignments row — same union as get_my_assets)
+    # except fully decommissioned assets; activeAssets = specifically
+    # status == "active". These were previously the same over-filtered
+    # query (status == "active" only, direct column only), which silently
+    # undercounted assignedAssets for any user with a critical/
+    # under_maintenance asset or a table-only assignment.
+    assigned_asset_ids_subq = (
+        db.query(AssetAssignment.asset_id)
+        .filter(AssetAssignment.user_id == current_user.id, AssetAssignment.is_active == True)
+    )
+    assigned_count = (
         db.query(Asset)
-        .filter(Asset.assigned_to == str(current_user.id), cast(Asset.status, String) == "active")
+        .filter(
+            or_(
+                Asset.assigned_to == str(current_user.id),
+                Asset.id.in_(assigned_asset_ids_subq),
+            ),
+            cast(Asset.status, String) != "decommissioned",
+        )
         .count()
     )
-    return {"assignedAssets": count, "activeAssets": count}
+    active_count = (
+        db.query(Asset)
+        .filter(
+            or_(
+                Asset.assigned_to == str(current_user.id),
+                Asset.id.in_(assigned_asset_ids_subq),
+            ),
+            cast(Asset.status, String) == "active",
+        )
+        .count()
+    )
+    return {"assignedAssets": assigned_count, "activeAssets": active_count}
 
 
 @router.get("/me/colleagues")
