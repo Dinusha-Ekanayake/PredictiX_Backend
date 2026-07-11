@@ -88,9 +88,25 @@ def _profile_to_response(user: Profile, db: Session) -> dict:
         wh = db.query(Warehouse).filter(Warehouse.id == user.warehouse_id).first()
         warehouse_name = wh.name if wh else None
 
+    # Same fix as get_my_assets/get_my_stats: count everything assigned to
+    # this user except fully decommissioned assets (union of the direct
+    # column and active asset_assignments rows), not just status=="active" —
+    # otherwise a user's own profile page undercounts their assigned assets
+    # the moment one goes critical/under_maintenance, which is exactly when
+    # it most needs to still be visible to them.
+    assigned_asset_ids_subq = (
+        db.query(AssetAssignment.asset_id)
+        .filter(AssetAssignment.user_id == user.id, AssetAssignment.is_active == True)
+    )
     asset_count = (
         db.query(Asset)
-        .filter(Asset.assigned_to == str(user.id), cast(Asset.status, String) == "active")
+        .filter(
+            or_(
+                Asset.assigned_to == str(user.id),
+                Asset.id.in_(assigned_asset_ids_subq),
+            ),
+            cast(Asset.status, String) != "decommissioned",
+        )
         .count()
     )
 

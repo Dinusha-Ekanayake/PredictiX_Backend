@@ -126,6 +126,7 @@ def _build_mock_profile(*, user_id: str, email: str, role: str, warehouse_id: Op
             self.department_id = department_id
             self.meta = {}
             self.employee_id = f"EMP-{user_id[:8]}"
+            self.avatar_url = None
 
     return MockProfile()
 
