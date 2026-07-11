@@ -47,6 +47,19 @@ def _normalize_priority(value: Optional[str]) -> Optional[str]:
     return v if v in ALLOWED_PRIORITIES else None
 
 
+def _priority_label(value: object) -> Optional[str]:
+    """Accept both the current string priority output and older dict shapes."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return (
+            value.get("predicted_label")
+            or value.get("priority")
+            or value.get("label")
+        )
+    return None
+
+
 def _normalize_category(value: Optional[str]) -> Optional[str]:
     if not value:
         return None
@@ -228,7 +241,7 @@ def _safe_log(prefix: str, exc: Exception) -> None:
     print(f"[USER-TICKETS][{prefix}] {type(exc).__name__}: {exc}", flush=True)
 
 
-def predict_priority_safely(title: str, description: str) -> Optional[dict]:
+def predict_priority_safely(title: str, description: str) -> Optional[object]:
     """Run the priority classifier. Returns None on any failure."""
     try:
         from app.ai.services.ticket_priority_service import predict_ticket_priority
@@ -314,7 +327,7 @@ def preview_user_ticket(
     try:
         from app.ai.services.ticket_priority_service import predict_ticket_priority
         result = predict_ticket_priority(title=title, description=description)
-        out["predicted_priority"] = _normalize_priority(result["predicted_label"])
+        out["predicted_priority"] = _normalize_priority(_priority_label(result))
     except Exception as exc:  # noqa: BLE001
         _safe_log("preview.priority", exc)
         out["errors"]["priority"] = str(exc)
@@ -381,7 +394,7 @@ def create_user_ticket(
     if use_ai:
         priority_result = predict_priority_safely(title, description)
         if priority_result:
-            predicted_priority = _normalize_priority(priority_result["predicted_label"])
+            predicted_priority = _normalize_priority(_priority_label(priority_result))
 
         category_result = predict_category_safely(title, description)
         if category_result:

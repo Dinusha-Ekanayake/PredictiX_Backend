@@ -97,6 +97,12 @@ def get_current_user(
 def _build_mock_profile(*, user_id: str, email: str, role: str, warehouse_id: Optional[str] = None, db: Optional[Session]):
     """Construct a duck-typed Profile when the DB record is missing."""
     from app.models import Department
+    from app.routers.auth import _DEMO_USERS
+
+    # Known demo accounts have a declared full_name — use it instead of
+    # deriving one from the email, which yields artifacts like "... Adm1".
+    demo = _DEMO_USERS.get(email.lower())
+    display_name = demo["full_name"] if demo else email.split("@")[0].replace(".", " ").title()
 
     department_id = None
     if db is not None:
@@ -119,13 +125,14 @@ def _build_mock_profile(*, user_id: str, email: str, role: str, warehouse_id: Op
             self.id = user_id
             self.email = email
             self.role = role
-            self.full_name = email.split("@")[0].replace(".", " ").title()
+            self.full_name = display_name
             self.phone = None
             self.status = "active"
             self.warehouse_id = warehouse_id
             self.department_id = department_id
             self.meta = {}
             self.employee_id = f"EMP-{user_id[:8]}"
+            self.avatar_url = None
 
     return MockProfile()
 

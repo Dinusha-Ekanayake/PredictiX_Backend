@@ -12,8 +12,9 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.deps import get_db, require_user
+from app.deps import get_db, get_current_user, is_admin_role, require_user
 from app.ai.services.asset_component_rul_service import compute_asset_component_rul
+from app.models import Asset
 from app.schemas.asset_component_rul import AssetComponentRulResponse, ComponentRulOut
 
 router = APIRouter(
@@ -24,10 +25,22 @@ router = APIRouter(
 
 
 @router.get("/{asset_id}/component-rul", response_model=AssetComponentRulResponse)
-def get_asset_component_rul(asset_id: str, db: Session = Depends(get_db)):
+def get_asset_component_rul(
+    asset_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
     """Per-component remaining-useful-life estimate for one asset, computed
     from that asset's own sensor_readings history (linear trend extrapolation
-    to a 20% health failure threshold)."""
+    to a component-specific health failure threshold).
+
+    Regular users may only fetch RUL data for an asset assigned to them.
+    """
+    if not is_admin_role(current_user):
+        asset = db.query(Asset).filter(Asset.id == asset_id).first()
+        if not asset or str(asset.assigned_to) != str(getattr(current_user, "id", "")):
+            raise HTTPException(status_code=404, detail=f"Asset {asset_id} not found")
+
     try:
         components = compute_asset_component_rul(db, asset_id)
     except ValueError as e:

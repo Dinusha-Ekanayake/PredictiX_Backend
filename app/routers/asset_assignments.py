@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import String, cast
 from sqlalchemy.orm import Session
-from app.deps import get_db, require_admin, require_user
+from app.deps import get_db, get_current_user, is_admin_role, require_admin, require_user
 from app.models import AssetAssignment
 from app.schemas.misc import AssetAssignmentCreate, AssetAssignmentOut
 
@@ -27,8 +28,18 @@ def list_asset_assignments(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
 ):
     q = db.query(AssetAssignment)
+
+    # Regular users only ever see assignment history involving themselves —
+    # otherwise the shared asset-details panel's Assignments tab (called
+    # with ?asset_id=) would expose every other employee's assignment
+    # history, admin notes, and reassignment dates for any asset.
+    if not is_admin_role(current_user):
+        uid = str(getattr(current_user, "id", ""))
+        q = q.filter(cast(AssetAssignment.user_id, String) == uid)
+
     if asset_id:
         q = q.filter(AssetAssignment.asset_id == asset_id)
     if user_id:

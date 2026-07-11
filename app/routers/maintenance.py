@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import String, cast
 from sqlalchemy.orm import Session
-from app.deps import get_db, require_admin, require_user
+from app.deps import get_db, get_current_user, is_admin_role, require_admin, require_user
 from app.models import Asset, MaintenanceEvent
 from app.schemas.maintenance import (
     MaintenanceEventCreate,
@@ -35,8 +36,20 @@ def list_maintenance_events(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
 ):
     q = db.query(MaintenanceEvent)
+
+    # Regular users only see maintenance history for assets assigned to
+    # them — otherwise the shared asset-details panel's Maintenance Logs
+    # tab (called with ?asset_id=) would expose service notes/costs for
+    # any asset in the fleet, including ones assigned to other employees.
+    if not is_admin_role(current_user):
+        uid = str(getattr(current_user, "id", ""))
+        q = q.join(Asset, MaintenanceEvent.asset_id == Asset.id).filter(
+            cast(Asset.assigned_to, String) == uid
+        )
+
     if asset_id:
         q = q.filter(MaintenanceEvent.asset_id == asset_id)
     if event_type:
