@@ -316,18 +316,37 @@ def _authenticate_demo(email: str, password: str) -> LoginResponse:
 # ─── internal: DB helpers ──────────────────────────────────────────────────────
 
 def _lookup_profile(email: str):
+    from sqlalchemy import func
+    from sqlalchemy.exc import OperationalError
+    from app.db import SessionLocal
+    from app.models import Profile
+
     try:
-        from sqlalchemy import func
-        from app.db import SessionLocal
-        from app.models import Profile
         db = SessionLocal()
-        try:
-            return db.query(Profile).filter(func.lower(Profile.email) == email).first()
-        finally:
-            db.close()
+    except Exception as e:
+        # DB not configured at all (broken/dev environment) — demo fallback is
+        # the intended path here.
+        log.warning("[LOGIN] DB session unavailable (non-fatal): %s", e)
+        return None
+
+    try:
+        return db.query(Profile).filter(func.lower(Profile.email) == email).first()
+    except OperationalError as e:
+        # DB is configured but unreachable (e.g. Supabase pooler saturated).
+        # This must NOT fall through to the demo fallback: the account may have
+        # a real profile row, and the fallback would silently issue a JWT with
+        # a synthesized user-id — a fabricated identity that then resolves
+        # MockProfile on every request until the token expires.
+        log.error("[LOGIN] DB unreachable during profile lookup: %s", e)
+        raise HTTPException(
+            status_code=503,
+            detail="Database temporarily unavailable. Please try again shortly.",
+        )
     except Exception as e:
         log.warning("[LOGIN] DB profile lookup failed (non-fatal): %s", e)
         return None
+    finally:
+        db.close()
 
 
 def _lookup_warehouse(warehouse_id: str):
