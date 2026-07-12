@@ -14,7 +14,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from app.deps import get_db, require_admin, require_user
+from app.deps import get_db, get_current_user, is_admin_role, require_admin, require_user
 from app.models import Asset, PdmBatchPrediction
 from app.ai.services.batch_prediction_service import (
     run_batch_for_all_assets,
@@ -81,8 +81,23 @@ def list_batch_predictions(
 
 
 @router.get("/{asset_id}", summary="Latest cached PDM prediction for one asset")
-def get_batch_prediction(asset_id: str, db: Session = Depends(get_db)) -> dict:
-    """Returns the latest cached prediction for a specific asset."""
+def get_batch_prediction(
+    asset_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+) -> dict:
+    """Returns the latest cached prediction for a specific asset.
+
+    Regular users may only fetch predictions for an asset assigned to them
+    — otherwise any user could pull failure-probability/health-score
+    predictions for any asset in the fleet via the shared asset-details
+    panel's fleet-wide search.
+    """
+    if not is_admin_role(current_user):
+        asset = db.query(Asset).filter(Asset.id == asset_id).first()
+        if not asset or str(asset.assigned_to) != str(getattr(current_user, "id", "")):
+            raise HTTPException(status_code=404, detail="No batch prediction found for this asset.")
+
     row = (
         db.query(PdmBatchPrediction)
         .filter(PdmBatchPrediction.asset_id == asset_id)

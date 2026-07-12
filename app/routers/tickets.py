@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import String, cast, func
 
-from app.deps import get_db, get_current_user, require_admin, require_user, is_admin_role
+from app.deps import get_db, get_current_user, require_admin, require_user, is_admin_role, active_warehouse_id
 from app.models import (
     Asset,
     Notification,
@@ -54,6 +54,8 @@ def _normalize_priority(v: str | None) -> str | None:
     if v is None:
         return None
     normalized = v.lower()
+    if normalized in {"critical", "urgent", "severe"}:
+        normalized = "high"
     if normalized not in VALID_PRIORITIES:
         raise HTTPException(status_code=422, detail=f"Invalid priority '{v}'. Valid: {sorted(VALID_PRIORITIES)}")
     return normalized
@@ -96,13 +98,24 @@ def get_ticket_status_counts(
     current_user: Profile = Depends(get_current_user),
 ):
     """Aggregate ticket counts by status for dashboards.
-    Admins see counts for all tickets.
-    Users see counts for tickets assigned to them or created by them.
+    Admins/super_admins see counts for their active warehouse only (same
+    scoping as every other admin-facing endpoint — assets, admin-dashboard
+    summary, list_tickets_paginated). Users see counts for tickets assigned
+    to them or created by them.
+
+    Previously admins saw a fleet-wide (unscoped) total here, which didn't
+    match the warehouse-scoped counts shown on the admin dashboard and
+    every other admin ticket view — e.g. 228 tickets here vs 208 on the
+    dashboard for the same admin.
     """
     counts = {"open": 0, "in-progress": 0, "resolved": 0, "closed": 0}
     q = db.query(Ticket.status, func.count(Ticket.id)).group_by(Ticket.status)
 
-    if not is_admin_role(current_user):
+    if is_admin_role(current_user):
+        wh_id = active_warehouse_id(current_user)
+        if wh_id:
+            q = q.filter(Ticket.warehouse_id == wh_id)
+    else:
         q = q.filter((Ticket.assigned_to == current_user.id) | (Ticket.created_by == current_user.id))
 
     rows = q.all()
@@ -129,9 +142,23 @@ def list_tickets(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
-    _: object = Depends(get_current_user),
+    current_user: object = Depends(get_current_user),
 ):
     q = db.query(Ticket)
+
+    # Role-based scoping — matches /paginated: admins see every ticket,
+    # regular users only ever see tickets they created or are assigned to.
+    # This endpoint is what the shared asset-details panel's Tickets tab
+    # calls (via ?asset_id=), so without this a regular user opening any
+    # asset (including one outside their own warehouse) could read every
+    # other employee's ticket titles/descriptions for that asset.
+    if not is_admin_role(current_user):
+        uid = str(getattr(current_user, "id", ""))
+        q = q.filter(
+            (cast(Ticket.created_by, String) == uid) |
+            (cast(Ticket.assigned_to, String) == uid)
+        )
+
     if status:
         q = q.filter(Ticket.status == _normalize_status(status))
     if priority:
@@ -456,7 +483,7 @@ def preview_ticket(payload: TicketPreviewRequest, _: object = Depends(get_curren
 
     try:
         pri = predict_ticket_priority(title=payload.title, description=payload.description)
-        predicted_priority = pri.lower() if pri else None
+        predicted_priority = _normalize_priority(pri) if pri else None
     except Exception as exc:
         errors["priority"] = str(exc)
 
@@ -495,7 +522,7 @@ def categorize_ticket_endpoint(payload: TicketCategorizationRequest):
 def prioritize_ticket_endpoint(payload: TicketPriorityRequest):
     try:
         priority = predict_ticket_priority(title="", description=payload.text)
-        return TicketPriorityResponse(priority=priority)
+        return TicketPriorityResponse(priority=_normalize_priority(priority) or "medium")
     except HTTPException:
         raise
     except Exception as exc:
