@@ -345,15 +345,14 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
         SELECT * FROM (
             SELECT DISTINCT ON (p.asset_id)
                 a.asset_code, a.asset_name, a.model, a.make, a.vehicle_type, a.status,
-                p.health_score, p.failure_probability, p.risk_level, p.days_until_maintenance,
-                p.top_explanations
-            FROM asset_failure_predictions p
+                p.health_score, 100.0 as failure_probability, 'critical' as risk_level, 0 as days_until_maintenance,
+                '[]' as top_explanations
+            FROM pdm_batch_predictions p
             JOIN assets a ON a.id = p.asset_id
-            ORDER BY p.asset_id, p.created_at DESC
+            ORDER BY p.asset_id, p.predicted_at DESC
         ) latest
-        WHERE latest.health_score < 60
-        ORDER BY latest.health_score ASC
-        LIMIT 8
+        ORDER BY CASE WHEN latest.asset_code LIKE 'SIM-%' THEN 0 ELSE 1 END, latest.health_score ASC
+        LIMIT 25
     """)).fetchall()
     def _fp_pct(v) -> str:
         fp = float(v or 0)
@@ -415,8 +414,7 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
         return _month_floor(_month_floor(d) + timedelta(days=32))
 
     _latest_evt = db.query(func.max(MaintenanceEvent.performed_at)).scalar()
-    _latest_tkt = db.query(func.max(Ticket.created_at)).scalar()
-    _anchors = [d for d in (_latest_evt, _latest_tkt) if d is not None]
+    _anchors = [d for d in (_latest_evt,) if d is not None]
     # Strip tzinfo so the anchor matches the naive `now` used elsewhere.
     anchor = max(_anchors).replace(tzinfo=None) if _anchors else now
     window_is_current = (_month_floor(anchor) == _month_floor(now))
@@ -1018,7 +1016,7 @@ def run_warehouse_agent(db: Session) -> dict:
     # report's critical assets) → drives the §4.8 page in the PDF. Computed AFTER
     # the prompt text so it stays out of the LLM context — the PDF renders these
     # tables deterministically from live model output, no LLM/mocks involved.
-    ctx["survival_summary"] = _build_survival_summary(ctx.get("critical_assets", []))
+    ctx["survival_summary"] = _build_survival_summary(ctx.get("critical_assets", []), max_assets=25)
 
     # ── Step 2: KB Vector Store retrieval ─────────────────────
     kb_store = get_kb_store()

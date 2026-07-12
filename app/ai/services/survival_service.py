@@ -286,6 +286,7 @@ def _p_service(fail_probs: list[float]) -> float:
 def _latest_cost_map(db: Session, codes: list[str]) -> dict[str, float]:
     if not codes:
         return {}
+    from sqlalchemy import bindparam
     rows = db.execute(text("""
         SELECT a.asset_code, c.estimated_cost
         FROM (
@@ -294,12 +295,12 @@ def _latest_cost_map(db: Session, codes: list[str]) -> dict[str, float]:
             ORDER BY asset_id, created_at DESC
         ) c
         JOIN assets a ON a.id = c.asset_id
-        WHERE a.asset_code = ANY(:codes)
-    """), {"codes": codes}).fetchall()
+        WHERE a.asset_code IN :codes
+    """).bindparams(bindparam("codes", expanding=True)), {"codes": codes}).fetchall()
     return {r[0]: (float(r[1]) if r[1] is not None else None) for r in rows}
 
 
-def fleet_survival_summary(db: Session, max_assets: int = 12,
+def fleet_survival_summary(db: Session, max_assets: int = 25,
                            horizon_days: int = 180,
                            asset_codes: list[str] | None = None) -> dict[str, Any]:
     """Warehouse-level survival + cost aggregation over the critical set.
@@ -350,8 +351,9 @@ def fleet_survival_summary(db: Session, max_assets: int = 12,
             comps = {c: _score_component(feat, c) for c in COMPONENTS}
         except Exception:
             continue
-        analyzed += 1
 
+        analyzed += 1
+        
         f7 = [comps[c]["fail_prob_7d"] for c in COMPONENTS]
         f30 = [comps[c]["fail_prob_30d"] for c in COMPONENTS]
         ps7, ps30 = _p_service(f7), _p_service(f30)
@@ -363,18 +365,30 @@ def fleet_survival_summary(db: Session, max_assets: int = 12,
         if e30:
             exp_spend_30 += e30
 
+        # Risk thresholds
+        fp_30 = ps30
+        if fp_30 > 0.6: risk = "Critical"
+        elif fp_30 > 0.3: risk = "High"
+        elif fp_30 > 0.1: risk = "Medium"
+        else: risk = "Low"
+
         soonest = min(comps.values(),
                       key=lambda d: (np.inf if d["median_days"] != d["median_days"] else d["median_days"]))
         for c in COMPONENTS:
             md = comps[c]["median_days"]
             if md == md:
                 comp_rul[c].append(md)
+            # for the bar chart
             comp_p7[c].append(comps[c]["fail_prob_7d"])
             comp_p30[c].append(comps[c]["fail_prob_30d"])
-            if comps[c]["fail_prob_7d"] >= 0.20:
-                at_risk_7[c] += 1
-            if comps[c]["fail_prob_30d"] >= 0.20:
-                at_risk_30[c] += 1
+            
+        c_soonest = soonest["component"]
+        rul = soonest["median_days"]
+        if rul == rul:
+            if rul <= 7:
+                at_risk_7[c_soonest] += 1
+            if rul <= 30:
+                at_risk_30[c_soonest] += 1
 
         assets_out.append({
             "asset":              code,
@@ -391,12 +405,13 @@ def fleet_survival_summary(db: Session, max_assets: int = 12,
             "exp_cost_7d_lkr":    round(e7, 2) if e7 is not None else None,
             "exp_cost_30d_lkr":   round(e30, 2) if e30 is not None else None,
         })
-        watchlist.append({
-            "asset":     code,
-            "component": soonest["component"].title(),
-            "rul_days":  round(float(soonest["median_days"]), 1) if soonest["median_days"] == soonest["median_days"] else None,
-            "risk":      "High" if ps30 >= 0.5 else "Medium" if ps30 >= 0.2 else "Low",
-        })
+        if soonest["median_days"] == soonest["median_days"] and soonest["median_days"] < 30:
+            watchlist.append({
+                "asset":     code,
+                "component": soonest["component"].title(),
+                "rul_days":  round(float(soonest["median_days"]), 1),
+                "risk":      "High" if ps30 >= 0.5 else "Medium" if ps30 >= 0.2 else "Low",
+            })
 
     component_summary = [
         {
@@ -424,6 +439,6 @@ def fleet_survival_summary(db: Session, max_assets: int = 12,
         "expected_spend_30d":  round(exp_spend_30, 2),
         "component_summary":   component_summary,
         "assets":              assets_out,      # per-asset 5-component 7/30d + cost
-        "watchlist":           watchlist[:15],
+        "watchlist":           watchlist[:max_assets],
         "generated_at":        datetime.utcnow().isoformat() + "Z",
     }
