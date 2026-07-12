@@ -611,13 +611,12 @@ def get_survival_analysis(db: Session = Depends(get_db)):
             SELECT * FROM (
                 SELECT DISTINCT ON (p.asset_id)
                     a.asset_code, a.asset_name, a.vehicle_type, p.health_score
-                FROM asset_failure_predictions p
+                FROM pdm_batch_predictions p
                 JOIN assets a ON a.id = p.asset_id
-                ORDER BY p.asset_id, p.created_at DESC
+                ORDER BY p.asset_id, p.predicted_at DESC
             ) latest
-            WHERE latest.health_score < 60
-            ORDER BY latest.health_score ASC
-            LIMIT 12
+            ORDER BY CASE WHEN latest.asset_code LIKE 'SIM-%' THEN 0 ELSE 1 END, latest.health_score ASC
+            LIMIT 25
         """)).fetchall()
 
         critical_assets = [
@@ -631,7 +630,7 @@ def get_survival_analysis(db: Session = Depends(get_db)):
         ]
 
         from app.agents.report_agents import _build_survival_summary
-        summary = _build_survival_summary(critical_assets)
+        summary = _build_survival_summary(critical_assets, max_assets=25)
 
         return {
             "status": "success",
