@@ -294,17 +294,36 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
     )
     top_shap_features = [(name, count) for name, count in top_explanations_raw]
 
-    # Fallback: pull from top_explanations JSONB on asset_failure_predictions
+    # Fallback: pull SHAP drivers from the top_explanations JSONB on the LATEST
+    # prediction per asset (append-only history), handling the v7 model shapes:
+    # {"top_factors": [{"feature": ...}]} or a bare list [{"feature": ...}].
     if not top_shap_features:
-        critical_preds = db.query(AssetFailurePrediction).filter(
-            AssetFailurePrediction.health_score < 60
-        ).limit(20).all()
+        rows = db.execute(text("""
+            SELECT top_explanations FROM (
+                SELECT DISTINCT ON (asset_id) asset_id, health_score, top_explanations
+                FROM asset_failure_predictions
+                ORDER BY asset_id, created_at DESC
+            ) latest
+            WHERE latest.health_score < 60
+            LIMIT 50
+        """)).fetchall()
         feat_counts: dict[str, int] = {}
-        for pred in critical_preds:
-            explanations = pred.top_explanations or {}
-            for feat in (explanations.get("features") or [])[:3]:
-                name = feat.get("feature", "unknown")
-                feat_counts[name] = feat_counts.get(name, 0) + 1
+        for (explanations,) in rows:
+            if isinstance(explanations, str):
+                try:
+                    explanations = json.loads(explanations)
+                except (ValueError, TypeError):
+                    explanations = {}
+            factors = (
+                explanations.get("top_factors")
+                if isinstance(explanations, dict) else explanations
+            )
+            if not isinstance(factors, list):
+                factors = []
+            for feat in factors[:3]:
+                name = feat.get("feature") if isinstance(feat, dict) else None
+                if name:
+                    feat_counts[name] = feat_counts.get(name, 0) + 1
         top_shap_features = sorted(feat_counts.items(), key=lambda x: -x[1])[:8]
 
     # Health score distribution buckets — derived from the SAME deduped per-asset set,
@@ -358,12 +377,28 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
     ]
 
     # ── COST PREDICTIONS ──────────────────────────────────
-    total_estimated_cost = db.query(func.sum(AssetCostPrediction.estimated_cost)).scalar() or 0
-    avg_cost_per_asset   = db.query(func.avg(AssetCostPrediction.estimated_cost)).scalar() or 0
-    min_cost_estimate    = db.query(func.min(AssetCostPrediction.min_cost)).scalar() or 0
-    max_cost_estimate    = db.query(func.max(AssetCostPrediction.max_cost)).scalar() or 0
-    cost_currency        = db.query(AssetCostPrediction.currency).first()
-    currency             = cost_currency[0] if cost_currency else "LKR"
+    # Cost predictions are append-only (one row per asset per batch run), so
+    # aggregate over only the LATEST prediction per asset — otherwise totals
+    # inflate as runs accumulate.
+    cost_row = db.execute(text("""
+        SELECT
+            COALESCE(SUM(estimated_cost), 0) AS total_cost,
+            COALESCE(AVG(estimated_cost), 0) AS avg_cost,
+            COALESCE(MIN(min_cost), 0)       AS min_cost,
+            COALESCE(MAX(max_cost), 0)       AS max_cost,
+            MAX(currency)                    AS currency
+        FROM (
+            SELECT DISTINCT ON (asset_id)
+                estimated_cost, min_cost, max_cost, currency
+            FROM asset_cost_predictions
+            ORDER BY asset_id, created_at DESC
+        ) latest_costs
+    """)).fetchone()
+    total_estimated_cost = float(cost_row[0] or 0)
+    avg_cost_per_asset   = float(cost_row[1] or 0)
+    min_cost_estimate    = float(cost_row[2] or 0)
+    max_cost_estimate    = float(cost_row[3] or 0)
+    currency             = cost_row[4] or "LKR"
 
     # ── MAINTENANCE EVENTS ────────────────────────────────
     # Reporting window = the THREE CALENDAR MONTHS ending with the most RECENT activity

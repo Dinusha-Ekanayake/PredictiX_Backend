@@ -71,17 +71,23 @@ def _build_warehouse_summary(db: Session, warehouse_id: str | None = None):
     # ── Query 1: all scalar KPIs from predictions + tickets + assets in one shot
     kpi_row = db.execute(text(f"""
         SELECT
-            (SELECT ROUND(AVG(health_score)::numeric, 1)
-             FROM asset_failure_predictions WHERE {_assets_in})                    AS avg_health,
-            (SELECT COUNT(*) FROM asset_failure_predictions
-             WHERE {_assets_in} AND health_score >= 80)                            AS healthy_assets,
-            (SELECT COUNT(*) FROM asset_failure_predictions
-             WHERE {_assets_in} AND health_score < 60)                             AS at_risk_assets,
+            (SELECT ROUND(AVG(health_score)::numeric, 1) FROM (
+                SELECT DISTINCT ON (asset_id) health_score FROM asset_failure_predictions
+                WHERE {_assets_in} ORDER BY asset_id, created_at DESC) lp)         AS avg_health,
+            (SELECT COUNT(*) FROM (
+                SELECT DISTINCT ON (asset_id) health_score FROM asset_failure_predictions
+                WHERE {_assets_in} ORDER BY asset_id, created_at DESC) lp
+             WHERE health_score >= 80)                                             AS healthy_assets,
+            (SELECT COUNT(*) FROM (
+                SELECT DISTINCT ON (asset_id) health_score FROM asset_failure_predictions
+                WHERE {_assets_in} ORDER BY asset_id, created_at DESC) lp
+             WHERE health_score < 60)                                              AS at_risk_assets,
             (SELECT COUNT(*) FROM assets {_assets_where})                          AS total_assets,
             (SELECT COUNT(*) FROM tickets WHERE {_tickets_and} status != 'closed') AS active_tickets,
             (SELECT COUNT(*) FROM tickets {_tickets_where})                        AS total_tickets,
-            (SELECT COALESCE(SUM(estimated_cost), 0) FROM asset_cost_predictions
-             WHERE {_assets_in})                                                   AS total_cost
+            (SELECT COALESCE(SUM(estimated_cost), 0) FROM (
+                SELECT DISTINCT ON (asset_id) estimated_cost FROM asset_cost_predictions
+                WHERE {_assets_in} ORDER BY asset_id, created_at DESC) lc)         AS total_cost
     """), _wh).fetchone()
 
     avg_health_score     = float(kpi_row[0] or 0)
@@ -130,16 +136,23 @@ def _build_warehouse_summary(db: Session, warehouse_id: str | None = None):
     tickets_by_category = [{"category": c.title() if c else "General",                           "count": cnt} for c, cnt in category_counts]
     assets_by_type     = [{"type": str(t).replace("_", " ").title() if t else "Other",           "count": c} for t, c in type_counts]
 
-    # 6. Health Score Distribution — bucketed in SQL (no full-table fetch into Python)
-    _bucket_q = db.query(
-        func.width_bucket(AssetFailurePrediction.health_score, 60, 100, 4).label("b"),
-        func.count(AssetFailurePrediction.id),
-    ).filter(AssetFailurePrediction.health_score.isnot(None))
-    if warehouse_id:
-        _bucket_q = _bucket_q.join(Asset, Asset.id == AssetFailurePrediction.asset_id).filter(
-            Asset.warehouse_id == warehouse_id
-        )
-    bucket_rows = _bucket_q.group_by("b").all()
+    # 6. Health Score Distribution — bucketed in SQL over the LATEST prediction
+    # per asset (append-only history), so bands don't inflate as runs accumulate.
+    _bucket_where = (
+        "WHERE p.asset_id IN (SELECT id FROM assets WHERE warehouse_id = :wh)"
+        if warehouse_id else ""
+    )
+    bucket_rows = db.execute(text(f"""
+        SELECT width_bucket(health_score, 60, 100, 4) AS b, COUNT(*)
+        FROM (
+            SELECT DISTINCT ON (p.asset_id) p.asset_id, p.health_score
+            FROM asset_failure_predictions p
+            {_bucket_where}
+            ORDER BY p.asset_id, p.created_at DESC
+        ) lp
+        WHERE lp.health_score IS NOT NULL
+        GROUP BY b
+    """), _wh).fetchall()
     # width_bucket(score, 60, 100, 4) → 0:<60, 1:60–69, 2:70–79, 3:80–89, 4&5:90–100
     buckets = {"90–100%": 0, "80–89%": 0, "70–79%": 0, "60–69%": 0, "< 60%": 0}
     _bucket_map = {0: "< 60%", 1: "60–69%", 2: "70–79%", 3: "80–89%", 4: "90–100%", 5: "90–100%"}
@@ -192,23 +205,32 @@ def _build_warehouse_summary(db: Session, warehouse_id: str | None = None):
             "maintenance": months_dict.get(m, 0)
         })
 
-    # 8. Critical Assets Table Info
-    _crit_q = db.query(Asset, AssetFailurePrediction)\
-        .join(AssetFailurePrediction, Asset.id == AssetFailurePrediction.asset_id)\
-        .filter(AssetFailurePrediction.health_score < 70)
-    if warehouse_id:
-        _crit_q = _crit_q.filter(Asset.warehouse_id == warehouse_id)
-    critical_assets_query = _crit_q.limit(10).all()
-        
+    # 8. Critical Assets Table — LATEST prediction per asset (append-only history),
+    # so an asset can't appear multiple times from different runs. Worst first.
+    _crit_where = "AND a.warehouse_id = :wh" if warehouse_id else ""
+    critical_assets_query = db.execute(text(f"""
+        SELECT a.asset_code, a.model, a.asset_name, a.category, latest.health_score
+        FROM (
+            SELECT DISTINCT ON (p.asset_id) p.asset_id, p.health_score
+            FROM asset_failure_predictions p
+            ORDER BY p.asset_id, p.created_at DESC
+        ) latest
+        JOIN assets a ON a.id = latest.asset_id
+        WHERE latest.health_score < 70 {_crit_where}
+        ORDER BY latest.health_score ASC
+        LIMIT 10
+    """), _wh).fetchall()
+
     critical_assets_list = []
-    for asset, pred in critical_assets_query:
+    for asset_code, model, asset_name, category, health_score in critical_assets_query:
+        hs = float(health_score)
         critical_assets_list.append({
-            "id": asset.asset_code or "Unknown",
-            "vehicle": asset.model or asset.asset_name or "Vehicle",
-            "component": asset.category or "General",
-            "health": f"{int(pred.health_score)}%",
-            "priority": "High" if pred.health_score < 50 else "Medium",
-            "status": "Critical" if pred.health_score < 50 else "Warning"
+            "id": asset_code or "Unknown",
+            "vehicle": model or asset_name or "Vehicle",
+            "component": category or "General",
+            "health": f"{int(hs)}%",
+            "priority": "High" if hs < 50 else "Medium",
+            "status": "Critical" if hs < 50 else "Warning"
         })
 
     # 9. Component Health (from sensor_readings — latest reading per asset)
