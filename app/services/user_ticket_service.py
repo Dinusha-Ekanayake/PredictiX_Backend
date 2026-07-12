@@ -395,12 +395,8 @@ def create_user_ticket(
     if use_ai:
         priority_result = predict_priority_safely(title, description)
         if priority_result:
-<<<<<<< HEAD
             # predict_priority_safely returns a plain string ("High"/"Medium"/"Low").
             predicted_priority = _normalize_priority(priority_result)
-=======
-            predicted_priority = _normalize_priority(_priority_label(priority_result))
->>>>>>> d85211cda3d3c83ca57f0c1a719c9e43dd84e91c
 
         category_result = predict_category_safely(title, description)
         if category_result:

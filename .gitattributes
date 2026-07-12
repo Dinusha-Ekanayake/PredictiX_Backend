@@ -4,3 +4,8 @@
 *.joblib filter=lfs diff=lfs merge=lfs -text
 *.h5 filter=lfs diff=lfs merge=lfs -text
 *.pt filter=lfs diff=lfs merge=lfs -text
+
+# LightGBM model dumps navigate trees by byte offset (tree_sizes); CRLF endings
+# corrupt those offsets so the models fail to load ("Model format error, expect
+# a tree here"). Force LF on every platform.
+app/ai/models/**/*.txt -text
