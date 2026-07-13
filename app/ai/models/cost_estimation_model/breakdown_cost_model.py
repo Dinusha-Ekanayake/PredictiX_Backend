@@ -1,15 +1,4 @@
-"""
-PredictiX Breakdown Cost Estimation Model — v4.0
-app/ai/models/cost_estimation_model/breakdown_cost_model.py
 
-Target: maintenance_cost_lkr_next_30d
-Trained on rows where maintenance_required_next_30d == 1
-Aligns with the failure model's SHAP signals (oil life, tire health, battery, days overdue)
-
-Key difference from v3:
-  v3 → predicted cost of the LAST service (backward-looking)
-  v4 → predicted cost IF the asset needs service in next 30 days (forward-looking)
-"""
 from __future__ import annotations
 import logging
 from pathlib import Path
@@ -21,7 +10,7 @@ from catboost import Pool
 
 log = logging.getLogger("predictix")
 
-MODEL_PATH = Path(__file__).resolve().parent / "predictix_breakdown_cost_model_v4.pkl"
+MODEL_PATH = Path(__file__).resolve().parent / "predictix_breakdown_cost_model_v5.pkl"
 
 
 def load_breakdown_bundle(path: Path | str | None = None) -> dict:
@@ -34,21 +23,30 @@ def load_breakdown_bundle(path: Path | str | None = None) -> dict:
         for col, cats in bundle.get("gbm_dtypes_safe", {}).items()
     }
     log.info(
-        "Breakdown cost model loaded — version=%s predictor=%s features=%d PICP=%.1f%%",
+        "Breakdown cost model loaded — version=%s predictor=%s features=%d "
+        "test_R2=%.3f PICP=%.1f%% fuel_price_normalized=%s",
         bundle.get("version", "?"),
         bundle.get("predictor_name", "?"),
         len(bundle.get("feature_cols", [])),
+        bundle.get("test_metrics", {}).get("R2", 0.0),
         bundle.get("picp_80_test", 0) * 100,
+        bundle.get("fuel_price_normalized", False),
     )
     return bundle
 
 
 def _engineer(raw: dict, bundle: dict) -> dict:
-    """Feature engineering — must match training pipeline exactly."""
+    """Feature engineering — must match training pipeline exactly.
+
+    v5 adds `svc_cost_te` at the end: a target-encoded lookup for
+    `service_vehicle`, computed leakage-safely at training time and stored in
+    bundle['svc_te_map']. This must be computed AFTER `service_vehicle` itself
+    is derived, since it's keyed on that combined string.
+    """
     d = dict(raw)
     age  = float(d.get("vehicle_age_years", 0))
     vt   = str(d.get("vehicle_type", ""))
-    # next_service_type drives service_vehicle; fall back to predicted from health
+    # next_service_type drives service_vehicle; fall back to last_service_type
     nsv  = str(d.get("next_service_type") or d.get("last_service_type") or "oil_service")
     VSMAP = bundle["vehicle_size_map"]
 
@@ -64,7 +62,6 @@ def _engineer(raw: dict, bundle: dict) -> dict:
                                float(d.get("battery_health_pct", 50))) / 4
     d["fault_stress"]       = (float(d.get("active_fault_code_count", 0)) +
                                float(d.get("sensor_fault_flag", 0)) * 3)
-    # Breakdown-specific signals
     d["health_deficit"]     = 100 - d["health_index"]
     d["overdue_days"]       = max(0.0, float(d.get("days_since_last_service", 0)) - 60)
     d["breakdown_history"]  = float(d.get("lifetime_breakdown_count", 0))
@@ -73,11 +70,18 @@ def _engineer(raw: dict, bundle: dict) -> dict:
     parts = str(d.get("parts_replaced_last_service", ""))
     for tok in bundle["part_tokens"]:
         d[f"part_{tok}"] = int(tok in parts)
+
+    # [NEW v5] target-encoded service_vehicle -> smoothed mean(cost/fuel_price).
+    # Unseen service_vehicle combinations (e.g. a next_service_type/vehicle_type
+    # pairing not present in training) fall back to the global mean rather than
+    # raising or silently defaulting to 0.
+    d["svc_cost_te"] = float(bundle["svc_te_map"].get(d["service_vehicle"], bundle["svc_te_global"]))
+
     return d
 
 
 def _prep_matrices(eng: dict, b: dict):
-    """Build CatBoost (Xc) and LightGBM quantile (Xg) input matrices."""
+    """Build CatBoost (Xc) and LightGBM/XGBoost (Xg) input matrices."""
     row = {c: eng.get(c) for c in b["feature_cols"]}
     X   = pd.DataFrame([row])
 
@@ -102,6 +106,8 @@ def predict_breakdown_cost(raw_input: dict, bundle: dict, top_k: int = 5) -> dic
     """
     Predict the cost this asset will incur IF it requires maintenance in the next 30 days.
 
+    Signature and return shape are IDENTICAL to v4 — no caller changes needed.
+
     Parameters
     ----------
     raw_input : dict   Asset fields from DB (same shape as _build_cost_input in predictions.py)
@@ -124,7 +130,7 @@ def predict_breakdown_cost(raw_input: dict, bundle: dict, top_k: int = 5) -> dic
         value               str
         direction           str     "increases" | "decreases"
         relative_impact     float   |sv[j]| / Σ|sv| × 100
-        sv_log              float   Raw SHAP in log1p space
+        sv_log              float   Raw SHAP in log-ratio space (not LKR — never display directly)
     }
     """
     b   = bundle
@@ -132,21 +138,25 @@ def predict_breakdown_cost(raw_input: dict, bundle: dict, top_k: int = 5) -> dic
     Xc, Xg = _prep_matrices(eng, b)
 
     # Select the right matrix per predictor family
-    # CatBoost → Xc (string categoricals)
-    # XGBoost / LightGBM → Xg (category dtype)
+    # CatBoost → Xc (string categoricals); XGBoost / LightGBM → Xg (category dtype)
     Xpred = Xc if b["predictor_name"] == "CatBoost" else Xg
 
-    # Point prediction (log1p → LKR)
-    log_pred = float(b["predictor_model"].predict(Xpred)[0])
-    point    = float(np.expm1(max(0.0, log_pred)))
+    # [CHANGED v5] model predicts log1p(cost / fuel_price) — rescale by the
+    # input's own fuel_price_lkr_per_l to recover LKR. Guard against a
+    # missing/zero fuel price so we never divide-by-zero or multiply by 0.
+    fuel_price = float(raw_input.get("fuel_price_lkr_per_l", 0)) or 1e-6
 
-    # 80% PI — always LightGBM quantile models → always Xg
+    log_ratio_pred = float(b["predictor_model"].predict(Xpred)[0])
+    point = float(np.expm1(max(0.0, log_ratio_pred)) * fuel_price)
+
+    # 80% PI — always LightGBM quantile models → always Xg. Same rescaling.
     lo = float(max(0.0,
-        np.expm1(max(0.0, float(b["q10"].predict(Xg)[0]))) - b["conformal_q_hat"]
+        np.expm1(max(0.0, float(b["q10"].predict(Xg)[0]))) * fuel_price - b["conformal_q_hat"]
     ))
-    hi = float(np.expm1(float(b["q90"].predict(Xg)[0])) + b["conformal_q_hat"])
+    hi = float(np.expm1(float(b["q90"].predict(Xg)[0])) * fuel_price + b["conformal_q_hat"])
 
-    # SHAP
+    # SHAP — computed in log-ratio space, same as v4's log1p(cost) space.
+    # sv_log is intentionally not LKR-denominated; never display it directly.
     if b["predictor_name"] == "CatBoost":
         sf  = b["predictor_model"].get_feature_importance(
             Pool(Xc, cat_features=b["categorical_cols"]), type="ShapValues"
@@ -162,9 +172,27 @@ def predict_breakdown_cost(raw_input: dict, bundle: dict, top_k: int = 5) -> dic
         v = Xpred.iloc[0, j]
         if hasattr(v, "item"): v = v.item()
         sv_j = float(sv[j])
+        col_name = Xpred.columns[j]
+
+        # svc_cost_te is a target-encoded statistic (mean historical cost/fuel-price
+        # ratio for this service+vehicle combo) — showing its raw float value
+        # ("289.27") means nothing to an admin. Surface it as the human-readable
+        # service+vehicle combination it actually represents instead.
+        if col_name == "svc_cost_te":
+            feature_label = "service_type_cost_pattern"
+            sv_str = str(eng.get("service_vehicle", ""))
+            if "__" in sv_str:
+                svc_part, veh_part = sv_str.split("__", 1)
+                value_display = f"{svc_part.replace('_',' ').title()} · {veh_part.replace('_',' ')}"
+            else:
+                value_display = sv_str or str(v)
+        else:
+            feature_label = col_name
+            value_display = str(v)
+
         drivers.append({
-            "feature"         : Xpred.columns[j],
-            "value"           : str(v),
+            "feature"         : feature_label,
+            "value"           : value_display,
             "direction"       : "increases" if sv_j > 0 else "decreases",
             "relative_impact" : round(abs(sv_j) / total_abs * 100, 1),
             "sv_log"          : round(sv_j, 6),
