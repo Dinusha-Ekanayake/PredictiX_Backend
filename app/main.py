@@ -9,7 +9,6 @@ import os
 # (loaded via joblib/pickle, not the Hub) are used. These are hard defaults;
 # they can still be overridden by an explicit environment value if ever needed.
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 import json
 import logging
