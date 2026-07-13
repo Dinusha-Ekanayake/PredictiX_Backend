@@ -20,6 +20,7 @@ warehouse_dashboard_router = APIRouter(
 )
 
 _cache = DashboardCache("warehouse", ttl=int(__import__("os").getenv("WAREHOUSE_DASHBOARD_TTL", "60")))
+_survival_cache = DashboardCache("warehouse_survival", ttl=int(__import__("os").getenv("WAREHOUSE_DASHBOARD_TTL", "60")))
 
 @warehouse_dashboard_router.get("/summary")
 def get_warehouse_summary(
@@ -596,7 +597,10 @@ class ChatRequest(BaseModel):
 
 
 @warehouse_dashboard_router.get("/survival")
-def get_survival_analysis(db: Session = Depends(get_db)):
+def get_survival_analysis(
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
     """
     FRSO Component Survival Analysis (Weibull AFT) for the dashboard.
 
@@ -604,45 +608,61 @@ def get_survival_analysis(db: Session = Depends(get_db)):
     so it is fast and never rate-limited. Returns per-component RUL summary plus
     a soonest-failing watchlist for live display on the Warehouse page.
     """
+    wh_id = active_warehouse_id(current_user)
     try:
-        # Lowest-health assets (latest prediction per asset, deduped) — the same
-        # cohort the PDF report scores, so the page and PDF agree.
-        critical_rows = db.execute(text("""
-            SELECT * FROM (
-                SELECT DISTINCT ON (p.asset_id)
-                    a.asset_code, a.asset_name, a.vehicle_type, p.health_score
-                FROM pdm_batch_predictions p
-                JOIN assets a ON a.id = p.asset_id
-                ORDER BY p.asset_id, p.predicted_at DESC
-            ) latest
-            ORDER BY CASE WHEN latest.asset_code LIKE 'SIM-%' THEN 0 ELSE 1 END, latest.health_score ASC
-            LIMIT 25
-        """)).fetchall()
-
-        critical_assets = [
-            {
-                "code": r[0],
-                "name": r[1] or "Vehicle",
-                "type": str(r[2]).replace("_", " ").title() if r[2] else "Unknown",
-                "health_score": int(r[3]) if r[3] is not None else None,
-            }
-            for r in critical_rows
-        ]
-
-        from app.agents.report_agents import _build_survival_summary
-        summary = _build_survival_summary(critical_assets, max_assets=25)
-
-        return {
-            "status": "success",
-            "survival_summary": summary,
-            "critical_assets": critical_assets,
-            # ISO-8601 UTC timestamp so the dashboard can show when this was scored.
-            "generated_at": datetime.utcnow().isoformat() + "Z",
-        }
+        return _survival_cache.get_or_refresh(
+            db,
+            lambda d: _build_survival_data(d, wh_id),
+            key=wh_id,
+        )
     except Exception as e:
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Survival analysis failed: {str(e)}")
+
+
+def _build_survival_data(db: Session, warehouse_id: str | None = None):
+    # Lowest-health assets (latest prediction per asset, deduped) — the same
+    # cohort the PDF report scores, so the page and PDF agree.
+    _assets_in = (
+        "p.asset_id IN (SELECT id FROM assets WHERE warehouse_id = :wh)"
+        if warehouse_id else "TRUE"
+    )
+    _wh = {"wh": warehouse_id} if warehouse_id else {}
+    
+    critical_rows = db.execute(text(f"""
+        SELECT * FROM (
+            SELECT DISTINCT ON (p.asset_id)
+                a.asset_code, a.asset_name, a.vehicle_type, p.health_score
+            FROM pdm_batch_predictions p
+            JOIN assets a ON a.id = p.asset_id
+            WHERE {_assets_in}
+            ORDER BY p.asset_id, p.predicted_at DESC
+        ) latest
+        ORDER BY CASE WHEN latest.asset_code LIKE 'SIM-%' THEN 0 ELSE 1 END, latest.health_score ASC
+        LIMIT 25
+    """), _wh).fetchall()
+
+    critical_assets = [
+        {
+            "code": r[0],
+            "name": r[1] or "Vehicle",
+            "type": str(r[2]).replace("_", " ").title() if r[2] else "Unknown",
+            "health_score": int(r[3]) if r[3] is not None else None,
+        }
+        for r in critical_rows
+    ]
+
+    from app.agents.report_agents import _build_survival_summary
+    summary = _build_survival_summary(critical_assets, max_assets=25)
+
+    return {
+        "status": "success",
+        "survival_summary": summary,
+        "critical_assets": critical_assets,
+        # ISO-8601 UTC timestamp so the dashboard can show when this was scored.
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+    }
 
 
 @warehouse_dashboard_router.get("/generate-report")
