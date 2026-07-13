@@ -81,24 +81,24 @@ _PCTL = {"p10_days": 0.90, "median_days": 0.50, "p90_days": 0.10}
 
 # ── Model + schema loading (cached) ───────────────────────────────────────────
 
-@lru_cache(maxsize=len(COMPONENTS))
-def _load_model(component: str):
-    path = MODEL_DIR / f"{component}_aft.pkl"
+@lru_cache(maxsize=1)
+def _load_bundle() -> dict[str, Any]:
+    path = MODEL_DIR / "survival_bundle.pkl"
     if not path.exists():
         raise FileNotFoundError(
-            f"Survival model not found at {path}. Train + deploy the v3 models "
+            f"Survival bundle not found at {path}. Train + deploy the v3 models "
             f"(app/ai/models/survival_analysis/train_survival_models.py)."
         )
     with open(path, "rb") as f:
         return pickle.load(f)
 
+@lru_cache(maxsize=len(COMPONENTS))
+def _load_model(component: str):
+    return _load_bundle()["components"][component]["model"]
 
 @lru_cache(maxsize=len(COMPONENTS))
 def _load_schema(component: str) -> dict[str, Any]:
-    path = MODEL_DIR / f"{component}_features.json"
-    if not path.exists():
-        raise FileNotFoundError(f"Feature schema not found at {path}.")
-    return json.loads(path.read_text())
+    return _load_bundle()["components"][component]["schema"]
 
 
 def warmup_survival_models() -> None:
