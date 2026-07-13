@@ -666,7 +666,10 @@ def _build_survival_data(db: Session, warehouse_id: str | None = None):
 
 
 @warehouse_dashboard_router.get("/generate-report")
-def generate_warehouse_report(db: Session = Depends(get_db)):
+def generate_warehouse_report(
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user)
+):
     """
     KB-Enhanced Warehouse Report Agent endpoint.
     Aggregates all PostgreSQL data → KB Vector Store retrieval →
@@ -676,7 +679,8 @@ def generate_warehouse_report(db: Session = Depends(get_db)):
     """
     try:
         from app.agents.report_agents import run_warehouse_agent
-        result = run_warehouse_agent(db)
+        wh_id = active_warehouse_id(current_user)
+        result = run_warehouse_agent(db, warehouse_id=wh_id)
         return {
             "status":         "success",
             "ai_sections":    result["ai_sections"],

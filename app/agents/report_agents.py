@@ -999,7 +999,7 @@ def _guard_narrative(ai_sections: dict, ctx: dict) -> dict:
     return ai_sections
 
 
-def run_warehouse_agent(db: Session) -> dict:
+def run_warehouse_agent(db: Session, warehouse_id: str | None = None) -> dict:
     """
     KB-Enhanced Warehouse Report Agent:
     1. Queries ALL PostgreSQL tables → builds context (build_warehouse_context)
@@ -1009,7 +1009,7 @@ def run_warehouse_agent(db: Session) -> dict:
     5. Returns: ai_sections + context + kb_annotations
     """
     # ── Step 1: PostgreSQL data ────────────────────────────────
-    ctx = build_warehouse_context(db)
+    ctx = build_warehouse_context(db, warehouse_id=warehouse_id)
     context_text = _context_to_prompt_text(ctx)
 
     # ── Step 1b: FRSO survival aggregation (real Weibull AFT models over the
