@@ -413,22 +413,36 @@ def fleet_survival_summary(db: Session, max_assets: int = 25,
                 "risk":      "High" if ps30 >= 0.5 else "Medium" if ps30 >= 0.2 else "Low",
             })
 
-    component_summary = [
-        {
+    component_summary = []
+    for c, v in comp_rul.items():
+        # 7-day view: only assets where this SPECIFIC component's median_days <= 7
+        assets_7d = [a for a in assets_out if a["components"][c]["median_days"] == a["components"][c]["median_days"] and a["components"][c]["median_days"] <= 7]
+        if assets_7d:
+            c_p7 = [a["components"][c]["fail_prob_7d"] for a in assets_7d]
+            avg_7d = sum(c_p7) / len(c_p7)
+        else:
+            avg_7d = 0.0
+
+        # 30-day view: average across ALL soonest failing assets (all 25 critical assets)
+        if assets_out:
+            c_p30 = [a["components"][c]["fail_prob_30d"] for a in assets_out]
+            avg_30d = sum(c_p30) / len(c_p30)
+        else:
+            avg_30d = 0.0
+
+        component_summary.append({
             "component":     c.title(),
             "avg_rul_days":  round(sum(v) / len(v), 1) if v else None,
-            # average failure probability across the scored assets (drives the bar chart)
-            "avg_fail_prob_7d":  round(sum(comp_p7[c]) / len(comp_p7[c]), 4) if comp_p7[c] else 0.0,
-            "avg_fail_prob_30d": round(sum(comp_p30[c]) / len(comp_p30[c]), 4) if comp_p30[c] else 0.0,
-            # expected number of failures = sum of per-asset probabilities
+            # average failure probability across the at-risk assets
+            "avg_fail_prob_7d":  round(avg_7d, 4),
+            "avg_fail_prob_30d": round(avg_30d, 4),
+            # expected number of failures = sum of ALL per-asset probabilities
             "expected_failures_7d":  round(sum(comp_p7[c]), 2),
             "expected_failures_30d": round(sum(comp_p30[c]), 2),
             "at_risk_7d":    at_risk_7[c],
             "at_risk_30d":   at_risk_30[c],
             "assets_scored": len(v),
-        }
-        for c, v in comp_rul.items()
-    ]
+        })
     watchlist.sort(key=lambda w: (w["rul_days"] is None, w["rul_days"]))
 
     return {
