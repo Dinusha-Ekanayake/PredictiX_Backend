@@ -72,6 +72,20 @@ def _classify_intent(question: str) -> str:
     if q.startswith("faq") or "frequently asked" in q:
         return INTENT_FAQ
 
+    # Fast-path: navigation phrases — "open X", "go to X", "take me to X", "navigate to X"
+    NAV_TRIGGERS = (
+        "open ", "go to ", "take me to ", "navigate to ", "show me the ",
+        "bring me to ", "launch ", "redirect to ", "i want to go to ",
+        "switch to ", "jump to ",
+    )
+    NAV_SUBJECTS = (
+        "asset", "ticket", "dashboard", "report", "warehouse", "user",
+        "profile", "setting", "helpdesk", "help desk", "notification",
+        "prediction", "cost", "fleet", "home", "overview",
+    )
+    if any(q.startswith(t) for t in NAV_TRIGGERS) and any(s in q for s in NAV_SUBJECTS):
+        return INTENT_NAVIGATION
+
     # Fast-path: "how to X" / "guide me" / "help me" / "how do i" → always FAQ
     FAQ_TRIGGERS = (
         "how to ", "how do i ", "guide me", "guide me to", "help me ",
@@ -82,10 +96,9 @@ def _classify_intent(question: str) -> str:
     if any(q.startswith(t) for t in FAQ_TRIGGERS):
         return INTENT_FAQ
 
-
     # LLM router call
     try:
-        result = call_groq(
+        raw_result, _ = call_groq(
             messages=[
                 {"role": "system", "content": ROUTER_SYSTEM},
                 {"role": "user", "content": question},
@@ -94,7 +107,7 @@ def _classify_intent(question: str) -> str:
             max_tokens=20,
             temperature=0.0,
         )
-        intent = str(result).strip().upper().split()[0] if result else INTENT_DATABASE
+        intent = str(raw_result).strip().upper().split()[0] if raw_result else INTENT_DATABASE
         if intent not in ALL_INTENTS:
             log.warning("Router returned unknown intent '%s', defaulting to DATABASE", intent)
             return INTENT_DATABASE
