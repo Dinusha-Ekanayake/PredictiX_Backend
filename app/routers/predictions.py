@@ -115,7 +115,7 @@ def _build_cost_input(asset, last_event) -> dict:
 
 def _run_cost_prediction_for_asset(asset_id: str, db: Session) -> dict:
     """Shared by GET /cost/{asset_id} and POST /cost/live/{asset_id}.
-    Runs the v4 breakdown cost model live and returns its native dict shape
+    Runs the breakdown cost model (currently v5.0) live and returns its native dict shape
     plus asset_id/model_version — the fields BreakdownCostPredictionOut expects.
     """
     from app.main import breakdown_cost_bundle
@@ -252,7 +252,7 @@ def get_failure_prediction_by_run(run_id: str, db: Session = Depends(get_db)):
 @router.get("/cost/{asset_id}", response_model=BreakdownCostPredictionOut)
 def get_latest_cost_prediction(asset_id: str, db: Session = Depends(get_db)):
     """
-    Return the v4 breakdown cost prediction for an asset — always runs live.
+    Return the breakdown cost prediction (currently v5.0) for an asset — always runs live.
 
     NOTE: this used to check the AssetCostPrediction DB cache first. That table
     (i) is never written by anything — batch_prediction_service.py upserts

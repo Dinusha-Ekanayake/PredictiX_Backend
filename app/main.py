@@ -42,7 +42,6 @@ from .routers.prediction_explanations import router as prediction_explanations_r
 from .routers.predictions import router as predictions_router
 from .routers.profile import router as profiles_router
 from .routers.report_sources import router as report_sources_router
-from .routers.reports import router as reports_router
 from .routers.sensor_readings import router as sensor_readings_router
 from .routers.ticket_attachments import router as ticket_attachments_router
 from .routers.ticket_comments import router as ticket_comments_router
@@ -55,7 +54,7 @@ from .routers.warehouse_dashboard import warehouse_dashboard_router
 from .routers.warehouses import router as warehouses_router
 from .routers.batch_predictions import router as batch_predictions_router
 from .routers.websockets import router as websockets_router
-from .routers.asset_reports import router as asset_reports_router
+from .routers.asset_reports import router as asset_reports_router, reports_router
 from .routers.warmup import router as warmup_router
 
 # Sharada — user-role self-service profile (/user-profile)
@@ -283,12 +282,16 @@ async def lifespan(_: FastAPI):
 
     _load_pdm_models()
 
-    # ─── Breakdown cost estimation model (v4 — XGBoost) ──────────────────────
+    # ─── Breakdown cost estimation model (v5 — CatBoost) ─────────────────────
     global breakdown_cost_bundle
     try:
         breakdown_cost_bundle = load_breakdown_bundle()
+        log.info("Breakdown cost model bundle loaded successfully.")
     except Exception as exc:
-        log.warning("Breakdown cost model loading failed (non-fatal): %s", exc)
+        log.error(
+            "Breakdown cost model loading FAILED — /predictions/cost/* will "
+            "503 until this is fixed: %s", exc, exc_info=True,
+        )
 
     if os.getenv("DISABLE_HF_MODELS", "false").lower() != "true":
         try:

@@ -162,7 +162,7 @@ class AssetCostPredictionOut(BaseModel):
     """DB-row shape for the legacy asset_cost_predictions table. Only used by
     GET /predictions/cost/run/{run_id} now — GET /predictions/cost/{asset_id}
     and POST /predictions/cost/live/{asset_id} use BreakdownCostPredictionOut
-    below instead, since that table is never populated by the v4 pipeline and
+    below instead, since that table is never populated by the breakdown-cost pipeline and
     can't represent SHAP drivers or confidence bounds anyway."""
     id: UUID
     run_id: UUID
@@ -177,10 +177,10 @@ class AssetCostPredictionOut(BaseModel):
         from_attributes = True
 
 
-# ── breakdown-cost-v4.0 response shape ────────────────────────────────────────
+# ── breakdown-cost response shape (v4.0 and v5.0 share this contract) ────────────────────────────────────────
 # Mirrors predict_breakdown_cost()'s actual return dict
 # (app/ai/models/cost_estimation_model/breakdown_cost_model.py) exactly — this
-# is NOT the extra_data-wrapped sample in the v4 model docs; the code is the
+# is NOT the extra_data-wrapped sample in the older v4 model docs; the code is the
 # source of truth, not the doc.
 
 class CostDriverOut(BaseModel):
@@ -189,7 +189,7 @@ class CostDriverOut(BaseModel):
     direction: str          # "increases" | "decreases"
     relative_impact: float  # 0-100, share of total |SHAP|
     # sv_log intentionally omitted — log1p-space value, not meant for display
-    # (v4 docs §9: "Never display sv_log directly")
+    # (v4/v5 docs §9: "Never display sv_log directly")
 
 
 class ExpectedRangeOut(BaseModel):
@@ -209,6 +209,13 @@ class BreakdownCostPredictionOut(BaseModel):
     sanity_check: str
     top_drivers: list[CostDriverOut]
     model_version: Optional[str] = None
+    # Bundle-level accuracy stats (not per-prediction) — lets the frontend
+    # show the model's real current numbers instead of hardcoding any
+    # version's stats, which would go stale the next time the model changes.
+    test_r2: Optional[float] = None
+    test_mae_lkr: Optional[float] = None
+    test_medae_lkr: Optional[float] = None
+    picp_80_pct: Optional[float] = None
 
 
 class TicketPredictionOut(BaseModel):

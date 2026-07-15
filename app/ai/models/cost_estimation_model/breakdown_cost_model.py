@@ -1,4 +1,15 @@
+"""
+PredictiX Breakdown Cost Estimation Model — v5.0
+app/ai/models/cost_estimation_model/breakdown_cost_model.py
 
+Target: maintenance_cost_lkr_next_30d
+Trained on rows where maintenance_required_next_30d == 1
+
+predict_breakdown_cost()'s signature and return dict are UNCHANGED from v4 — every
+caller (predictions.py router, batch_prediction_service.py) needs no changes.
+The fuel-price rescaling and svc_cost_te lookup happen entirely inside this
+function and are invisible to callers.
+"""
 from __future__ import annotations
 import logging
 from pathlib import Path
@@ -208,6 +219,7 @@ def predict_breakdown_cost(raw_input: dict, bundle: dict, top_k: int = 5) -> dic
     else:
         sanity, expected_range = "unknown_service_type", {}
 
+    test_metrics = b.get("test_metrics", {})
     return {
         "predicted_cost_lkr"  : round(point, 2),
         "pi_80_lower_lkr"     : round(lo, 2),
@@ -218,4 +230,8 @@ def predict_breakdown_cost(raw_input: dict, bundle: dict, top_k: int = 5) -> dic
         "expected_range"      : expected_range,
         "sanity_check"        : sanity,
         "top_drivers"         : drivers,
+        "test_r2"             : round(float(test_metrics.get("R2", 0.0)), 4) if test_metrics else None,
+        "test_mae_lkr"        : round(float(test_metrics.get("MAE", 0.0)), 2) if test_metrics else None,
+        "test_medae_lkr"      : round(float(test_metrics.get("MedAE", 0.0)), 2) if test_metrics else None,
+        "picp_80_pct"         : round(float(b.get("picp_80_test", 0.0)) * 100, 1),
     }
