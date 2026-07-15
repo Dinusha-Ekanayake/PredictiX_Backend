@@ -161,7 +161,7 @@ def _humanize_driver(top_explanations) -> str | None:
 # FULL DATA INJECTION — PostgreSQL → LLM Context (RAG Layer)
 # ═══════════════════════════════════════════════════════════════
 
-def build_warehouse_context(db: Session) -> dict[str, Any]:
+def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
     """
     Queries ALL relevant PostgreSQL tables and builds a comprehensive
     structured context dictionary.
@@ -178,7 +178,7 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
     one_month_ago    = now - timedelta(days=30)
 
     # ── Warehouse info ────────────────────────────────────
-    warehouse = db.query(Warehouse).first()
+    warehouse = db.query(Warehouse).filter(Warehouse.id == warehouse_id).first()
     warehouse_name = warehouse.name if warehouse else "PredictiX Warehouse"
     warehouse_city = warehouse.city if warehouse else "Colombo"
     warehouse_code = warehouse.code if warehouse else "WH-001"
