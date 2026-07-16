@@ -199,5 +199,5 @@ def active_warehouse_id(user) -> Optional[str]:
     """
     wid = getattr(user, "warehouse_id", None)
     if not wid:
-        wid = os.getenv("DEFAULT_WAREHOUSE_ID")
-    return str(wid) if wid else None
+        raise HTTPException(status_code=400, detail="User is not assigned to any warehouse")
+    return str(wid)
