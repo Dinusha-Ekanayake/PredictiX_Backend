@@ -1,24 +1,30 @@
-# Secrets / env
-.env*
-
-# Virtualenvs
+.env
 .venv/
-venv/
 
-# Python bytecode / caches
 __pycache__/
 *.pyc
 *.pyo
 
-# Alembic (local)
 alembic/
 
-# Model weights too large for GitHub
-# NOTE: .pkl model / reference files are intentionally kept in the repo.
+# Transformer/sentence-transformer model weights — too large for GitHub
 *.safetensors
+scripts/seed_faqs.py
+
+# ONNX asset-summary model artifacts (deployed via Hugging Face, never commit)
+onnx_asset_summary*/
+
+# build / runtime logs
+*.log
+onnx_ticket_summary*/
+*__fp32_tmp/
+*__int8_tmp/
+build_onnx.py
+*_quality_test.py
+ticket_quality_test.py
+.env.example
 
 # Logs / profiling / scratch output
-*.log
 profile.out
 *.tmp
 admin_summary_tmp.json
