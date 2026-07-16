@@ -5,7 +5,11 @@ from app.db.supabase_client import supabase
 def search_knowledge(query: str, match_count: int = 3) -> list:
     try:
         # Use Hugging Face Inference API instead of heavy local torch/transformers models
-        api_url = os.getenv("HF_INFERENCE_API_URL", "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2")
+        api_url = os.getenv("HF_INFERENCE_API_URL")
+        if not api_url:
+            print("HF API Error: HF_INFERENCE_API_URL is not configured in the environment")
+            return []
+            
         headers = {}
         if token := os.getenv("HF_TOKEN"):
             headers["Authorization"] = f"Bearer {token}"

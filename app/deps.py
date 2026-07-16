@@ -198,7 +198,6 @@ def active_warehouse_id(user) -> Optional[str]:
     same way here, via the single active warehouse on the token.
     """
     wid = getattr(user, "warehouse_id", None)
-    # Default to Colombo warehouse if none is specified in token/profile
     if not wid:
-        return os.getenv("DEFAULT_WAREHOUSE_ID", "c537c281-b6ad-4842-94ec-e937be0083e5")
+        wid = os.getenv("DEFAULT_WAREHOUSE_ID")
     return str(wid) if wid else None

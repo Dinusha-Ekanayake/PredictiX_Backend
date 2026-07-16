@@ -58,7 +58,7 @@ def split_by_vehicle(df: pd.DataFrame, test_frac: float, seed: int):
 
 
 def summarise(df: pd.DataFrame, name: str) -> None:
-    print(f"\n── {name}: {len(df):,} snapshots | {df['vehicle_id'].nunique():,} vehicles ──")
+    print(f"\n--- {name}: {len(df):,} snapshots | {df['vehicle_id'].nunique():,} vehicles ---")
     print(f"{'component':<11s} {'events':>8s} {'event_rate':>11s} "
           f"{'med_dur_evt':>12s} {'med_dur_cens':>13s}")
     for comp in C.COMPONENTS:
