@@ -1,20 +1,52 @@
 """
 app/routers/asset_reports.py
+
 Routes:
   POST /asset-reports/{asset_id}  — generate real PDF report
   GET  /asset-reports/dummy/pdf   — dummy PDF for styling test
+
+  + Merged in:
+  POST /reports/render-pdf        — HTML → PDF rendering (Playwright)
+  CRUD /reports                   — Report management
+
+NOTE: this file now defines TWO router objects — `router` (/asset-reports)
+and `reports_router` (/reports). main.py must import and register BOTH:
+
+    from .routers.asset_reports import router as asset_reports_router, reports_router
+    ...
+    app.include_router(asset_reports_router)
+    app.include_router(reports_router)
+
+The standalone app/routers/reports.py file is now redundant (its CRUD routes
+are duplicated here) — main.py must NOT also import/register that file's
+router, or /reports/* would have two competing route definitions.
 """
 
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse
-from fastapi.background import BackgroundTasks
-from app.services.report_service import ReportService
-from app.services.pdf_render import PDFRenderService
-from app.deps import require_user
+from __future__ import annotations
+
 import uuid
 import os
 import traceback
+import logging
 
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse, Response
+from fastapi.background import BackgroundTasks
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+
+# Existing imports (UNCHANGED)
+from app.services.report_service import ReportService
+from app.services.pdf_render import PDFRenderService
+from app.deps import get_db, require_user, require_admin
+from app.models import Asset, Profile, Report, Ticket, Warehouse
+from app.schemas.report import ReportCreate, ReportUpdate, ReportOut
+
+log = logging.getLogger("predictix.reports")
+
+# ════════════════════════════════════════════════════════════════════
+# EXISTING ROUTER (UNCHANGED) → /asset-reports
+# ════════════════════════════════════════════════════════════════════
 router = APIRouter(
     prefix="/asset-reports",
     tags=["Asset Reports"],
@@ -125,3 +157,152 @@ def generate_dummy_pdf(background_tasks: BackgroundTasks):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ════════════════════════════════════════════════════════════════════
+# MERGED-IN ROUTER → /reports (CRUD + PDF rendering)
+# ════════════════════════════════════════════════════════════════════
+reports_router = APIRouter(
+    prefix="/reports",
+    tags=["Reports"],
+    dependencies=[Depends(require_user)],
+)
+
+@reports_router.post("/", response_model=ReportOut)
+def create_report(payload: ReportCreate, db: Session = Depends(get_db)):
+    if payload.asset_id and not db.query(Asset).filter(Asset.id == payload.asset_id).first():
+        raise HTTPException(status_code=404, detail="Asset not found")
+    if payload.warehouse_id and not db.query(Warehouse).filter(Warehouse.id == payload.warehouse_id).first():
+        raise HTTPException(status_code=404, detail="Warehouse not found")
+    if payload.ticket_id and not db.query(Ticket).filter(Ticket.id == payload.ticket_id).first():
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    if payload.generated_by and not db.query(Profile).filter(Profile.id == payload.generated_by).first():
+        raise HTTPException(status_code=404, detail="User not found")
+
+    obj = Report(**payload.model_dump())
+    db.add(obj)
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+@reports_router.get("/", response_model=list[ReportOut])
+def list_reports(
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    return db.query(Report).order_by(Report.created_at.desc()).offset(offset).limit(limit).all()
+
+
+@reports_router.get("/{report_id}", response_model=ReportOut)
+def get_report(report_id: str, db: Session = Depends(get_db)):
+    obj = db.query(Report).filter(Report.id == report_id).first()
+    if not obj:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return obj
+
+
+@reports_router.put("/{report_id}", response_model=ReportOut)
+def update_report(report_id: str, payload: ReportUpdate, db: Session = Depends(get_db)):
+    obj = db.query(Report).filter(Report.id == report_id).first()
+    if not obj:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    for key, value in payload.model_dump(exclude_unset=True).items():
+        setattr(obj, key, value)
+
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+@reports_router.delete("/{report_id}", dependencies=[Depends(require_admin)])
+def delete_report(report_id: str, db: Session = Depends(get_db)):
+    obj = db.query(Report).filter(Report.id == report_id).first()
+    if not obj:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    db.delete(obj)
+    db.commit()
+    return {"message": "Report deleted"}
+
+
+# ── PDF rendering — server-side HTML → PDF via headless Chromium ────────────
+#
+# Why this exists: the frontend used to call window.print() on a hidden
+# iframe, which always shows Chrome/Edge's own print header/footer (page
+# title, URL, date) — a browser-level feature with no CSS/JS override. The
+# only way to guarantee it never appears is to never enter the browser's
+# print pipeline at all.
+#
+# Setup: pip install playwright && playwright install --with-deps chromium
+
+class RenderPdfRequest(BaseModel):
+    html: str = Field(..., description="Full HTML document string to render (as produced by assetPdfExport.ts's generateAssetReportHtml()).")
+    filename: str = Field(default="report.pdf", description="Suggested download filename.")
+
+
+# Repeating footer — rendered by Chromium on every physical page. Playwright's
+# header/footer templates run in an isolated context with no access to our
+# page's own <style>, so all styling here must be inline.
+_FOOTER_TEMPLATE = """
+<div style="width:100%; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;
+            font-size:7.5px; color:#6b7280; display:flex; justify-content:space-between;
+            padding:0 13mm; box-sizing:border-box;">
+  <span>PredictiX AI Platform &nbsp;&middot;&nbsp; Asset Performance Report &nbsp;&middot;&nbsp; Confidential &nbsp;&middot;&nbsp; &copy; Predictix 2026</span>
+  <span>Page <span class="pageNumber"></span> of <span class="totalPages"></span></span>
+</div>
+"""
+
+# Empty header — display_header_footer must be True for the footer template
+# to render at all, but we don't want Chromium's default header content
+# (title/date/url), so we supply a blank one explicitly.
+_HEADER_TEMPLATE = "<span></span>"
+
+
+@reports_router.post("/render-pdf")
+async def render_pdf(payload: RenderPdfRequest) -> Response:
+    """Render the given HTML to a PDF and return it as a binary download."""
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="PDF rendering is not available on this server (playwright not installed).",
+        ) from exc
+
+    if not payload.html or len(payload.html) < 50:
+        raise HTTPException(status_code=400, detail="html payload is empty or too short")
+
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            try:
+                page = await browser.new_page()
+                await page.set_content(payload.html, wait_until="networkidle")
+                pdf_bytes = await page.pdf(
+                    format="A4",
+                    print_background=True,
+                    display_header_footer=True,
+                    header_template=_HEADER_TEMPLATE,
+                    footer_template=_FOOTER_TEMPLATE,
+                    margin={"top": "10mm", "bottom": "18mm", "left": "13mm", "right": "13mm"},
+                )
+            finally:
+                await browser.close()
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.exception("PDF render failed")
+        raise HTTPException(status_code=500, detail=f"PDF render failed: {exc}") from exc
+
+    safe_name = payload.filename.replace('"', "").strip() or "report.pdf"
+    if not safe_name.lower().endswith(".pdf"):
+        safe_name += ".pdf"
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+    )

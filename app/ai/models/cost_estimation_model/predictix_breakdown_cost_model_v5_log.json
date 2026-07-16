@@ -1,0 +1,121 @@
+{
+  "version": "breakdown-cost-v5.0",
+  "predictor": "CatBoost",
+  "target": "maintenance_cost_lkr_next_30d",
+  "dataset": "v11 filtered (maintenance_required=1)",
+  "train_rows": 19580,
+  "val_rows": 4217,
+  "test_rows": 4217,
+  "test_metrics": {
+    "XGBoost": {
+      "MAE": 12947.643,
+      "RMSE": 35561.9726,
+      "R2": 0.8115,
+      "MedAE": 5033.9533,
+      "MAPE%": 16.0693
+    },
+    "LightGBM": {
+      "MAE": 14873.8825,
+      "RMSE": 45373.4819,
+      "R2": 0.6931,
+      "MedAE": 5089.1674,
+      "MAPE%": 16.7494
+    },
+    "CatBoost": {
+      "MAE": 13026.4156,
+      "RMSE": 34882.9194,
+      "R2": 0.8186,
+      "MedAE": 5025.2886,
+      "MAPE%": 16.3688
+    }
+  },
+  "picp_calibrated": 0.8122,
+  "conformal_q_hat": 871.8,
+  "fleet_mean_lkr": 51870.86,
+  "success": {
+    "all_pass": true
+  },
+  "top15_shap": [
+    {
+      "rank": 1,
+      "feature": "svc_cost_te",
+      "mean_abs_shap": 0.575
+    },
+    {
+      "rank": 2,
+      "feature": "fuel_price_lkr_per_l",
+      "mean_abs_shap": 0.243
+    },
+    {
+      "rank": 3,
+      "feature": "service_provider_type",
+      "mean_abs_shap": 0.1588
+    },
+    {
+      "rank": 4,
+      "feature": "maintenance_priority",
+      "mean_abs_shap": 0.0548
+    },
+    {
+      "rank": 5,
+      "feature": "service_vehicle",
+      "mean_abs_shap": 0.041
+    },
+    {
+      "rank": 6,
+      "feature": "fuel_type",
+      "mean_abs_shap": 0.0381
+    },
+    {
+      "rank": 7,
+      "feature": "odometer_km",
+      "mean_abs_shap": 0.0316
+    },
+    {
+      "rank": 8,
+      "feature": "vehicle_age_years",
+      "mean_abs_shap": 0.0247
+    },
+    {
+      "rank": 9,
+      "feature": "manufacture_year",
+      "mean_abs_shap": 0.0212
+    },
+    {
+      "rank": 10,
+      "feature": "ambient_temp_avg_c",
+      "mean_abs_shap": 0.0093
+    },
+    {
+      "rank": 11,
+      "feature": "vehicle_type",
+      "mean_abs_shap": 0.007
+    },
+    {
+      "rank": 12,
+      "feature": "payload_capacity_kg",
+      "mean_abs_shap": 0.006
+    },
+    {
+      "rank": 13,
+      "feature": "cargo_type",
+      "mean_abs_shap": 0.0053
+    },
+    {
+      "rank": 14,
+      "feature": "days_since_last_service",
+      "mean_abs_shap": 0.0048
+    },
+    {
+      "rank": 15,
+      "feature": "vehicle_role",
+      "mean_abs_shap": 0.0045
+    }
+  ],
+  "v4_to_v5_changes": [
+    "Target normalized by fuel_price_lkr_per_l before modeling (multiplicative cost-inflation signal)",
+    "K-fold target-encoded service_vehicle feature (svc_cost_te) added, smoothing=5",
+    "XGBoost added to the bake-off; winner selected by validation R2",
+    "Hyperparameters retuned to shallower trees (depth 5), which generalized best on validation"
+  ]
+}

@@ -223,15 +223,83 @@ def _build_feature_dict(asset: Asset, reading, snapshot_date: date | None = None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Breakdown cost model input builder
+# Converts the feature dict (PDM-shape) into the cost model's expected input.
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _build_cost_input_from_fd(asset: Asset, fd: dict[str, Any]) -> dict[str, Any]:
+    """Build raw_input dict for predict_breakdown_cost() from an asset ORM
+    object and the already-built PDM feature dict.
+
+    Uses the feature dict (which already has sensor fields resolved) rather
+    than hitting the DB again for a MaintenanceEvent.
+    """
+    return {
+        # Identity
+        "vehicle_type"                    : str(asset.vehicle_type or ""),
+        "vehicle_role"                    : str(asset.vehicle_role or "__missing__"),
+        "make_model"                      : str(asset.make_model or "__missing__"),
+        "fuel_type"                       : str(asset.fuel_type or "__missing__"),
+        "transmission"                    : str(asset.transmission or "__missing__"),
+        "manufacture_year"                : _to_int(asset.manufacture_year, 2015),
+        # Usage
+        "vehicle_age_years"               : _to_float(asset.vehicle_age_years),
+        "payload_capacity_kg"             : _to_float(asset.payload_capacity_kg),
+        "odometer_km"                     : _to_float(fd.get("odometer_km", 0)),
+        "engine_hours_total"              : _to_float(fd.get("engine_hours_total", 0)),
+        "lifetime_service_count"          : _to_int(asset.lifetime_service_count),
+        "lifetime_breakdown_count"        : _to_int(asset.lifetime_breakdown_count),
+        # Health signals (from sensor reading via fd)
+        "oil_life_pct"                    : _to_float(fd.get("oil_life_pct", 50)),
+        "brake_health_pct"                : _to_float(fd.get("brake_health_pct", 50)),
+        "tire_health_pct"                 : _to_float(fd.get("tire_health_pct", 50)),
+        "battery_health_pct"              : _to_float(fd.get("battery_health_pct", 50)),
+        "hydraulic_health_pct"            : _to_float(fd.get("hydraulic_health_pct", 50)),
+        "active_fault_code_count"         : _to_int(fd.get("active_fault_code_count", 0)),
+        "sensor_fault_flag"               : int(bool(fd.get("sensor_fault_flag", False))),
+        # Operational
+        "fuel_price_lkr_per_l"            : _to_float(fd.get("fuel_price_lkr_per_l", 310.0)),
+        "downtime_hours_last_90d"         : _to_float(fd.get("downtime_hours_last_90d", 0)),
+        "payload_utilization_pct"         : _to_float(fd.get("payload_utilization_pct", 50)),
+        "engine_hours_since_last_service" : _to_float(fd.get("engine_hours_since_last_service", 0)),
+        "days_since_last_service"         : _to_int(fd.get("days_since_last_service", 0)),
+        "mileage_since_last_service_km"   : _to_float(fd.get("mileage_since_last_service_km", 0)),
+        "avg_payload_kg"                  : _to_float(fd.get("avg_payload_kg", 0)),
+        "overload_events_30d"             : _to_int(fd.get("overload_events_30d", 0)),
+        "distance_last_30d_km"            : _to_float(fd.get("distance_last_30d_km", 0)),
+        "operating_hours_last_30d"        : _to_float(fd.get("operating_hours_last_30d", 0)),
+        "idle_hours_last_30d"             : _to_float(fd.get("idle_hours_last_30d", 0)),
+        "trip_count_30d"                  : _to_int(fd.get("trip_count_30d", 0)),
+        "avg_trip_distance_km"            : _to_float(fd.get("avg_trip_distance_km", 0)),
+        "start_stop_burden_30d"           : _to_int(fd.get("start_stop_burden_30d", 0)),
+        "rough_road_pct"                  : _to_float(fd.get("rough_road_pct", 20)),
+        "urban_route_pct"                 : _to_float(fd.get("urban_route_pct", 50)),
+        "port_route_pct"                  : _to_float(fd.get("port_route_pct", 0)),
+        "fuel_rate_lph"                   : _to_float(fd.get("fuel_rate_lph", 0)),
+        "fuel_efficiency_km_per_l"        : _to_float(fd.get("fuel_efficiency_km_per_l", 0)),
+        "engine_temp_avg_c"               : _to_float(fd.get("engine_temp_avg_c", 85)),
+        "coolant_temp_max_c"              : _to_float(fd.get("coolant_temp_max_c", 95)),
+        "vibration_rms_mm_s"              : _to_float(fd.get("vibration_rms_mm_s", 2.0)),
+        "tire_pressure_psi"               : _to_float(fd.get("tire_pressure_psi", 72)),
+        "battery_voltage_v"               : _to_float(fd.get("battery_voltage_v", 12.5)),
+        "ambient_temp_avg_c"              : _to_float(fd.get("ambient_temp_avg_c", 30)),
+        "ambient_humidity_avg_pct"        : _to_float(fd.get("ambient_humidity_avg_pct", 75)),
+        "rainfall_mm_30d"                 : _to_float(fd.get("rainfall_mm_30d", 100)),
+        "route_type"                      : str(fd.get("route_type") or "__missing__"),
+        "cargo_type"                      : str(fd.get("cargo_type") or "__missing__"),
+        "operating_shift"                 : str(fd.get("operating_shift") or "__missing__"),
+        "maintenance_priority"            : str(asset.maintenance_priority or "Medium"),
+        "service_provider_type"           : str(asset.service_provider_type or "in_house"),
+        # Service type from sensor reading
+        "last_service_type"               : str(fd.get("last_service_type") or "oil_service"),
+        "next_service_type"               : None,  # not available at batch time
+        "major_component_replaced"        : str(fd.get("major_component_replaced") or "none"),
+        "parts_replaced_last_service"     : str(fd.get("parts_replaced_last_service") or ""),
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Vectorized model inference — runs on a DataFrame of N assets at once
-#
-# clf_model / reg_model are app.ai.services.lgb_model_adapter.LgbModelBundle
-# instances (loaded once in main.py._load_pdm_models). clf_features /
-# clf_categorical_cols / reg_features / reg_categorical_cols are still passed
-# through from main.py for backward compatibility with callers, but the
-# bundle's own .feature_names / .categorical_cols are authoritative — they
-# come straight from the booster file, so they can't drift out of sync with
-# what the model was actually trained on.
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _run_classifier_batch(
@@ -241,15 +309,7 @@ def _run_classifier_batch(
     clf_threshold: float,
     clf_categorical_cols: list[str],
 ) -> list[tuple[float, bool]]:
-    """Vectorized classifier inference — one predict() call for all assets.
-
-    Returns a list of (failure_probability, maintenance_required), same order
-    as feature_dicts. Falls back to a conservative default per-row if the
-    batch call fails (e.g. an unseen category), mirroring the previous
-    single-row fallback behaviour.
-    """
     df = clf_model.build_frame(feature_dicts)
-
     try:
         probas = clf_model.predict_proba_positive(df)
         return [
@@ -259,7 +319,6 @@ def _run_classifier_batch(
     except Exception as e:
         log.warning("Batched LightGBM classification failed: %s. Falling back to per-row.", e)
 
-    # Fallback: try row-by-row so one bad asset doesn't blank out the whole batch.
     results = []
     for i in range(len(df)):
         try:
@@ -277,17 +336,10 @@ def _run_regressor_batch(
     reg_categorical_cols: list[str],
     snapshot_date: date,
 ) -> list[tuple[int, date, list[dict], bool]]:
-    """Vectorized regressor inference — one predict() + one SHAP call for all assets.
-
-    Returns a list of (days_until_maintenance, predicted_date, top_explanations,
-    horizon_saturated).
-    """
     df = reg_model.build_frame(feature_dicts)
-
     try:
         raw_days = reg_model.predict(df)
         shap_rows = reg_model.shap_top_factors(df, top_n=5)
-
         results = []
         for i in range(len(df)):
             raw = float(raw_days[i])
@@ -299,7 +351,6 @@ def _run_regressor_batch(
     except Exception as e:
         log.warning("Batched LightGBM regression/SHAP failed: %s. Falling back to plain predict.", e)
 
-    # Fallback: plain predict, no SHAP.
     raw_days = reg_model.predict(df)
     results = []
     for i in range(len(df)):
@@ -339,39 +390,30 @@ def _compute_health_score(fd: dict, failure_probability: float, days_until: floa
 def _compute_contributing_factors(fd: dict, failure_probability: float) -> list[dict]:
     """Mirror the health score contributing factors from prediction_service.py."""
     factors = []
-
-    # Positive contributions (weighted component health)
     factors.append({"feature": "brake_health_pct", "impact": round(_to_float(fd.get("brake_health_pct")) * 0.22, 4)})
     factors.append({"feature": "tire_health_pct", "impact": round(_to_float(fd.get("tire_health_pct")) * 0.18, 4)})
     factors.append({"feature": "oil_life_pct", "impact": round(_to_float(fd.get("oil_life_pct")) * 0.18, 4)})
     factors.append({"feature": "battery_health_pct", "impact": round(_to_float(fd.get("battery_health_pct")) * 0.15, 4)})
     factors.append({"feature": "hydraulic_health_pct", "impact": round(_to_float(fd.get("hydraulic_health_pct")) * 0.12, 4)})
 
-    # Penalties
     engine_temp = _to_float(fd.get("engine_temp_avg_c"))
     if engine_temp > 95:
         factors.append({"feature": "engine_temp_avg_c", "impact": -round(min((engine_temp - 95) * 0.8, 10), 4)})
-
     coolant_temp = _to_float(fd.get("coolant_temp_max_c"))
     if coolant_temp > 105:
         factors.append({"feature": "coolant_temp_max_c", "impact": -round(min((coolant_temp - 105) * 1.0, 10), 4)})
-
     vibration = _to_float(fd.get("vibration_rms_mm_s"))
     if vibration > 4.5:
         factors.append({"feature": "vibration_rms_mm_s", "impact": -round(min((vibration - 4.5) * 3.5, 15), 4)})
-
     fault_codes = _to_int(fd.get("active_fault_code_count"))
     if fault_codes > 0:
         factors.append({"feature": "active_fault_code_count", "impact": -round(min(fault_codes * 2.5, 12), 4)})
-
     days_svc = _to_int(fd.get("days_since_last_service"))
     if days_svc > 60:
         factors.append({"feature": "days_since_last_service", "impact": -round(min((days_svc - 60) * 0.08, 10), 4)})
-
     overloads = _to_int(fd.get("overload_events_30d"))
     if overloads > 0:
         factors.append({"feature": "overload_events_30d", "impact": -round(min(overloads * 1.8, 8), 4)})
-
     downtime = _to_float(fd.get("downtime_hours_last_90d"))
     if downtime > 0:
         factors.append({"feature": "downtime_hours_last_90d", "impact": -round(min(downtime * 0.5, 8), 4)})
@@ -379,12 +421,42 @@ def _compute_contributing_factors(fd: dict, failure_probability: float) -> list[
     return sorted(factors, key=lambda x: abs(x["impact"]), reverse=True)[:8]
 
 
-def _estimate_cost(fd: dict, failure_probability: float, days_until: float) -> tuple[float, float, float]:
+def _estimate_cost(
+    fd: dict,
+    failure_probability: float,
+    days_until: float,
+    asset: Asset | None = None,
+    breakdown_cost_bundle: dict | None = None,
+) -> tuple[float, float, float]:
+    """Estimate maintenance cost.
+
+    If breakdown_cost_bundle is provided, uses the v4 XGBoost model for an
+    accurate data-driven estimate. Falls back to the heuristic formula if the
+    model is unavailable or raises an exception — so existing behaviour is
+    100% preserved when the bundle is not loaded.
+    """
+    if breakdown_cost_bundle is not None and asset is not None:
+        try:
+            from app.ai.models.cost_estimation_model.breakdown_cost_model import predict_breakdown_cost
+            cost_input = _build_cost_input_from_fd(asset, fd)
+            result = predict_breakdown_cost(cost_input, breakdown_cost_bundle, top_k=5)
+            estimated = result["predicted_cost_lkr"]
+            min_cost  = result["pi_80_lower_lkr"]
+            max_cost  = result["pi_80_upper_lkr"]
+            return round(estimated, 2), round(min_cost, 2), round(max_cost, 2)
+        except Exception as exc:
+            log.warning(
+                "_estimate_cost: breakdown cost model failed for asset %s, "
+                "falling back to heuristic: %s",
+                str(getattr(asset, "id", "?"))[:8], exc,
+            )
+
+    # ── Heuristic fallback (original formula — unchanged) ─────────────────────
     base = 15_000.0
-    vibration_factor = _to_float(fd.get("vibration_rms_mm_s")) * 1_200.0
-    fault_factor = _to_int(fd.get("active_fault_code_count")) * 2_500.0
-    downtime_factor = _to_float(fd.get("downtime_hours_last_90d")) * 300.0
-    urgency_factor = max(0.0, (30.0 - min(days_until, 30.0))) * 250.0
+    vibration_factor  = _to_float(fd.get("vibration_rms_mm_s")) * 1_200.0
+    fault_factor      = _to_int(fd.get("active_fault_code_count")) * 2_500.0
+    downtime_factor   = _to_float(fd.get("downtime_hours_last_90d")) * 300.0
+    urgency_factor    = max(0.0, (30.0 - min(days_until, 30.0))) * 250.0
     probability_factor = failure_probability * 22_000.0
 
     estimate = base + vibration_factor + fault_factor + downtime_factor + urgency_factor + probability_factor
@@ -408,16 +480,9 @@ def _compute_risk_level(failure_probability: float, days_until: float) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _fetch_latest_readings(db: Session, asset_ids: list[str]) -> dict[str, Any]:
-    """Fetch each asset's single latest SensorReading in ONE query.
-
-    Uses Postgres ``DISTINCT ON`` — one round-trip regardless of fleet size,
-    instead of one ``ORDER BY ... LIMIT 1`` query per asset.
-    """
     from app.models import SensorReading
-
     if not asset_ids:
         return {}
-
     rows = (
         db.query(SensorReading)
         .filter(SensorReading.asset_id.in_(asset_ids))
@@ -428,26 +493,12 @@ def _fetch_latest_readings(db: Session, asset_ids: list[str]) -> dict[str, Any]:
     return {str(r.asset_id): r for r in rows}
 
 
-# Postgres caps bind parameters per statement at 65535. Each row uses 16
-# params (18 columns minus the 2 generated via gen_random_uuid()/now()), so
-# this keeps every chunk far under the limit even as the fleet grows well
-# past today's ~1000 assets, while still upserting in a small, constant
-# number of round trips instead of one per asset.
 _UPSERT_CHUNK_SIZE = 500
 
 
 def _upsert_batch_predictions(db: Session, rows: list[dict]) -> None:
-    """Upsert every row in a handful of multi-row INSERT ... ON CONFLICT
-    statements (chunked — see ``_UPSERT_CHUNK_SIZE``).
-
-    Falls back to the previous per-row upsert only if a chunk's batched
-    statement itself fails (e.g. a single malformed row) — keeps behaviour
-    safe while normally paying for a small constant number of round trips
-    regardless of fleet size.
-    """
     if not rows:
         return
-
     for start in range(0, len(rows), _UPSERT_CHUNK_SIZE):
         _upsert_batch_predictions_chunk(db, rows[start:start + _UPSERT_CHUNK_SIZE])
 
@@ -473,12 +524,6 @@ _HISTORY_COLUMNS = [
 
 
 def _log_prediction_history(db: Session, rows: list[dict]) -> None:
-    """Append one row per asset to pdm_prediction_history — INSERT only,
-    never UPDATE/DELETE. Failures here are logged but never allowed to
-    break the main prediction upsert; this is a secondary audit trail, not
-    the system of record for "what's the latest prediction" (that's still
-    pdm_batch_predictions).
-    """
     if not rows:
         return
     try:
@@ -557,11 +602,6 @@ def _upsert_batch_predictions_chunk(db: Session, rows: list[dict]) -> None:
 
 
 def _upsert_single(db: Session, asset_id: str, payload: dict) -> None:
-    """Insert or update (upsert) one row in pdm_batch_predictions.
-
-    Kept for the single-asset trigger path and as the fallback if the
-    batched multi-row upsert fails.
-    """
     columns_sql = ", ".join(_UPSERT_COLUMNS)
     values_sql = ", ".join(
         f"CAST(:{c} AS jsonb)" if c in _JSONB_COLUMNS else f":{c}" for c in _UPSERT_COLUMNS
@@ -597,15 +637,13 @@ def run_batch_for_asset(
     reg_model,
     reg_features: list[str],
     reg_categorical_cols: list[str] = [],
+    breakdown_cost_bundle: dict | None = None,
 ) -> dict:
     """Run the full PDM pipeline for a single asset and upsert the result.
 
-    Used by the manual single-asset trigger endpoint. Fleet-wide runs use
-    ``run_batch_for_all_assets`` instead, which batches every asset together
-    for one query + one model call + one upsert rather than calling this
-    function in a loop.
-
-    Returns a summary dict with the prediction outcome (or error info).
+    breakdown_cost_bundle is optional — when supplied, uses the v4 XGBoost
+    model for cost estimation. When None, falls back to the heuristic formula
+    (original behaviour, fully preserved).
     """
     start_ms = int(time.time() * 1000)
     asset_id_str = str(asset.id)
@@ -637,7 +675,11 @@ def run_batch_for_asset(
         )
         health_score, health_status = _compute_health_score(fd, failure_probability, days_until)
         contributing_factors = _compute_contributing_factors(fd, failure_probability)
-        estimated_cost, min_cost, max_cost = _estimate_cost(fd, failure_probability, days_until)
+        estimated_cost, min_cost, max_cost = _estimate_cost(
+            fd, failure_probability, days_until,
+            asset=asset,
+            breakdown_cost_bundle=breakdown_cost_bundle,
+        )
         risk_level = _compute_risk_level(failure_probability, days_until)
         decision = build_decision(
             failure_probability=failure_probability,
@@ -736,16 +778,13 @@ def run_batch_for_all_assets(
     reg_model,
     reg_features: list[str],
     reg_categorical_cols: list[str] = [],
+    breakdown_cost_bundle: dict | None = None,
 ) -> dict:
     """Run the full PDM batch for every active asset.
 
-    Called by the APScheduler on its configured interval and by the manual
-    trigger endpoint. Batches the whole fleet: one query for all latest
-    sensor readings, one vectorized classifier call, one vectorized
-    regressor+SHAP call, and one multi-row upsert — instead of looping
-    per-asset queries/writes.
-
-    Returns a summary dict with counts.
+    breakdown_cost_bundle is optional — when supplied, uses the v4 XGBoost
+    model for cost estimation instead of the heuristic formula.
+    Fully backward-compatible: passing None preserves the original behaviour.
     """
     if clf_model is None or reg_model is None:
         log.warning("[batch] Models not loaded — skipping batch run")
@@ -754,11 +793,6 @@ def run_batch_for_all_assets(
     run_start = time.time()
     log.info("[batch] Starting PDM batch run…")
 
-    # Score every asset still in the fleet — not just "active" ones. A
-    # critical or under_maintenance asset needs fresh predictions more than
-    # an active one, not less; excluding them silently stops predictions
-    # the moment an asset needs them most. Only decommissioned assets (fully
-    # retired from the fleet) are skipped.
     assets = (
         db.query(Asset)
         .filter(cast(Asset.status, String) != "decommissioned")
@@ -788,8 +822,6 @@ def run_batch_for_all_assets(
     error_count = 0
     upsert_rows: list[dict] = []
 
-    # Assets with a sensor reading go through the vectorized model path;
-    # assets without one are recorded as "no_data" without touching the models.
     scored_assets: list[Asset] = []
     feature_dicts: list[dict[str, Any]] = []
 
@@ -841,7 +873,11 @@ def run_batch_for_all_assets(
                 asset_id_str = str(asset.id)
                 health_score, health_status = _compute_health_score(fd, failure_probability, days_until)
                 contributing_factors = _compute_contributing_factors(fd, failure_probability)
-                estimated_cost, min_cost, max_cost = _estimate_cost(fd, failure_probability, days_until)
+                estimated_cost, min_cost, max_cost = _estimate_cost(
+                    fd, failure_probability, days_until,
+                    asset=asset,
+                    breakdown_cost_bundle=breakdown_cost_bundle,
+                )
                 risk_level = _compute_risk_level(failure_probability, days_until)
                 decision = build_decision(
                     failure_probability=failure_probability,
@@ -887,9 +923,6 @@ def run_batch_for_all_assets(
                     failure_probability, days_until, health_score, estimated_cost, decision["tier"],
                 )
         except Exception as exc:  # noqa: BLE001
-            # Vectorized inference failed for the whole batch — fall back to the
-            # (slower but safe) per-asset path so a single scheduler run still
-            # produces results instead of silently failing every asset.
             error_msg = str(exc)[:500]
             log.exception("[batch] vectorized inference failed, falling back to per-asset: %s", error_msg)
             for asset in scored_assets:
@@ -903,6 +936,7 @@ def run_batch_for_all_assets(
                     reg_model=reg_model,
                     reg_features=reg_features,
                     reg_categorical_cols=reg_categorical_cols,
+                    breakdown_cost_bundle=breakdown_cost_bundle,
                 )
                 s = result.get("status")
                 if s == "ok":
@@ -911,8 +945,7 @@ def run_batch_for_all_assets(
                     no_data_count += 1
                 else:
                     error_count += 1
-            # These assets already got their own commit inside run_batch_for_asset.
-            feature_dicts = []  # signal: don't upsert them again below
+            feature_dicts = []
             upsert_rows = [r for r in upsert_rows if r["asset_id"] not in {str(a.id) for a in scored_assets}]
 
     _upsert_batch_predictions(db, upsert_rows)
