@@ -128,7 +128,7 @@ def _build_mock_profile(*, user_id: str, email: str, role: str, warehouse_id: Op
             self.full_name = display_name
             self.phone = None
             self.status = "active"
-            self.warehouse_id = warehouse_id
+            self.warehouse_id = warehouse_id or os.getenv("DEFAULT_WAREHOUSE_ID")
             self.department_id = department_id
             self.meta = {}
             self.employee_id = f"EMP-{user_id[:8]}"
