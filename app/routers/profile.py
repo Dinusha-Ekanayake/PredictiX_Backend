@@ -187,11 +187,16 @@ def update_my_profile(
         try:
             db.commit()
             db.refresh(current_user)
-            NotificationService.notify_on_profile_update(db, str(current_user.id))
         except Exception:
             db.rollback()
             log.exception("Profile update failed")
             raise HTTPException(status_code=500, detail="Profile update failed")
+
+        # Best-effort admin notification email via Brevo — never blocks the save.
+        try:
+            NotificationService.notify_on_profile_update(db, str(current_user.id))
+        except Exception:
+            log.exception("Profile-update notification failed (non-fatal)")
 
     return _profile_to_response(current_user, db)
 

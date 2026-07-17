@@ -9,7 +9,6 @@ import os
 # (loaded via joblib/pickle, not the Hub) are used. These are hard defaults;
 # they can still be overridden by an explicit environment value if ever needed.
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 import json
 import logging
@@ -30,6 +29,7 @@ from .routers.asset_assignments import router as asset_assignments_router
 from .routers.asset_documents import router as asset_documents_router
 from .routers.asset_status_history import router as asset_status_history_router
 from .routers.asset_summaries import router as asset_summaries_router
+from .routers.ticket_summaries import router as ticket_summaries_router
 from .routers.asset_component_rul import router as asset_component_rul_router
 from .routers.assets import router as assets_router
 from .routers.auth import router as auth_router
@@ -42,7 +42,6 @@ from .routers.prediction_explanations import router as prediction_explanations_r
 from .routers.predictions import router as predictions_router
 from .routers.profile import router as profiles_router
 from .routers.report_sources import router as report_sources_router
-from .routers.reports import router as reports_router
 from .routers.sensor_readings import router as sensor_readings_router
 from .routers.ticket_attachments import router as ticket_attachments_router
 from .routers.ticket_comments import router as ticket_comments_router
@@ -55,7 +54,7 @@ from .routers.warehouse_dashboard import warehouse_dashboard_router
 from .routers.warehouses import router as warehouses_router
 from .routers.batch_predictions import router as batch_predictions_router
 from .routers.websockets import router as websockets_router
-from .routers.asset_reports import router as asset_reports_router
+from .routers.asset_reports import router as asset_reports_router, reports_router
 from .routers.warmup import router as warmup_router
 
 # Sharada — user-role self-service profile (/user-profile)
@@ -66,9 +65,12 @@ from .routers.user_tickets import router as user_tickets_router
 from .routers.survival_predictions import router as survival_predictions_router
 
 # ─── ML warmup ────────────────────────────────────────────────────────────────
-from app.ai.services.asset_summary_service import warmup_asset_summary_model
+# Asset & ticket summaries run on HF Spaces (online) — nothing to warm up here.
 from app.ai.services.ticket_categorization_service import warmup_ticket_categorizer
 from app.ai.services.ticket_priority_service import warmup_ticket_priority
+
+# ─── Cost model ───────────────────────────────────────────────────────────────
+from app.ai.models.cost_estimation_model.breakdown_cost_model import load_breakdown_bundle
 
 log = logging.getLogger("predictix")
 
@@ -95,6 +97,9 @@ clf_categorical_cols: list = []
 reg_model = None            # LgbModelBundle
 reg_features: list = []
 reg_categorical_cols: list = []
+
+# ─── Cost model global ────────────────────────────────────────────────────────
+breakdown_cost_bundle: dict | None = None
 
 scheduler: BackgroundScheduler | None = None
 _model_load_lock = __import__('threading').Lock()
@@ -219,6 +224,7 @@ def _run_scheduled_batch() -> None:
             reg_model=reg_model,
             reg_features=reg_features,
             reg_categorical_cols=reg_categorical_cols,
+            cost_bundle=breakdown_cost_bundle,
         )
     except Exception:
         log.exception("Batch prediction run failed")
@@ -238,7 +244,6 @@ def _run_service_reminder_job() -> None:
         log.exception("Service reminder sweep failed")
     finally:
         db.close()
-
 
 
 def _run_startup_batch() -> None:
@@ -273,9 +278,20 @@ def _ping_hf_models() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     """Load PdM models on startup; start batch scheduler; optionally warm HF models."""
-    global scheduler
+    global scheduler, cost_bundle
 
     _load_pdm_models()
+
+    # ─── Breakdown cost estimation model (v5 — CatBoost) ─────────────────────
+    global breakdown_cost_bundle
+    try:
+        breakdown_cost_bundle = load_breakdown_bundle()
+        log.info("Breakdown cost model bundle loaded successfully.")
+    except Exception as exc:
+        log.error(
+            "Breakdown cost model loading FAILED — /predictions/cost/* will "
+            "503 until this is fixed: %s", exc, exc_info=True,
+        )
 
     if os.getenv("DISABLE_HF_MODELS", "false").lower() != "true":
         try:
@@ -290,11 +306,7 @@ async def lifespan(_: FastAPI):
         except Exception as exc:
             log.warning("Ticket priority warmup failed (non-fatal): %s", exc)
 
-        try:
-            warmup_asset_summary_model()
-            log.info("Asset summary model warmed up.")
-        except Exception as exc:
-            log.warning("Asset summary warmup failed (non-fatal): %s", exc)
+        # Asset & ticket summaries run online on HF Spaces — no local warmup.
     else:
         log.info("HuggingFace models disabled (DISABLE_HF_MODELS=true). Skipping warmup.")
 
@@ -366,10 +378,6 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="PredictiX API", version="1.0", lifespan=lifespan)
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
-# Production origins are always allowed. Local dev origins are only added when
-# not running in production (ENV != "production"), so a deployed backend doesn't
-# advertise localhost. Add any extra origins (e.g. new Vercel preview URLs) via
-# the ALLOWED_ORIGINS env var (comma-separated).
 _prod_origins = [
     "https://predicti-x-frontend.vercel.app",
     "https://predicti-x-frontend-dinusha-ekanayakes-projects.vercel.app",
@@ -418,7 +426,6 @@ app.include_router(asset_assignments_router)
 app.include_router(asset_status_history_router)
 app.include_router(asset_documents_router)
 app.include_router(asset_summaries_router)
-app.include_router(asset_component_rul_router)
 app.include_router(maintenance_router)
 app.include_router(sensor_readings_router)
 
@@ -428,6 +435,8 @@ app.include_router(ticket_comments_router)
 app.include_router(ticket_attachments_router)
 app.include_router(ticket_status_history_router)
 app.include_router(user_tickets_router)
+app.include_router(ticket_summaries_router)
+app.include_router(asset_component_rul_router)
 
 # Predictions & ML
 app.include_router(predictions_router)
@@ -444,7 +453,7 @@ app.include_router(notifications_router)
 app.include_router(notification_preferences_router)
 app.include_router(reports_router)
 app.include_router(report_sources_router)
-app.include_router(asset_reports_router)          # Asset PDF report generation
+app.include_router(asset_reports_router)
 
 # Chatbot
 app.include_router(chatbot_router)
@@ -452,8 +461,7 @@ app.include_router(chatbot_router)
 # FAQs
 app.include_router(faqs_router)
 
-# Diagnostics — debug endpoints dump raw DB values, so they are OFF by default.
-# Enable only in a trusted environment by setting ENABLE_DEBUG_ROUTES=true.
+# Diagnostics
 if os.getenv("ENABLE_DEBUG_ROUTES", "false").strip().lower() == "true":
     app.include_router(db_debug_router)
     log.info("Debug routes enabled (ENABLE_DEBUG_ROUTES=true).")
@@ -461,7 +469,7 @@ if os.getenv("ENABLE_DEBUG_ROUTES", "false").strip().lower() == "true":
 # WebSockets
 app.include_router(websockets_router)
 
-# Public warmup ping (no auth — fired from the login page before any token exists)
+# Public warmup ping
 app.include_router(warmup_router)
 
 
@@ -472,6 +480,7 @@ def root():
         "models_loaded": all(
             x is not None for x in (clf_model, clf_features, reg_model, reg_features)
         ),
+        "cost_model_loaded": breakdown_cost_bundle is not None,
     }
 
 

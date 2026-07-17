@@ -1,0 +1,176 @@
+{
+  "component": "oil",
+  "duration_col": "duration_days",
+  "event_col": "event",
+  "numeric_cols": [
+    "vehicle_age_years",
+    "payload_capacity_kg",
+    "lifetime_service_count",
+    "lifetime_breakdown_count",
+    "odometer_km",
+    "engine_hours_total",
+    "vibration_rms_mm_s",
+    "engine_hours_since_last_service",
+    "days_since_last_service",
+    "mileage_since_last_service_km",
+    "active_fault_code_count",
+    "sensor_fault_flag",
+    "payload_utilization_pct",
+    "overload_events_30d",
+    "downtime_hours_last_90d",
+    "start_stop_burden_30d",
+    "engine_temp_avg_c",
+    "coolant_temp_max_c",
+    "ambient_temp_avg_c",
+    "ambient_humidity_avg_pct",
+    "rainfall_mm_30d",
+    "rough_road_pct",
+    "urban_route_pct",
+    "port_route_pct",
+    "oil_life_pct"
+  ],
+  "categorical_cols": [
+    "vehicle_type",
+    "vehicle_role"
+  ],
+  "health_col": "oil_life_pct",
+  "feature_cols": [
+    "vehicle_age_years",
+    "payload_capacity_kg",
+    "odometer_km",
+    "engine_hours_total",
+    "payload_utilization_pct",
+    "overload_events_30d",
+    "start_stop_burden_30d",
+    "rough_road_pct",
+    "urban_route_pct",
+    "port_route_pct",
+    "ambient_temp_avg_c",
+    "ambient_humidity_avg_pct",
+    "rainfall_mm_30d",
+    "engine_temp_avg_c",
+    "coolant_temp_max_c",
+    "vibration_rms_mm_s",
+    "oil_life_pct",
+    "days_since_last_service",
+    "mileage_since_last_service_km",
+    "engine_hours_since_last_service",
+    "active_fault_code_count",
+    "sensor_fault_flag",
+    "lifetime_service_count",
+    "lifetime_breakdown_count",
+    "downtime_hours_last_90d",
+    "vehicle_type_Forklift_2.5T",
+    "vehicle_type_Forklift_3.0T",
+    "vehicle_type_Heavy_Truck_16T",
+    "vehicle_type_Light_Truck_3.5T",
+    "vehicle_type_Medium_Truck_7T",
+    "vehicle_type_Mini_Truck_1T",
+    "vehicle_role_heavy_cargo_transport",
+    "vehicle_role_internal_material_handling",
+    "vehicle_role_last_mile_delivery",
+    "vehicle_role_regional_distribution"
+  ],
+  "scaler": {
+    "vehicle_age_years": [
+      5.191199674926794,
+      2.626374394701287
+    ],
+    "payload_capacity_kg": [
+      3368.828033694096,
+      2982.3848070644613
+    ],
+    "lifetime_service_count": [
+      18.215709291675804,
+      11.681164031572402
+    ],
+    "lifetime_breakdown_count": [
+      1.717121812154126,
+      1.7854278295113528
+    ],
+    "odometer_km": [
+      85935.11362082533,
+      98725.37703726109
+    ],
+    "engine_hours_total": [
+      10149.133559938598,
+      6889.518698307049
+    ],
+    "vibration_rms_mm_s": [
+      2.190144734975039,
+      0.679617333523212
+    ],
+    "engine_hours_since_last_service": [
+      399.10014318700735,
+      281.55612685548823
+    ],
+    "days_since_last_service": [
+      81.03018536912579,
+      58.15913687705243
+    ],
+    "mileage_since_last_service_km": [
+      3139.4224816501332,
+      3624.7288154162293
+    ],
+    "active_fault_code_count": [
+      1.4565085589711175,
+      1.5007710707053918
+    ],
+    "sensor_fault_flag": [
+      0.04051805317268869,
+      0.19717084099781051
+    ],
+    "payload_utilization_pct": [
+      63.527476425742705,
+      10.643585214053115
+    ],
+    "overload_events_30d": [
+      0.011442060860928006,
+      0.10635384386181264
+    ],
+    "downtime_hours_last_90d": [
+      12.518444034519678,
+      6.2983838237305045
+    ],
+    "start_stop_burden_30d": [
+      20.858193263760786,
+      9.979781238693276
+    ],
+    "engine_temp_avg_c": [
+      93.47720617639091,
+      2.3138487738650957
+    ],
+    "coolant_temp_max_c": [
+      101.00256704634873,
+      3.438315729542685
+    ],
+    "ambient_temp_avg_c": [
+      28.900915880858093,
+      0.8515330213076631
+    ],
+    "ambient_humidity_avg_pct": [
+      84.64145457359942,
+      4.750151588535154
+    ],
+    "rainfall_mm_30d": [
+      236.350472775119,
+      113.3004812497306
+    ],
+    "rough_road_pct": [
+      16.602956618206683,
+      4.230480406014044
+    ],
+    "urban_route_pct": [
+      49.721189097147864,
+      22.148631966762874
+    ],
+    "port_route_pct": [
+      13.562171540614802,
+      8.416044609303666
+    ],
+    "oil_life_pct": [
+      65.19026328349737,
+      16.66242082442929
+    ]
+  }
+}

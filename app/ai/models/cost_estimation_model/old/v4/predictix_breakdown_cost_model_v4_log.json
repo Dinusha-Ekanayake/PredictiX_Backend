@@ -1,0 +1,108 @@
+{
+  "version": "breakdown-cost-v4.0",
+  "predictor": "XGBoost",
+  "target": "maintenance_cost_lkr_next_30d",
+  "fleet_mean_lkr": 51870.86,
+  "test_metrics": {
+    "LightGBM": {
+      "MAE": 16687.8057,
+      "RMSE": 54045.3695,
+      "R\u00b2": 0.5646,
+      "MedAE": 5377.6402,
+      "MAPE%": 18.1175
+    },
+    "CatBoost": {
+      "MAE": 16459.2571,
+      "RMSE": 52414.5414,
+      "R\u00b2": 0.5905,
+      "MedAE": 5393.9364,
+      "MAPE%": 17.6953
+    },
+    "XGBoost": {
+      "MAE": 15459.0193,
+      "RMSE": 48964.3881,
+      "R\u00b2": 0.6426,
+      "MedAE": 5215.6289,
+      "MAPE%": 17.8249
+    }
+  },
+  "picp_calibrated": 0.7923,
+  "conformal_q_hat": 2301.16,
+  "top15_shap": [
+    {
+      "rank": 1,
+      "feature": "service_vehicle",
+      "mean_abs_shap": 0.5237
+    },
+    {
+      "rank": 2,
+      "feature": "fuel_price_lkr_per_l",
+      "mean_abs_shap": 0.1644
+    },
+    {
+      "rank": 3,
+      "feature": "service_provider_type",
+      "mean_abs_shap": 0.155
+    },
+    {
+      "rank": 4,
+      "feature": "oil_life_pct",
+      "mean_abs_shap": 0.0612
+    },
+    {
+      "rank": 5,
+      "feature": "maintenance_priority",
+      "mean_abs_shap": 0.0483
+    },
+    {
+      "rank": 6,
+      "feature": "odometer_km",
+      "mean_abs_shap": 0.0324
+    },
+    {
+      "rank": 7,
+      "feature": "payload_capacity_kg",
+      "mean_abs_shap": 0.0243
+    },
+    {
+      "rank": 8,
+      "feature": "payload_age",
+      "mean_abs_shap": 0.0241
+    },
+    {
+      "rank": 9,
+      "feature": "vehicle_type",
+      "mean_abs_shap": 0.0206
+    },
+    {
+      "rank": 10,
+      "feature": "manufacture_year",
+      "mean_abs_shap": 0.0186
+    },
+    {
+      "rank": 11,
+      "feature": "vehicle_age_years",
+      "mean_abs_shap": 0.0185
+    },
+    {
+      "rank": 12,
+      "feature": "make_model",
+      "mean_abs_shap": 0.0157
+    },
+    {
+      "rank": 13,
+      "feature": "engine_hours_total",
+      "mean_abs_shap": 0.0143
+    },
+    {
+      "rank": 14,
+      "feature": "hydraulic_health_pct",
+      "mean_abs_shap": 0.0091
+    },
+    {
+      "rank": 15,
+      "feature": "days_since_last_service",
+      "mean_abs_shap": 0.0075
+    }
+  ]
+}

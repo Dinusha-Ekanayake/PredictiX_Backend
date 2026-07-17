@@ -106,6 +106,8 @@ def _build_mock_profile(*, user_id: str, email: str, role: str, warehouse_id: Op
 
     department_id = None
     if db is not None:
+        from app.models import Warehouse
+        
         keyword_to_dept = {
             "transportation": "Transportation",
             "electrical": "Electrical",
@@ -119,6 +121,11 @@ def _build_mock_profile(*, user_id: str, email: str, role: str, warehouse_id: Op
         dept = db.query(Department).filter(Department.name == dept_name).first()
         if dept:
             department_id = dept.id
+            
+        if not warehouse_id:
+            first_wh = db.query(Warehouse).filter(Warehouse.is_active == True).first()
+            if first_wh:
+                warehouse_id = str(first_wh.id)
 
     class MockProfile:
         def __init__(self) -> None:
@@ -198,4 +205,6 @@ def active_warehouse_id(user) -> Optional[str]:
     same way here, via the single active warehouse on the token.
     """
     wid = getattr(user, "warehouse_id", None)
-    return str(wid) if wid else None
+    if not wid:
+        raise HTTPException(status_code=400, detail="User is not assigned to any warehouse")
+    return str(wid)

@@ -1,0 +1,135 @@
+{
+  "version": "cost-v3.0",
+  "predictor": "CatBoost",
+  "dataset": "v11 (96,827 rows \u00d7 69 cols)",
+  "feature_count": 80,
+  "test_metrics_all": {
+    "LightGBM": {
+      "MAE": 14842.183,
+      "RMSE": 40978.2412,
+      "R\u00b2": 0.716,
+      "MedAE": 6217.592,
+      "MAPE%": 20.3689
+    },
+    "CatBoost": {
+      "MAE": 14653.5209,
+      "RMSE": 41890.4818,
+      "R\u00b2": 0.7033,
+      "MedAE": 5496.0828,
+      "MAPE%": 18.9356
+    },
+    "XGBoost": {
+      "MAE": 14683.7992,
+      "RMSE": 42347.0844,
+      "R\u00b2": 0.6968,
+      "MedAE": 5623.0586,
+      "MAPE%": 19.4291
+    }
+  },
+  "picp_test_calibrated": 0.7873,
+  "conformal_q_hat_lkr": 2682.26,
+  "success": {
+    "R\u00b2 \u2265 0.85": false,
+    "PICP@80% \u2208 [78,82]": true,
+    "MAPE < 15%": false,
+    "all_pass": false
+  },
+  "top15_features": [
+    {
+      "rank": 1,
+      "feature": "fuel_price_lkr_per_l",
+      "mean_abs_shap": 0.501
+    },
+    {
+      "rank": 2,
+      "feature": "downtime_hours_last_90d",
+      "mean_abs_shap": 0.2866
+    },
+    {
+      "rank": 3,
+      "feature": "part_oil_filter",
+      "mean_abs_shap": 0.2573
+    },
+    {
+      "rank": 4,
+      "feature": "engine_hours_since_last_service",
+      "mean_abs_shap": 0.2296
+    },
+    {
+      "rank": 5,
+      "feature": "utilisation_stress",
+      "mean_abs_shap": 0.2247
+    },
+    {
+      "rank": 6,
+      "feature": "part_engine",
+      "mean_abs_shap": 0.171
+    },
+    {
+      "rank": 7,
+      "feature": "days_since_last_service",
+      "mean_abs_shap": 0.1516
+    },
+    {
+      "rank": 8,
+      "feature": "odometer_km",
+      "mean_abs_shap": 0.1511
+    },
+    {
+      "rank": 9,
+      "feature": "service_provider_type",
+      "mean_abs_shap": 0.1456
+    },
+    {
+      "rank": 10,
+      "feature": "part_engine_oil",
+      "mean_abs_shap": 0.1307
+    },
+    {
+      "rank": 11,
+      "feature": "mileage_since_last_service_km",
+      "mean_abs_shap": 0.0986
+    },
+    {
+      "rank": 12,
+      "feature": "last_service_type",
+      "mean_abs_shap": 0.0612
+    },
+    {
+      "rank": 13,
+      "feature": "vehicle_role",
+      "mean_abs_shap": 0.0592
+    },
+    {
+      "rank": 14,
+      "feature": "maintenance_priority",
+      "mean_abs_shap": 0.0444
+    },
+    {
+      "rank": 15,
+      "feature": "vehicle_type",
+      "mean_abs_shap": 0.0371
+    }
+  ],
+  "dropped_cols": [
+    "vehicle_id",
+    "snapshot_date",
+    "warehouse_id",
+    "warehouse_name",
+    "warehouse_city",
+    "warehouse_type",
+    "climate_zone",
+    "is_home_warehouse_service",
+    "maintenance_cost_lkr_next_30d",
+    "maintenance_required_next_30d",
+    "next_service_type",
+    "days_until_next_maintenance",
+    "predicted_next_maintenance_date",
+    "spare_parts_delay_days",
+    "parts_replaced_last_service",
+    "age_band",
+    "maintenance_cost_last_service_lkr"
+  ],
+  "split": "time-based 70/15/15",
+  "winsorise_cap_lkr": 326384.5000000016
+}

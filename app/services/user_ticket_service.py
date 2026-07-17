@@ -326,8 +326,9 @@ def preview_user_ticket(
 
     try:
         from app.ai.services.ticket_priority_service import predict_ticket_priority
+        # predict_ticket_priority returns a plain string ("High"/"Medium"/"Low").
         result = predict_ticket_priority(title=title, description=description)
-        out["predicted_priority"] = _normalize_priority(_priority_label(result))
+        out["predicted_priority"] = _normalize_priority(result)
     except Exception as exc:  # noqa: BLE001
         _safe_log("preview.priority", exc)
         out["errors"]["priority"] = str(exc)
@@ -394,7 +395,8 @@ def create_user_ticket(
     if use_ai:
         priority_result = predict_priority_safely(title, description)
         if priority_result:
-            predicted_priority = _normalize_priority(_priority_label(priority_result))
+            # predict_priority_safely returns a plain string ("High"/"Medium"/"Low").
+            predicted_priority = _normalize_priority(priority_result)
 
         category_result = predict_category_safely(title, description)
         if category_result:

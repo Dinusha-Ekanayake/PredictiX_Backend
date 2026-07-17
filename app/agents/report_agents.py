@@ -103,11 +103,65 @@ def _build_survival_summary(critical_assets: list, max_assets: int = 12) -> dict
             db.close()
 
 
+# Human-readable labels for the model's SHAP failure-driver features, so each
+# asset summary can name *why* it is failing (the per-asset differentiator).
+_DRIVER_LABELS = {
+    "tire_health_pct": "low tire health",
+    "brake_health_pct": "low brake health",
+    "battery_health_pct": "low battery health",
+    "oil_life_pct": "low oil life",
+    "hydraulic_health_pct": "low hydraulic health",
+    "coolant_temp_max_c": "elevated coolant temperature",
+    "engine_temp_avg_c": "elevated engine temperature",
+    "engine_hours_since_last_service": "high engine hours since last service",
+    "days_since_last_service": "an overdue service interval",
+    "vibration_rms_mm_s": "abnormal vibration",
+    "active_fault_code_count": "active fault codes",
+    "downtime_hours_last_90d": "recent unplanned downtime",
+    "fuel_level": "low fuel level",
+    "odometer_km": "high accumulated mileage",
+    "current_mileage": "high accumulated mileage",
+}
+
+
+def _humanize_driver(top_explanations) -> str | None:
+    """Return a readable phrase for an asset's top SHAP failure driver, or None.
+
+    Handles both stored shapes: a bare list of factor dicts, or
+    ``{"top_factors": [...]}``; values may arrive as a JSON string.
+    """
+    if not top_explanations:
+        return None
+    if isinstance(top_explanations, str):
+        try:
+            top_explanations = json.loads(top_explanations)
+        except (ValueError, TypeError):
+            return None
+    factors = (
+        top_explanations.get("top_factors")
+        if isinstance(top_explanations, dict)
+        else top_explanations
+    )
+    if not isinstance(factors, list) or not factors or not isinstance(factors[0], dict):
+        return None
+    feat = factors[0].get("feature")
+    if not feat:
+        return None
+    if feat in _DRIVER_LABELS:
+        return _DRIVER_LABELS[feat]
+    # Generic fallback: strip unit suffixes and de-snake the feature name.
+    for suffix in ("_pct", "_c", "_mm_s", "_count", "_km"):
+        if feat.endswith(suffix):
+            feat = feat[: -len(suffix)]
+            break
+    return feat.replace("_", " ").strip() or None
+
+
 # ═══════════════════════════════════════════════════════════════
 # FULL DATA INJECTION — PostgreSQL → LLM Context (RAG Layer)
 # ═══════════════════════════════════════════════════════════════
 
-def build_warehouse_context(db: Session) -> dict[str, Any]:
+def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
     """
     Queries ALL relevant PostgreSQL tables and builds a comprehensive
     structured context dictionary.
@@ -124,7 +178,7 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
     one_month_ago    = now - timedelta(days=30)
 
     # ── Warehouse info ────────────────────────────────────
-    warehouse = db.query(Warehouse).first()
+    warehouse = db.query(Warehouse).filter(Warehouse.id == warehouse_id).first()
     warehouse_name = warehouse.name if warehouse else "PredictiX Warehouse"
     warehouse_city = warehouse.city if warehouse else "Colombo"
     warehouse_code = warehouse.code if warehouse else "WH-001"
@@ -240,17 +294,36 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
     )
     top_shap_features = [(name, count) for name, count in top_explanations_raw]
 
-    # Fallback: pull from top_explanations JSONB on asset_failure_predictions
+    # Fallback: pull SHAP drivers from the top_explanations JSONB on the LATEST
+    # prediction per asset (append-only history), handling the v7 model shapes:
+    # {"top_factors": [{"feature": ...}]} or a bare list [{"feature": ...}].
     if not top_shap_features:
-        critical_preds = db.query(AssetFailurePrediction).filter(
-            AssetFailurePrediction.health_score < 60
-        ).limit(20).all()
+        rows = db.execute(text("""
+            SELECT top_explanations FROM (
+                SELECT DISTINCT ON (asset_id) asset_id, health_score, top_explanations
+                FROM asset_failure_predictions
+                ORDER BY asset_id, created_at DESC
+            ) latest
+            WHERE latest.health_score < 60
+            LIMIT 50
+        """)).fetchall()
         feat_counts: dict[str, int] = {}
-        for pred in critical_preds:
-            explanations = pred.top_explanations or {}
-            for feat in (explanations.get("features") or [])[:3]:
-                name = feat.get("feature", "unknown")
-                feat_counts[name] = feat_counts.get(name, 0) + 1
+        for (explanations,) in rows:
+            if isinstance(explanations, str):
+                try:
+                    explanations = json.loads(explanations)
+                except (ValueError, TypeError):
+                    explanations = {}
+            factors = (
+                explanations.get("top_factors")
+                if isinstance(explanations, dict) else explanations
+            )
+            if not isinstance(factors, list):
+                factors = []
+            for feat in factors[:3]:
+                name = feat.get("feature") if isinstance(feat, dict) else None
+                if name:
+                    feat_counts[name] = feat_counts.get(name, 0) + 1
         top_shap_features = sorted(feat_counts.items(), key=lambda x: -x[1])[:8]
 
     # Health score distribution buckets — derived from the SAME deduped per-asset set,
@@ -272,14 +345,14 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
         SELECT * FROM (
             SELECT DISTINCT ON (p.asset_id)
                 a.asset_code, a.asset_name, a.model, a.make, a.vehicle_type, a.status,
-                p.health_score, p.failure_probability, p.risk_level, p.days_until_maintenance
-            FROM asset_failure_predictions p
+                p.health_score, 100.0 as failure_probability, 'critical' as risk_level, 0 as days_until_maintenance,
+                '[]' as top_explanations
+            FROM pdm_batch_predictions p
             JOIN assets a ON a.id = p.asset_id
-            ORDER BY p.asset_id, p.created_at DESC
+            ORDER BY p.asset_id, p.predicted_at DESC
         ) latest
-        WHERE latest.health_score < 60
-        ORDER BY latest.health_score ASC
-        LIMIT 8
+        ORDER BY CASE WHEN latest.asset_code LIKE 'SIM-%' THEN 0 ELSE 1 END, latest.health_score ASC
+        LIMIT 25
     """)).fetchall()
     def _fp_pct(v) -> str:
         fp = float(v or 0)
@@ -297,17 +370,34 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
             "risk": r[8] or "High",
             "days_to_service": r[9],
             "status": r[5] or "unknown",
+            "primary_driver": _humanize_driver(r[10]),
         }
         for r in critical_rows
     ]
 
     # ── COST PREDICTIONS ──────────────────────────────────
-    total_estimated_cost = db.query(func.sum(AssetCostPrediction.estimated_cost)).scalar() or 0
-    avg_cost_per_asset   = db.query(func.avg(AssetCostPrediction.estimated_cost)).scalar() or 0
-    min_cost_estimate    = db.query(func.min(AssetCostPrediction.min_cost)).scalar() or 0
-    max_cost_estimate    = db.query(func.max(AssetCostPrediction.max_cost)).scalar() or 0
-    cost_currency        = db.query(AssetCostPrediction.currency).first()
-    currency             = cost_currency[0] if cost_currency else "LKR"
+    # Cost predictions are append-only (one row per asset per batch run), so
+    # aggregate over only the LATEST prediction per asset — otherwise totals
+    # inflate as runs accumulate.
+    cost_row = db.execute(text("""
+        SELECT
+            COALESCE(SUM(estimated_cost), 0) AS total_cost,
+            COALESCE(AVG(estimated_cost), 0) AS avg_cost,
+            COALESCE(MIN(min_cost), 0)       AS min_cost,
+            COALESCE(MAX(max_cost), 0)       AS max_cost,
+            MAX(currency)                    AS currency
+        FROM (
+            SELECT DISTINCT ON (asset_id)
+                estimated_cost, min_cost, max_cost, currency
+            FROM asset_cost_predictions
+            ORDER BY asset_id, created_at DESC
+        ) latest_costs
+    """)).fetchone()
+    total_estimated_cost = float(cost_row[0] or 0)
+    avg_cost_per_asset   = float(cost_row[1] or 0)
+    min_cost_estimate    = float(cost_row[2] or 0)
+    max_cost_estimate    = float(cost_row[3] or 0)
+    currency             = cost_row[4] or "LKR"
 
     # ── MAINTENANCE EVENTS ────────────────────────────────
     # Reporting window = the THREE CALENDAR MONTHS ending with the most RECENT activity
@@ -324,8 +414,7 @@ def build_warehouse_context(db: Session) -> dict[str, Any]:
         return _month_floor(_month_floor(d) + timedelta(days=32))
 
     _latest_evt = db.query(func.max(MaintenanceEvent.performed_at)).scalar()
-    _latest_tkt = db.query(func.max(Ticket.created_at)).scalar()
-    _anchors = [d for d in (_latest_evt, _latest_tkt) if d is not None]
+    _anchors = [d for d in (_latest_evt,) if d is not None]
     # Strip tzinfo so the anchor matches the naive `now` used elsewhere.
     anchor = max(_anchors).replace(tzinfo=None) if _anchors else now
     window_is_current = (_month_floor(anchor) == _month_floor(now))
@@ -910,7 +999,7 @@ def _guard_narrative(ai_sections: dict, ctx: dict) -> dict:
     return ai_sections
 
 
-def run_warehouse_agent(db: Session) -> dict:
+def run_warehouse_agent(db: Session, warehouse_id: str | None = None) -> dict:
     """
     KB-Enhanced Warehouse Report Agent:
     1. Queries ALL PostgreSQL tables → builds context (build_warehouse_context)
@@ -920,14 +1009,14 @@ def run_warehouse_agent(db: Session) -> dict:
     5. Returns: ai_sections + context + kb_annotations
     """
     # ── Step 1: PostgreSQL data ────────────────────────────────
-    ctx = build_warehouse_context(db)
+    ctx = build_warehouse_context(db, warehouse_id=warehouse_id)
     context_text = _context_to_prompt_text(ctx)
 
     # ── Step 1b: FRSO survival aggregation (real Weibull AFT models over the
     # report's critical assets) → drives the §4.8 page in the PDF. Computed AFTER
     # the prompt text so it stays out of the LLM context — the PDF renders these
     # tables deterministically from live model output, no LLM/mocks involved.
-    ctx["survival_summary"] = _build_survival_summary(ctx.get("critical_assets", []))
+    ctx["survival_summary"] = _build_survival_summary(ctx.get("critical_assets", []), max_assets=25)
 
     # ── Step 2: KB Vector Store retrieval ─────────────────────
     kb_store = get_kb_store()

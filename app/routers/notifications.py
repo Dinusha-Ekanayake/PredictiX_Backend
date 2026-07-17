@@ -13,7 +13,7 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/notifications", tags=["Notifications"])
 
 
-@router.get("/", response_model=list[NotificationOut])
+@router.get("", response_model=list[NotificationOut])
 def list_user_notifications(
     status: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
