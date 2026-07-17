@@ -159,6 +159,11 @@ class AssetFailurePredictionOut(BaseModel):
 
 
 class AssetCostPredictionOut(BaseModel):
+    """DB-row shape for the legacy asset_cost_predictions table. Only used by
+    GET /predictions/cost/run/{run_id} now — GET /predictions/cost/{asset_id}
+    and POST /predictions/cost/live/{asset_id} use BreakdownCostPredictionOut
+    below instead, since that table is never populated by the breakdown-cost pipeline and
+    can't represent SHAP drivers or confidence bounds anyway."""
     id: UUID
     run_id: UUID
     asset_id: UUID
@@ -170,6 +175,47 @@ class AssetCostPredictionOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ── breakdown-cost response shape (v4.0 and v5.0 share this contract) ────────────────────────────────────────
+# Mirrors predict_breakdown_cost()'s actual return dict
+# (app/ai/models/cost_estimation_model/breakdown_cost_model.py) exactly — this
+# is NOT the extra_data-wrapped sample in the older v4 model docs; the code is the
+# source of truth, not the doc.
+
+class CostDriverOut(BaseModel):
+    feature: str
+    value: str
+    direction: str          # "increases" | "decreases"
+    relative_impact: float  # 0-100, share of total |SHAP|
+    # sv_log intentionally omitted — log1p-space value, not meant for display
+    # (v4/v5 docs §9: "Never display sv_log directly")
+
+
+class ExpectedRangeOut(BaseModel):
+    p25_lkr: Optional[float] = None
+    p75_lkr: Optional[float] = None
+
+
+class BreakdownCostPredictionOut(BaseModel):
+    asset_id: str
+    predicted_cost_lkr: float
+    pi_80_lower_lkr: float
+    pi_80_upper_lkr: float
+    coverage_target: str
+    fleet_mean_lkr: float
+    vs_fleet_mean_lkr: float
+    expected_range: ExpectedRangeOut
+    sanity_check: str
+    top_drivers: list[CostDriverOut]
+    model_version: Optional[str] = None
+    # Bundle-level accuracy stats (not per-prediction) — lets the frontend
+    # show the model's real current numbers instead of hardcoding any
+    # version's stats, which would go stale the next time the model changes.
+    test_r2: Optional[float] = None
+    test_mae_lkr: Optional[float] = None
+    test_medae_lkr: Optional[float] = None
+    picp_80_pct: Optional[float] = None
 
 
 class TicketPredictionOut(BaseModel):

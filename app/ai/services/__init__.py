@@ -7,9 +7,7 @@ All four services call the HuggingFace Inference API directly over HTTP
 
 from app.ai.services.asset_summary_service import (
     generate_asset_summary,
-    get_asset_summary_model,
     get_asset_summary_repo,
-    warmup_asset_summary_model,
 )
 
 from app.ai.services.ticket_categorization_service import (
@@ -27,15 +25,12 @@ from app.ai.services.ticket_summary_service import (
     build_ticket_summary_input,
     generate_ticket_summary,
     get_ticket_summary_repo,
-    warmup_ticket_summary_model,
 )
 
 __all__ = [
-    # Asset summary
+    # Asset summary (served on a HF Space)
     "generate_asset_summary",
-    "get_asset_summary_model",
     "get_asset_summary_repo",
-    "warmup_asset_summary_model",
     # Ticket categorization
     "categorize_ticket_text",
     "get_ticket_categorizer_repo",
@@ -43,9 +38,8 @@ __all__ = [
     # Ticket priority (user-tickets section)
     "predict_ticket_priority",
     "warmup_ticket_priority",
-    # Ticket summary (user-tickets section)
+    # Ticket summary (served on a HF Space)
     "generate_ticket_summary",
     "build_ticket_summary_input",
     "get_ticket_summary_repo",
-    "warmup_ticket_summary_model",
 ]

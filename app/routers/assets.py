@@ -16,7 +16,7 @@ from app.deps import (
     _role_of,
     ADMIN_ROLES,
 )
-from app.models import Asset, Profile
+from app.models import Asset, PdmBatchPrediction, Profile
 from app.schemas.asset import AssetCreate, AssetOut, AssetListOut, AssetUpdate
 from app.services.service_reminder_service import send_manual_reminder
 
@@ -265,6 +265,16 @@ def count_assets(
     vehicle_type: str | None = Query(default=None),
     asset_type: str | None = Query(default=None),
     vehicle_role: str | None = Query(default=None),
+    make: str | None = Query(default=None),
+    model: str | None = Query(default=None),
+    manufacture_year: int | None = Query(default=None),
+    health_band: str | None = Query(default=None),
+    min_criticality_score: float | None = Query(default=None),
+    max_criticality_score: float | None = Query(default=None),
+    min_current_mileage: float | None = Query(default=None),
+    max_current_mileage: float | None = Query(default=None),
+    min_payload_capacity_kg: float | None = Query(default=None),
+    max_payload_capacity_kg: float | None = Query(default=None),
     is_assigned: bool | None = Query(default=None),
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
@@ -304,11 +314,39 @@ def count_assets(
         q = q.filter(Asset.asset_type == asset_type)
     if vehicle_role:
         q = q.filter(Asset.vehicle_role == vehicle_role)
+    # These filters (health_band, make/model/year, numeric ranges) previously
+    # existed on list_assets but not here — FastAPI silently ignores unknown
+    # query params rather than erroring, so filtering the list by e.g. Health
+    # Band showed the correctly-filtered rows but an unfiltered fleet-wide
+    # total count, breaking the toolbar's "N assets" badge and pagination.
+    if make:
+        q = q.filter(Asset.make.ilike(f"%{make.strip()}%"))
+    if model:
+        q = q.filter(Asset.model.ilike(f"%{model.strip()}%"))
+    if manufacture_year is not None:
+        q = q.filter(Asset.manufacture_year == manufacture_year)
+    if health_band:
+        q = q.filter(Asset.health_band == health_band)
 
     if is_assigned is True:
         q = q.filter(Asset.assigned_to.isnot(None))
     elif is_assigned is False:
         q = q.filter(Asset.assigned_to.is_(None))
+
+    if min_criticality_score is not None:
+        q = q.filter(Asset.criticality_score >= min_criticality_score)
+    if max_criticality_score is not None:
+        q = q.filter(Asset.criticality_score <= max_criticality_score)
+
+    if min_current_mileage is not None:
+        q = q.filter(Asset.current_mileage >= min_current_mileage)
+    if max_current_mileage is not None:
+        q = q.filter(Asset.current_mileage <= max_current_mileage)
+
+    if min_payload_capacity_kg is not None:
+        q = q.filter(Asset.payload_capacity_kg >= min_payload_capacity_kg)
+    if max_payload_capacity_kg is not None:
+        q = q.filter(Asset.payload_capacity_kg <= max_payload_capacity_kg)
 
     return {"count": q.count()}
 
@@ -330,15 +368,6 @@ def get_asset_stats(
     if scoped_wh:
         q = q.filter(Asset.warehouse_id == scoped_wh)
 
-    band_score = case(
-        (Asset.health_band == "excellent", 90),
-        (Asset.health_band == "good", 72),
-        (Asset.health_band == "moderate", 52),
-        (Asset.health_band == "poor", 30),
-        (Asset.health_band == "critical", 12),
-        else_=50,
-    )
-
     # Real values of the asset_status Postgres enum: active, inactive,
     # under_maintenance, critical, decommissioned.
     row = q.with_entities(
@@ -347,11 +376,31 @@ def get_asset_stats(
         func.count(Asset.id).filter(cast(Asset.status, String) == "under_maintenance"),
         func.count(Asset.id).filter(Asset.health_band == "critical"),
         func.count(Asset.id).filter(cast(Asset.status, String).in_(("inactive", "decommissioned"))),
-        func.avg(band_score),
     ).one()
 
-    total, operational, maintenance, critical, offline, avg_band_score = row
+    total, operational, maintenance, critical, offline = row
     total = int(total or 0)
+
+    # Real per-asset health_score average from pdm_batch_predictions — the
+    # same source and same number the admin dashboard's Fleet Health KPI
+    # uses. Averaged ONLY over assets that actually have a completed
+    # prediction; NOT blended with any estimate for unscored assets, so
+    # this number is always the true average of real model output, never
+    # part-real-part-guessed. scoredCount tells the frontend how many of
+    # the total assets that average actually covers, so it can show "N of
+    # M assets" honestly instead of implying full fleet coverage.
+    health_q = (
+        db.query(func.avg(PdmBatchPrediction.health_score), func.count(PdmBatchPrediction.asset_id))
+        .select_from(Asset)
+        .join(
+            PdmBatchPrediction,
+            (PdmBatchPrediction.asset_id == Asset.id) & (PdmBatchPrediction.status == "ok"),
+        )
+    )
+    if scoped_wh:
+        health_q = health_q.filter(Asset.warehouse_id == scoped_wh)
+    avg_health_score, scored_count = health_q.one()
+    scored_count = int(scored_count or 0)
 
     return {
         "total": total,
@@ -359,7 +408,8 @@ def get_asset_stats(
         "maintenance": int(maintenance or 0),
         "critical": int(critical or 0),
         "offline": int(offline or 0),
-        "avgHealth": round(float(avg_band_score), 0) if total and avg_band_score is not None else 0,
+        "avgHealth": round(float(avg_health_score), 0) if avg_health_score is not None else None,
+        "avgHealthScoredCount": scored_count,
     }
 
 
@@ -400,7 +450,12 @@ def get_asset_analytics(
         .all()
     )
 
-    # Top 5 at-risk: critical first, then poor, each ordered by criticality_score desc.
+    # Top 5 at-risk: critical first, then poor, each ordered by criticality_score
+    # ascending (worst first) — despite the name, criticality_score is used
+    # fleet-wide (profile.py, user_profile.py, users.py) as a health-percentage
+    # proxy where higher = healthier (defaults to 100.0 when null), so the most
+    # at-risk assets within a band are the ones with the LOWEST score, not the
+    # highest.
     risk_order = case(
         (Asset.health_band == "critical", 0),
         (Asset.health_band == "poor", 1),
@@ -409,7 +464,7 @@ def get_asset_analytics(
     at_risk_rows = (
         base_q.filter(Asset.health_band.in_(("critical", "poor")))
         .with_entities(Asset.id, Asset.asset_name, Asset.asset_code, Asset.health_band)
-        .order_by(risk_order, Asset.criticality_score.desc().nullslast())
+        .order_by(risk_order, Asset.criticality_score.asc().nullslast())
         .limit(5)
         .all()
     )

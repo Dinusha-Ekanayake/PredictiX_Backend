@@ -57,10 +57,10 @@ DB_SCHEMAS: dict[str, str] = {
     "warehouses": "id, code, name, address, city, district, country, timezone, is_active, climate_zone, warehouse_type, metadata, created_at, updated_at",
     "departments": "id, warehouse_id, code, name, description, is_active, created_at, updated_at",
     "profiles": "id, employee_id, full_name, email, phone, role, status, warehouse_id, department_id, avatar_url, meta, created_at, updated_at",
-    "assets": "id, asset_code, warehouse_id, department_id, asset_name, asset_type, category, vehicle_type, make, model, manufacture_year, registration_number, vin, status, health_band, criticality_score, purchase_date, warranty_expiry_date, assigned_to, current_mileage, last_service_date, next_service_date, description, fuel_type, transmission, make_model, maintenance_priority, service_provider_type, metadata, created_by, vehicle_role, payload_capacity_kg, vehicle_age_years, lifetime_service_count, lifetime_breakdown_count, created_at, updated_at",
-    "maintenance_events": "id, asset_id, event_type, title, description, performed_by, scheduled_date, performed_at, odometer_reading, downtime_hours, cost_amount, currency, vendor_name, notes, metadata, created_at, updated_at",
+    "assets": "id, asset_code, warehouse_id, department_id, asset_name, asset_type, category, vehicle_type, make, model, manufacture_year, registration_number, vin, status(ENUM: active|inactive|maintenance|retired|disposed — NOTE: assets do NOT have 'open' status; use 'active' for working assets), health_band, criticality_score, purchase_date, warranty_expiry_date, assigned_to, current_mileage, last_service_date, next_service_date, description, fuel_type, transmission, make_model, maintenance_priority, service_provider_type, metadata, created_by, vehicle_role, payload_capacity_kg, vehicle_age_years, lifetime_service_count, lifetime_breakdown_count, created_at, updated_at",
+    "maintenance_events": "id, asset_id, event_type(ENUM: preventive|corrective|inspection|emergency), title, description, performed_by, scheduled_date, performed_at, odometer_reading, downtime_hours, cost_amount, currency, vendor_name, notes, metadata, created_at, updated_at",
     "sensor_readings": "id, asset_id, recorded_at, temperature, vibration, pressure, humidity, rpm, voltage, fuel_level, odometer, engine_hours_since_last_service, days_since_last_service, tire_health_pct, brake_health_pct, battery_health_pct, oil_life_pct, hydraulic_health_pct, vibration_rms_mm_s, fuel_efficiency_km_per_l, engine_hours_total, coolant_temp_max_c, battery_voltage_v, odometer_km",
-    "tickets": "id, ticket_number, asset_id, warehouse_id, title, description, status(open/in_progress/pending/resolved/closed/cancelled), priority(low/medium/high), predicted_priority, final_priority, predicted_category(electrical/mechanical/software), final_category, ticket_summary, created_by, assigned_to, reviewed_by, opened_at, reviewed_at, resolved_at, closed_at, created_at, updated_at",
+    "tickets": "id, ticket_number, asset_id, warehouse_id, title, description, status(ENUM: open|in_progress|pending|resolved|closed|cancelled — NOTE: use 'open' for new/open tickets, 'in_progress' for active ones), priority(ENUM: low|medium|high), predicted_priority, final_priority, predicted_category(ENUM: electrical|mechanical|software), final_category, ticket_summary, created_by, assigned_to, reviewed_by, opened_at, reviewed_at, resolved_at, closed_at, created_at, updated_at",
     "prediction_runs": "id, model_id, asset_id, ticket_id, input_snapshot, requested_by, run_started_at, run_finished_at, status, error_message",
     "reports": "id, report_type, status, asset_id, warehouse_id, ticket_id, title, generated_by, report_text, report_json, file_path, generation_started_at, generation_completed_at, created_at",
     "notifications": "id, user_id, type, channel, title, message, status, related_asset_id, related_ticket_id, sent_at, read_at, created_at",
@@ -84,16 +84,18 @@ DB_SCHEMAS: dict[str, str] = {
 # Maps keywords to (instructions, route, button_label)
 NAV_MAP: list[tuple[list[str], str, str, str]] = [
     (["password", "change password"], "To change your password:\n1️⃣ Click your avatar in the top-right corner.\n2️⃣ Select **Profile Settings**.\n3️⃣ Click **Change Password** and follow the prompts.", "/user/profile", "Go to Profile Settings"),
-    (["profile", "settings", "account"], "To view or edit your profile:\n1️⃣ Click your avatar in the top-right corner.\n2️⃣ Select **Profile Settings**.", "/user/profile", "Open Profile Settings"),
-    (["dashboard", "home", "overview"], "The Dashboard is your main landing page after login. It shows live stats for assets, tickets, and fleet health.", "/admin/dashboard", "Go to Dashboard"),
-    (["helpdesk", "help desk", "ticket", "raise ticket", "create ticket", "new ticket"], "To create or manage support tickets:\n1️⃣ Click **Helpdesk** in the left sidebar.\n2️⃣ Click **New Ticket** to raise one.", "/admin/help-desk", "Go to Helpdesk"),
-    (["asset", "assets", "fleet", "vehicle"], "To view and manage assets:\n1️⃣ Click **Assets** in the left sidebar.\n2️⃣ Use filters to search by status, type, or warehouse.", "/admin/assets", "Go to Assets"),
-    (["report", "reports", "generate report"], "To generate reports:\n1️⃣ Click **Reports** in the left sidebar.\n2️⃣ Select the report type (Asset, Ticket, Prediction).\n3️⃣ Click **Generate**.", "/admin/reports", "Go to Reports"),
-    (["warehouse", "warehouses", "location"], "To view warehouses:\n1️⃣ Click **Warehouse** in the left sidebar.", "/admin/warehouses", "Go to Warehouses"),
-    (["user", "users", "team", "staff", "manage users"], "To manage users:\n1️⃣ Click **Users** in the left sidebar.\n2️⃣ You can add, edit, or deactivate users here.", "/admin/users", "Go to Users"),
-    (["prediction", "predict", "failure prediction", "maintenance prediction", "predictive maintenance"], "To run AI predictions:\n1️⃣ Go to the **Assets** section.\n2️⃣ Open an asset and click **Run Prediction**.\nOr visit the **Reports** section to view all batch predictions.", "/admin/reports", "Go to Predictions / Reports"),
+    (["profile", "settings", "account", "my settings"], "To view or edit your profile:\n1️⃣ Click your avatar in the top-right corner.\n2️⃣ Select **Profile Settings**.", "/user/profile", "Open Profile Settings"),
+    (["dashboard", "home", "overview", "main page"], "The Dashboard is your main landing page after login. It shows live stats for assets, tickets, and fleet health.", "/admin/dashboard", "Go to Dashboard"),
+    (["helpdesk", "help desk", "support ticket", "raise ticket", "create ticket", "new ticket"], "To create or manage support tickets:\n1️⃣ Click **Helpdesk** in the left sidebar.\n2️⃣ Click **New Ticket** to raise one.", "/admin/help-desk", "Go to Helpdesk"),
+    # "ticket" / "tickets" is intentionally after helpdesk so helpdesk-specific phrases match first
+    (["tickets", "ticket page", "open tickets", "view tickets", "my tickets"], "Here's the **Support Tickets** page where you can track, manage, and resolve all tickets.", "/admin/tickets", "Go to Tickets"),
+    (["asset", "assets", "fleet", "vehicle", "vehicles", "open assets", "view assets"], "Here's the **Assets** section where you can view and manage all your assets and vehicles.", "/admin/assets", "Go to Assets"),
+    (["report", "reports", "generate report", "view reports", "open reports"], "To generate reports:\n1️⃣ Click **Reports** in the left sidebar.\n2️⃣ Select the report type (Asset, Ticket, Prediction).\n3️⃣ Click **Generate**.", "/admin/reports", "Go to Reports"),
+    (["warehouse", "warehouses", "location", "locations", "open warehouse"], "Here's the **Warehouse** section where you can manage all your warehouse locations.", "/admin/warehouses", "Go to Warehouses"),
+    (["user", "users", "team", "staff", "manage users", "open users", "user management"], "Here's the **User Management** section where you can add, edit, or deactivate users.", "/admin/users", "Go to Users"),
+    (["prediction", "predict", "failure prediction", "maintenance prediction", "predictive maintenance", "open predictions"], "To run AI predictions:\n1️⃣ Go to the **Assets** section.\n2️⃣ Open an asset and click **Run Prediction**.\nOr visit the **Reports** section to view all batch predictions.", "/admin/reports", "Go to Predictions / Reports"),
     (["cost", "cost estimation", "cost prediction", "maintenance cost"], "To view cost predictions:\n1️⃣ Go to the **Assets** section.\n2️⃣ Open any asset and view the **Cost Estimation** panel.\nOr visit **Reports** for batch cost reports.", "/admin/reports", "Go to Cost Reports"),
-    (["notification", "notifications", "alerts"], "To view your notifications, click the 🔔 bell icon in the top navigation bar.", "/admin/notifications", "Go to Notifications"),
+    (["notification", "notifications", "alerts", "open notifications"], "To view your notifications, click the 🔔 bell icon in the top navigation bar.", "/admin/notifications", "Go to Notifications"),
 ]
 
 
@@ -427,22 +429,56 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             if re.search(rf"\b{dangerous}\b", sql_upper):
                 return _get_generic_fallback()
 
-        # ── Step 3: Execute ───────────────────────────────────────────────────────
+        # ── Step 3: Execute (with self-healing retry on DB error) ────────────────
         if ctx.db is None:
             return {"answer": "⚠️ Database is not available right now. Please try again in a moment.", "action_buttons": []}
 
-        try:
-            result = ctx.db.execute(text(sql)).fetchall()
+        def _run_sql(sql_to_run: str):
+            result = ctx.db.execute(text(sql_to_run)).fetchall()
             if not result:
-                return {"answer": "📊 The query ran successfully but returned no results. The data matching your request may not exist yet.", "action_buttons": []}
+                return None
             keys = list(result[0]._mapping.keys())
-            rows = [dict(zip(keys, row)) for row in result[:50]]
-        except Exception as e:
-            log.error("SQL execution failed: %s | SQL: %s", e, sql)
-            return {
-                "answer": "⚠️ The query could not be executed. The database may be temporarily unavailable — please try again in a moment.",
-                "action_buttons": [],
-            }
+            return [dict(zip(keys, row)) for row in result[:50]]
+
+        rows = None
+        try:
+            rows = _run_sql(sql)
+        except Exception as first_err:
+            log.warning("SQL execution failed (attempt 1): %s | SQL: %s", first_err, sql)
+            ctx.db.rollback()
+            # Self-healing: feed the error back to the LLM to fix the SQL
+            try:
+                fix_prompt = (
+                    f"The following PostgreSQL query failed with this error:\n"
+                    f"ERROR: {str(first_err)[:300]}\n\n"
+                    f"FAILED SQL:\n{sql}\n\n"
+                    f"SCHEMA (correct ENUM values):\n{schema_str}\n\n"
+                    "Fix the SQL query. Common fixes:\n"
+                    "- assets.status valid values: active, inactive, maintenance, retired, disposed (NOT 'open')\n"
+                    "- tickets.status valid values: open, in_progress, pending, resolved, closed, cancelled\n"
+                    "- Use CAST if comparing text with enum column\n"
+                    "Output ONLY the corrected raw SQL. No markdown, no backticks."
+                )
+                corrected_sql_raw, _ = call_groq(
+                    messages=[{"role": "user", "content": fix_prompt}],
+                    model="llama-3.3-70b-versatile",
+                    max_tokens=350,
+                    temperature=0.1,
+                )
+                corrected_sql = str(corrected_sql_raw).strip().lstrip("```sql").lstrip("```").rstrip("```").strip()
+                log.info("Self-healed SQL: %s", corrected_sql)
+                rows = _run_sql(corrected_sql)
+                sql = corrected_sql  # update for logging
+            except Exception as second_err:
+                log.error("SQL self-healing also failed: %s", second_err)
+                ctx.db.rollback()
+                return {
+                    "answer": "⚠️ I couldn't retrieve the data for your query. The database may be temporarily unavailable or the question needs rephrasing. Try being more specific!",
+                    "action_buttons": [],
+                }
+
+        if rows is None:
+            return {"answer": "📊 The query ran successfully but returned no results. The data matching your request may not exist yet.", "action_buttons": []}
 
     # ── Step 4: Summarize (fast model) ───────────────────────────────────────
     row_str = str(rows[:30])  # cap context to keep tokens low

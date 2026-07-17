@@ -24,7 +24,7 @@ import os
 
 from app.core.security import hash_password
 from app.db.session import SessionLocal
-from app.deps import get_db, get_current_user, require_admin, active_warehouse_id
+from app.deps import get_db, get_current_user, require_admin, require_user, active_warehouse_id
 from app.models import Asset, Department, Profile, Warehouse
 from app.services.reference_data_cache import get_department_names, get_warehouse_names
 from app.schemas.user_profile import (
@@ -36,11 +36,13 @@ from app.schemas.user_profile import (
 from app.services.notification_service import NotificationService
 
 log = logging.getLogger(__name__)
-# User management is admin-only: every endpoint requires an admin/super_admin JWT.
+# Any authenticated user may READ the user list (needed by the ticket UI's
+# assignee dropdown / name resolution). Mutating endpoints (create/update/delete)
+# are individually guarded with require_admin below.
 router = APIRouter(
     prefix="/users",
     tags=["Users"],
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_user)],
 )
 
 
@@ -234,7 +236,7 @@ def list_users(
     return [_build_item(u, dept_names, warehouse_names, asset_counts) for u in users]
 
 
-@router.post("/", response_model=UserItemOut)
+@router.post("/", response_model=UserItemOut, dependencies=[Depends(require_admin)])
 def create_user(data: UserCreate, db: Session = Depends(get_db)):
     dept = db.query(Department).filter(Department.name == data.department).first()
     wh = db.query(Warehouse).filter(Warehouse.name == data.warehouse).first()
@@ -290,7 +292,7 @@ def create_user(data: UserCreate, db: Session = Depends(get_db)):
     )
 
 
-@router.put("/{user_id}", response_model=UserItemOut)
+@router.put("/{user_id}", response_model=UserItemOut, dependencies=[Depends(require_admin)])
 def update_user(user_id: str, data: UserUpdate, db: Session = Depends(get_db)):
     user = db.query(Profile).filter(Profile.id == user_id).first()
     if not user:
@@ -328,7 +330,7 @@ def update_user(user_id: str, data: UserUpdate, db: Session = Depends(get_db)):
     return _user_to_item(user, db)
 
 
-@router.delete("/{user_id}")
+@router.delete("/{user_id}", dependencies=[Depends(require_admin)])
 def delete_user(user_id: str, db: Session = Depends(get_db)):
     """Delete a user: removes both the profile row and the Supabase auth user.
 

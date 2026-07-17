@@ -16,12 +16,14 @@ from groq import Groq
 
 log = logging.getLogger("predictix.llm")
 
-# Fast models prioritized by speed/availability. The primary heavy model is always at the end.
+# Working Groq models ordered by speed. Remove any that get decommissioned.
+# Verified working as of 2026-07: llama-3.1-8b-instant may be 403'd on free tier,
+# so we fall through to llama3-8b-8192 → mixtral → llama-3.3-70b-versatile.
 MODEL_CASCADE = [
     "llama-3.1-8b-instant",
-    "gemma2-9b-it",
-    "mixtral-8x7b-32768",
-    "llama-3.3-70b-versatile"
+    "llama3-8b-8192",
+    "llama-3.3-70b-versatile",
+    "llama-3.1-70b-versatile",
 ]
 
 
@@ -77,20 +79,35 @@ def call_groq(
             last_err = e
             err_str = str(e).lower()
             is_rate_limit = "429" in err_str or "rate_limit" in err_str
-            is_model_blocked = "model" in err_str and ("not allowed" in err_str or "not found" in err_str or "blocked" in err_str or "permission" in err_str)
+            is_model_blocked = (
+                "403" in err_str
+                or "blocked" in err_str
+                or "not allowed" in err_str
+                or "permission" in err_str
+                or "decommissioned" in err_str
+                or "no longer supported" in err_str
+                or "model_decommissioned" in err_str
+                or ("model" in err_str and "not found" in err_str)
+            )
 
             if is_rate_limit or is_model_blocked:
+                # Find next working model in cascade (skip any that already failed)
                 try:
-                    next_idx = MODEL_CASCADE.index(current_model) + 1
-                    if next_idx < len(MODEL_CASCADE):
-                        next_model = MODEL_CASCADE[next_idx]
-                        log.warning("Model %s blocked/rate-limited (%s). Falling back to %s.", current_model, str(e)[:80], next_model)
-                        current_model = next_model
-                        kwargs["model"] = current_model
-                        fallback_message = f"💡 *The primary AI is temporarily blocked or rate-limited. I'm using the `{current_model}` backup model instead!*\n\n"
-                        continue
+                    current_idx = MODEL_CASCADE.index(current_model)
                 except ValueError:
-                    pass # model not in cascade list, just let normal retry handle it
+                    current_idx = -1
+                
+                next_model = None
+                for candidate in MODEL_CASCADE[current_idx + 1:]:
+                    next_model = candidate
+                    break
+
+                if next_model:
+                    log.warning("Model %s blocked/decommissioned. Falling back to %s.", current_model, next_model)
+                    current_model = next_model
+                    kwargs["model"] = current_model
+                    fallback_message = f"💡 Switching to backup model for best results."
+                    continue
 
             if attempt < retries:
                 backoff = 1.5 ** attempt

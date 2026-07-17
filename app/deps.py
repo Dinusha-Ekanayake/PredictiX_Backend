@@ -97,9 +97,17 @@ def get_current_user(
 def _build_mock_profile(*, user_id: str, email: str, role: str, warehouse_id: Optional[str] = None, db: Optional[Session]):
     """Construct a duck-typed Profile when the DB record is missing."""
     from app.models import Department
+    from app.routers.auth import _DEMO_USERS
+
+    # Known demo accounts have a declared full_name — use it instead of
+    # deriving one from the email, which yields artifacts like "... Adm1".
+    demo = _DEMO_USERS.get(email.lower())
+    display_name = demo["full_name"] if demo else email.split("@")[0].replace(".", " ").title()
 
     department_id = None
     if db is not None:
+        from app.models import Warehouse
+        
         keyword_to_dept = {
             "transportation": "Transportation",
             "electrical": "Electrical",
@@ -113,19 +121,25 @@ def _build_mock_profile(*, user_id: str, email: str, role: str, warehouse_id: Op
         dept = db.query(Department).filter(Department.name == dept_name).first()
         if dept:
             department_id = dept.id
+            
+        if not warehouse_id:
+            first_wh = db.query(Warehouse).filter(Warehouse.is_active == True).first()
+            if first_wh:
+                warehouse_id = str(first_wh.id)
 
     class MockProfile:
         def __init__(self) -> None:
             self.id = user_id
             self.email = email
             self.role = role
-            self.full_name = email.split("@")[0].replace(".", " ").title()
+            self.full_name = display_name
             self.phone = None
             self.status = "active"
             self.warehouse_id = warehouse_id
             self.department_id = department_id
             self.meta = {}
             self.employee_id = f"EMP-{user_id[:8]}"
+            self.avatar_url = None
 
     return MockProfile()
 
@@ -191,4 +205,6 @@ def active_warehouse_id(user) -> Optional[str]:
     same way here, via the single active warehouse on the token.
     """
     wid = getattr(user, "warehouse_id", None)
-    return str(wid) if wid else None
+    if not wid:
+        raise HTTPException(status_code=400, detail="User is not assigned to any warehouse")
+    return str(wid)

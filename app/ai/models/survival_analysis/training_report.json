@@ -1,0 +1,204 @@
+{
+  "trained_at": "2026-07-11T10:28:56.604373Z",
+  "version": "survival-v3.0",
+  "dataset": "srilanka_single_warehouse_vehicle_maintenance_dataset_v11_realistic.csv",
+  "penalizer": 0.02,
+  "target": "duration_days = days_until_next_maintenance; event = (next_service_type == component service)",
+  "components": [
+    {
+      "component": "brake",
+      "n_train_rows": 77521,
+      "n_test_rows": 19306,
+      "n_train_events": 3011,
+      "n_test_events": 719,
+      "event_rate_train": 0.0388,
+      "n_features": 35,
+      "log_likelihood": -23208.72,
+      "AIC": 46491.44,
+      "weibull_rho": NaN,
+      "test_concordance": 0.7882,
+      "top_covariates": [
+        {
+          "feature": "brake_health_pct",
+          "coef": 0.7947
+        },
+        {
+          "feature": "active_fault_code_count",
+          "coef": -0.4354
+        },
+        {
+          "feature": "vehicle_type_Heavy_Truck_16T",
+          "coef": -0.2613
+        },
+        {
+          "feature": "vehicle_type_Mini_Truck_1T",
+          "coef": -0.2257
+        },
+        {
+          "feature": "vehicle_type_Forklift_3.0T",
+          "coef": 0.1932
+        },
+        {
+          "feature": "vehicle_type_Forklift_2.5T",
+          "coef": 0.1795
+        }
+      ]
+    },
+    {
+      "component": "tire",
+      "n_train_rows": 77521,
+      "n_test_rows": 19306,
+      "n_train_events": 1904,
+      "n_test_events": 429,
+      "event_rate_train": 0.0246,
+      "n_features": 35,
+      "log_likelihood": -15604.76,
+      "AIC": 31283.52,
+      "weibull_rho": NaN,
+      "test_concordance": 0.7859,
+      "top_covariates": [
+        {
+          "feature": "tire_health_pct",
+          "coef": 0.5994
+        },
+        {
+          "feature": "active_fault_code_count",
+          "coef": -0.3978
+        },
+        {
+          "feature": "vehicle_type_Heavy_Truck_16T",
+          "coef": -0.3152
+        },
+        {
+          "feature": "vehicle_role_heavy_cargo_transport",
+          "coef": -0.2724
+        },
+        {
+          "feature": "vehicle_type_Medium_Truck_7T",
+          "coef": -0.2367
+        },
+        {
+          "feature": "vehicle_type_Forklift_3.0T",
+          "coef": 0.1973
+        }
+      ]
+    },
+    {
+      "component": "battery",
+      "n_train_rows": 77521,
+      "n_test_rows": 19306,
+      "n_train_events": 1584,
+      "n_test_events": 377,
+      "event_rate_train": 0.0204,
+      "n_features": 35,
+      "log_likelihood": -13484.71,
+      "AIC": 27043.42,
+      "weibull_rho": NaN,
+      "test_concordance": 0.7763,
+      "top_covariates": [
+        {
+          "feature": "battery_health_pct",
+          "coef": 0.5246
+        },
+        {
+          "feature": "active_fault_code_count",
+          "coef": -0.358
+        },
+        {
+          "feature": "vehicle_type_Mini_Truck_1T",
+          "coef": -0.125
+        },
+        {
+          "feature": "lifetime_service_count",
+          "coef": -0.1224
+        },
+        {
+          "feature": "engine_hours_total",
+          "coef": -0.0859
+        },
+        {
+          "feature": "vehicle_age_years",
+          "coef": -0.0851
+        }
+      ]
+    },
+    {
+      "component": "oil",
+      "n_train_rows": 77521,
+      "n_test_rows": 19306,
+      "n_train_events": 13273,
+      "n_test_events": 3334,
+      "event_rate_train": 0.1712,
+      "n_features": 35,
+      "log_likelihood": -76814.81,
+      "AIC": 153703.63,
+      "weibull_rho": NaN,
+      "test_concordance": 0.7956,
+      "top_covariates": [
+        {
+          "feature": "oil_life_pct",
+          "coef": 1.5579
+        },
+        {
+          "feature": "downtime_hours_last_90d",
+          "coef": 0.3286
+        },
+        {
+          "feature": "days_since_last_service",
+          "coef": 0.3046
+        },
+        {
+          "feature": "vehicle_age_years",
+          "coef": 0.294
+        },
+        {
+          "feature": "active_fault_code_count",
+          "coef": -0.2593
+        },
+        {
+          "feature": "lifetime_service_count",
+          "coef": -0.2253
+        }
+      ]
+    },
+    {
+      "component": "hydraulic",
+      "n_train_rows": 77521,
+      "n_test_rows": 19306,
+      "n_train_events": 1487,
+      "n_test_events": 421,
+      "event_rate_train": 0.0192,
+      "n_features": 35,
+      "log_likelihood": -11526.52,
+      "AIC": 23127.05,
+      "weibull_rho": NaN,
+      "test_concordance": 0.8925,
+      "top_covariates": [
+        {
+          "feature": "hydraulic_health_pct",
+          "coef": 0.6656
+        },
+        {
+          "feature": "vehicle_type_Forklift_3.0T",
+          "coef": -0.631
+        },
+        {
+          "feature": "vehicle_type_Forklift_2.5T",
+          "coef": -0.3856
+        },
+        {
+          "feature": "vehicle_role_internal_material_handling",
+          "coef": -0.3856
+        },
+        {
+          "feature": "vehicle_role_last_mile_delivery",
+          "coef": 0.3168
+        },
+        {
+          "feature": "active_fault_code_count",
+          "coef": -0.2913
+        }
+      ]
+    }
+  ]
+}
