@@ -500,10 +500,8 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             except Exception as second_err:
                 log.error("SQL self-healing also failed: %s", second_err)
                 ctx.db.rollback()
-                return {
-                    "answer": "⚠️ I couldn't retrieve the data for your query. The database may be temporarily unavailable or the question needs rephrasing. Try being more specific!",
-                    "action_buttons": [],
-                }
+                # If SQL is hopelessly broken, maybe it's a general question that shouldn't be SQL at all.
+                return _get_generic_fallback()
 
         if rows is None:
             return {"answer": "📊 The query ran successfully but returned no results. The data matching your request may not exist yet.", "action_buttons": []}
