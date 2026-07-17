@@ -27,6 +27,7 @@ from .tools import (
     handle_database,
     handle_prediction_info,
 )
+from .actions.insert_actions import handle_action
 from app.ai.services.llm_service import call_groq
 
 log = logging.getLogger("predictix.agent")
@@ -39,8 +40,9 @@ INTENT_FAQ         = "FAQ"
 INTENT_KNOWLEDGE   = "KNOWLEDGE"
 INTENT_DATABASE    = "DATABASE"
 INTENT_PREDICTION  = "PREDICTION"
+INTENT_ACTION      = "ACTION"
 
-ALL_INTENTS = [INTENT_GREETING, INTENT_WHOAMI, INTENT_NAVIGATION, INTENT_FAQ, INTENT_KNOWLEDGE, INTENT_DATABASE, INTENT_PREDICTION]
+ALL_INTENTS = [INTENT_GREETING, INTENT_WHOAMI, INTENT_NAVIGATION, INTENT_FAQ, INTENT_KNOWLEDGE, INTENT_DATABASE, INTENT_PREDICTION, INTENT_ACTION]
 
 # ─── Router prompt ─────────────────────────────────────────────────────────────
 ROUTER_SYSTEM = (
@@ -52,7 +54,8 @@ ROUTER_SYSTEM = (
     "4. FAQ: 'how to reset password', 'how to add an asset', general help questions\n"
     "5. PREDICTION: 'how to use failure prediction', 'cost estimation', 'run prediction'\n"
     "6. KNOWLEDGE: 'how does the HVAC system work', 'what is predictive maintenance', definition questions\n"
-    "7. DATABASE: ANY question about actual data, tickets, users, assets, or status counts (e.g. 'how many tickets', 'show my assets')\n\n"
+    "7. DATABASE: ANY question about actual data, tickets, users, assets, or status counts (e.g. 'how many tickets', 'show my assets')\n"
+    "8. ACTION: ANY command to create, insert, or add data (e.g. 'create a ticket', 'add a new user', 'insert an asset'). Do NOT include updates or deletes.\n\n"
     "Rules:\n"
     "- Respond with ONLY the exact intent name in all caps.\n"
     "- If unsure, default to DATABASE."
@@ -85,6 +88,11 @@ def _classify_intent(question: str) -> str:
     )
     if any(q.startswith(t) for t in NAV_TRIGGERS) and any(s in q for s in NAV_SUBJECTS):
         return INTENT_NAVIGATION
+
+    # Fast-path: Actions (create, add, insert, update, delete, edit)
+    ACTION_TRIGGERS = ("create ", "add ", "insert ", "make a new ", "generate a ticket", "update ", "delete ", "edit ", "remove ", "change ")
+    if any(q.startswith(t) for t in ACTION_TRIGGERS):
+        return INTENT_ACTION
 
     # Fast-path: "how to X" / "guide me" / "help me" / "how do i" → always FAQ
     FAQ_TRIGGERS = (
@@ -168,6 +176,10 @@ def run_agent(
         elif intent == INTENT_PREDICTION:
             result = handle_prediction_info(question, ctx)
             tool_trace.append({"name": "handle_prediction_info", "args": {"question": question}, "result_preview": "Prediction info returned."})
+
+        elif intent == INTENT_ACTION:
+            result = handle_action(question, ctx)
+            tool_trace.append({"name": "handle_action", "args": {"question": question}, "result_preview": "Action processed."})
 
         else:  # INTENT_DATABASE (default)
             result = handle_database(question, ctx)
