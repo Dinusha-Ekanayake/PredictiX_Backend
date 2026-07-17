@@ -13,8 +13,8 @@ log = logging.getLogger("predictix.actions")
 
 ACTION_PROMPT = """
 You are the Action Router for PredictiX Sidekick.
-The user wants to insert data (create a ticket, add a user, or add an asset).
-You MUST NOT perform any update or delete operations. If the user asks to update, edit, or delete, return {"action": "unauthorized"}.
+The user wants to perform an action (create a ticket/asset/user, or update a ticket).
+You MUST NOT perform delete operations. If the user asks to delete, return {"action": "unauthorized"}.
 
 Determine the action type and extract the fields from the user's request.
 Return exactly ONE JSON object (and nothing else) matching one of these formats:
@@ -43,7 +43,15 @@ For User Creation:
   "role": "<admin|user|null>"
 }
 
-If you cannot understand the action or it's not a create operation, return:
+For Ticket Update (Status/Priority):
+{
+  "action": "update_ticket",
+  "ticket_id": "<number or ID>",
+  "status": "<open|in_progress|resolved|closed|null>",
+  "priority": "<low|medium|high|null>"
+}
+
+If you cannot understand the action or it's a delete operation, return:
 {
   "action": "unauthorized"
 }
@@ -145,6 +153,48 @@ def handle_action(question: str, ctx: ToolContext) -> dict:
             return {
                 "answer": f"✅ Successfully created a new user: **{new_profile.full_name}** ({email}).",
                 "action_buttons": [{"label": "View User", "path": f"/users/{new_profile.id}"}]
+            }
+            
+        # 4. Update Ticket
+        elif action == "update_ticket":
+            # RBAC: Only Admins can update tickets
+            if not ctx.is_admin:
+                return {"answer": "🔒 You do not have permission to update tickets. Only admins can perform this action.", "action_buttons": []}
+                
+            ticket_id_str = str(data.get("ticket_id"))
+            
+            # Find the ticket by ticket_number or ID
+            ticket = None
+            if ticket_id_str.isdigit() or ticket_id_str.startswith("#"):
+                num = ticket_id_str.replace("#", "")
+                if num.isdigit():
+                    ticket = ctx.db.query(Ticket).filter(Ticket.ticket_number == int(num)).first()
+            else:
+                try:
+                    ticket_uuid = uuid.UUID(ticket_id_str)
+                    ticket = ctx.db.query(Ticket).filter(Ticket.id == ticket_uuid).first()
+                except ValueError:
+                    pass
+                    
+            if not ticket:
+                return {"answer": f"⚠️ I couldn't find a ticket matching '{ticket_id_str}'. Please check the ticket number.", "action_buttons": []}
+                
+            updated_fields = []
+            if data.get("status") and data.get("status") != ticket.status:
+                ticket.status = data.get("status")
+                updated_fields.append(f"status to '{ticket.status}'")
+            if data.get("priority") and data.get("priority") != ticket.priority:
+                ticket.priority = data.get("priority")
+                updated_fields.append(f"priority to '{ticket.priority}'")
+                
+            if not updated_fields:
+                return {"answer": f"The ticket is already up-to-date. No changes were made.", "action_buttons": [{"label": "View Ticket", "path": f"/tickets/{ticket.id}"}]}
+                
+            ctx.db.commit()
+            changes = " and ".join(updated_fields)
+            return {
+                "answer": f"✅ Successfully updated ticket #{ticket.ticket_number}: changed {changes}.",
+                "action_buttons": [{"label": "View Ticket", "path": f"/tickets/{ticket.id}"}]
             }
             
         else:
