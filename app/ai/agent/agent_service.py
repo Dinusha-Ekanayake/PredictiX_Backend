@@ -27,6 +27,7 @@ from .tools import (
     handle_database,
     handle_prediction_info,
 )
+from .actions.insert_actions import handle_action
 from app.ai.services.llm_service import call_groq
 
 log = logging.getLogger("predictix.agent")
@@ -39,8 +40,9 @@ INTENT_FAQ         = "FAQ"
 INTENT_KNOWLEDGE   = "KNOWLEDGE"
 INTENT_DATABASE    = "DATABASE"
 INTENT_PREDICTION  = "PREDICTION"
+INTENT_ACTION      = "ACTION"
 
-ALL_INTENTS = [INTENT_GREETING, INTENT_WHOAMI, INTENT_NAVIGATION, INTENT_FAQ, INTENT_KNOWLEDGE, INTENT_DATABASE, INTENT_PREDICTION]
+ALL_INTENTS = [INTENT_GREETING, INTENT_WHOAMI, INTENT_NAVIGATION, INTENT_FAQ, INTENT_KNOWLEDGE, INTENT_DATABASE, INTENT_PREDICTION, INTENT_ACTION]
 
 # ─── Router prompt ─────────────────────────────────────────────────────────────
 ROUTER_SYSTEM = (
@@ -52,7 +54,8 @@ ROUTER_SYSTEM = (
     "4. FAQ: 'how to reset password', 'how to add an asset', general help questions\n"
     "5. PREDICTION: 'how to use failure prediction', 'cost estimation', 'run prediction'\n"
     "6. KNOWLEDGE: 'how does the HVAC system work', 'what is predictive maintenance', definition questions\n"
-    "7. DATABASE: ANY question about actual data, tickets, users, assets, or status counts (e.g. 'how many tickets', 'show my assets')\n\n"
+    "7. DATABASE: ANY question about actual data, tickets, users, assets, or status counts (e.g. 'how many tickets', 'show my assets')\n"
+    "8. ACTION: ANY command to create, insert, or add data (e.g. 'create a ticket', 'add a new user', 'insert an asset'). Do NOT include updates or deletes.\n\n"
     "Rules:\n"
     "- Respond with ONLY the exact intent name in all caps.\n"
     "- If unsure, default to DATABASE."
@@ -86,6 +89,11 @@ def _classify_intent(question: str) -> str:
     if any(q.startswith(t) for t in NAV_TRIGGERS) and any(s in q for s in NAV_SUBJECTS):
         return INTENT_NAVIGATION
 
+    # Fast-path: Actions (create, add, insert, update, delete, edit)
+    ACTION_TRIGGERS = ("create ", "add ", "insert ", "make a new ", "generate a ticket", "update ", "delete ", "edit ", "remove ", "change ")
+    if any(q.startswith(t) for t in ACTION_TRIGGERS):
+        return INTENT_ACTION
+
     # Fast-path: "how to X" / "guide me" / "help me" / "how do i" → always FAQ
     FAQ_TRIGGERS = (
         "how to ", "how do i ", "guide me", "guide me to", "help me ",
@@ -116,6 +124,44 @@ def _classify_intent(question: str) -> str:
         log.error("Router failed: %s", e)
         return INTENT_DATABASE
 
+def _rewrite_query_with_history(question: str, history: list[dict]) -> str:
+    """Uses LLM to rewrite ambiguous follow-up questions into standalone contextual queries."""
+    if not history:
+        return question
+
+    # Take the last 3 turns to provide context without overloading tokens
+    recent_history = history[-3:]
+    history_text = ""
+    for turn in recent_history:
+        role = turn.get("role", "unknown")
+        content = turn.get("content", "")
+        # Limit assistant content length in case it's a huge dump of tickets
+        if len(content) > 300:
+            content = content[:300] + "...[truncated]"
+        history_text += f"{role}: {content}\n"
+
+    prompt = (
+        "You are a query rewriting assistant.\n"
+        "Given the following conversation history, rewrite the user's latest query into a standalone, fully-contextualized query.\n"
+        "If the user's query is already standalone (e.g. 'how many users are there?'), return it exactly as is.\n"
+        "If the user refers to something in the history (e.g. 'resolve the first one', 'what is its status?'), replace the pronouns or references with the actual entity from the history (e.g. 'resolve ticket #102', 'what is the status of Asset A-100').\n"
+        "Return ONLY the rewritten query, nothing else.\n\n"
+        f"History:\n{history_text}\n"
+        f"User Latest Query: {question}"
+    )
+
+    try:
+        rewritten, _ = call_groq(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.1-8b-instant",
+            max_tokens=50,
+            temperature=0.0
+        )
+        return str(rewritten).strip() if rewritten else question
+    except Exception as e:
+        log.error("Query rewriting failed: %s", e)
+        return question
+
 
 def run_agent(
     question: str,
@@ -139,6 +185,13 @@ def run_agent(
             "tool_trace": [],
             "iterations": 0,
         }
+
+    # Conversational Memory (Query Rewriting)
+    if history and len(history) > 0:
+        original_q = question
+        question = _rewrite_query_with_history(question, history)
+        if question != original_q:
+            log.info("Rewrote query: '%s' -> '%s'", original_q, question)
 
     tool_trace: list[dict] = []
     intent = _classify_intent(question)
@@ -168,6 +221,10 @@ def run_agent(
         elif intent == INTENT_PREDICTION:
             result = handle_prediction_info(question, ctx)
             tool_trace.append({"name": "handle_prediction_info", "args": {"question": question}, "result_preview": "Prediction info returned."})
+
+        elif intent == INTENT_ACTION:
+            result = handle_action(question, ctx)
+            tool_trace.append({"name": "handle_action", "args": {"question": question}, "result_preview": "Action processed."})
 
         else:  # INTENT_DATABASE (default)
             result = handle_database(question, ctx)

@@ -292,8 +292,30 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
     from app.ai.services.llm_service import call_groq
 
     def _get_generic_fallback() -> dict:
+        # Instead of just throwing an email, let the LLM try to answer it based on general persona
+        try:
+            ans, fb = call_groq(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are Sidekick, the PredictiX AI Assistant. The user asked a question that couldn't be answered via database search. "
+                                   "Answer it based on general knowledge of the PredictiX Smart Asset Management System. "
+                                   "Roles: Admins manage users, assets, and settings. Users can view assigned assets, create tickets, and run predictions. "
+                                   "Keep it concise, friendly, and helpful. If you truly cannot answer it, tell them to contact neuromindspredictix@gmail.com."
+                    },
+                    {"role": "user", "content": question}
+                ],
+                model="llama-3.1-8b-instant",
+                max_tokens=300,
+                temperature=0.3,
+            )
+            if ans:
+                return {"answer": fb + str(ans) + "\n\n*(Debug: Fell into generic fallback)*", "action_buttons": []}
+        except Exception:
+            pass
+            
         return {
-            "answer": "Please reach out to our admins at **neuromindspredictix@gmail.com** and they'll get back to you as soon as possible.",
+            "answer": "Please reach out to our admins at **neuromindspredictix@gmail.com** and they'll get back to you as soon as possible. *(Debug: Generic fallback hit)*",
             "action_buttons": [{"label": "Copy Admin Email", "path": "copy:neuromindspredictix@gmail.com"}],
         }
 
@@ -302,8 +324,14 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
 
     # ── Step 0: Dashboard Fast-Path (100% UI Parity) ─────────────────────────
     q_lower = question.lower()
-    is_summary = any(w in q_lower for w in ["summary", "overview", "dashboard stats", "all stats"])
+    is_summary = any(w in q_lower for w in ["summary", "overview", "dashboard stats", "all stats", "how many users", "total users", "how many tickets", "total tickets"])
+    
     if is_summary:
+        if ctx.role not in ["admin", "super_admin"]:
+            return {
+                "answer": "🔒 You do not have permission to view system-wide dashboard statistics. You can only view and manage your own tickets and assigned assets.",
+                "action_buttons": [],
+            }
         try:
             from app.routers.admin_dashboard import _build_admin_summary
             from app.models import Profile
@@ -381,31 +409,27 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
 
         # Build role-based scoping instruction
         if ctx.is_admin:
-            scope_instruction = "The current user is an ADMIN. You may query ALL records across the entire system."
+            role_instructions = "SECURITY RULE: The user is an ADMIN. You may query ALL records across the entire system."
             if ctx.warehouse_id:
-                scope_instruction += f" The admin is scoped to warehouse_id = '{ctx.warehouse_id}'."
+                role_instructions += f" The admin is scoped to warehouse_id = '{ctx.warehouse_id}'."
         else:
-            scope_instruction = (
-                f"The current user is a STANDARD USER (id='{ctx.user_id}'). "
+            role_instructions = (
+                f"SECURITY RULE: The current user is a STANDARD USER (id='{ctx.user_id}'). "
                 "You MUST add a WHERE clause to only show records where created_by = '{user_id}' OR assigned_to = '{user_id}'. "
                 "Never expose other users' private data."
             ).replace("{user_id}", ctx.user_id)
 
         sql_prompt = (
-            f"You are an expert PostgreSQL developer for PredictiX.\n\n"
-            f"SCHEMA:\n{schema_str}\n\n"
-            f"SCOPING RULE: {scope_instruction}\n\n"
-            f"TASK: Write a raw PostgreSQL SELECT query to answer: \"{question}\"\n\n"
-            "RULES:\n"
-            "- Output ONLY the raw SQL, no markdown, no backticks, no explanation.\n"
-            "- Only SELECT queries allowed. No INSERT/UPDATE/DELETE/DROP.\n"
-            "- LIMIT results to 50 rows maximum.\n"
-            "- If the question asks 'how many per category', 'count by', 'in each', 'by role', 'by status', 'by type', "
-            "  you MUST use GROUP BY and COUNT(*) to return every category with its count. "
-            "  Also add ORDER BY count DESC so highest counts appear first.\n"
-            "- If the question asks for a total count, use COUNT(*).\n"
-            "- If impossible, output: ERROR: <reason>"
+            f"You are a PostgreSQL expert. Write a query to answer: \"{question}\"\n"
+            f"Use ONLY these tables: {selected_tables}\n"
+            f"Schema:\n{schema_str}\n"
+            f"{role_instructions}\n"
+            "CRITICAL INSTRUCTIONS:\n"
+            "1. If the user asks for 'details', 'info', or queries a specific record (like a specific Ticket ID, Asset Name, or User), you MUST use `SELECT *` so the ID and all fields are returned. DO NOT use `COUNT(*)` or aggregate functions for specific record lookups.\n"
+            "2. Respond ONLY with raw valid PostgreSQL SQL. No markdown formatting, no backticks, no explanations.\n"
+            "3. If the question cannot be answered using the schema, or violates the security rule, output EXACTLY: 'ERROR: reason'"
         )
+
         try:
             raw_sql, fb = call_groq(
                 messages=[{"role": "user", "content": sql_prompt}],
@@ -419,8 +443,14 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             log.error("SQL generator failed: %s", e)
             return {"answer": "⚠️ I had trouble generating a database query. Please try again shortly.", "action_buttons": []}
 
+        if sql.startswith("ERROR: Permission Denied"):
+            return {
+                "answer": "🔒 You do not have permission to view system-wide data. You can only view records assigned to or created by you.",
+                "action_buttons": [],
+            }
+
         if sql.startswith("ERROR:"):
-            return _get_generic_fallback()
+            return {"answer": f"❌ The database agent could not fulfill this request: {sql}", "action_buttons": []}
 
         # Security guard: block any mutation
         import re
@@ -472,13 +502,50 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             except Exception as second_err:
                 log.error("SQL self-healing also failed: %s", second_err)
                 ctx.db.rollback()
-                return {
-                    "answer": "⚠️ I couldn't retrieve the data for your query. The database may be temporarily unavailable or the question needs rephrasing. Try being more specific!",
-                    "action_buttons": [],
-                }
+                return {"answer": f"❌ The database agent encountered an error executing the query:\nSQL: {sql}\nERROR: {second_err}", "action_buttons": []}
 
         if rows is None:
             return {"answer": "📊 The query ran successfully but returned no results. The data matching your request may not exist yet.", "action_buttons": []}
+
+    # ── Fast-Path for Single Records (Widget) ──────────────────────────────
+    # If the database returns exactly 1 record AND it has an ID, we bypass the
+    # text summarizer and return a rich widget.
+    if rows and len(rows) == 1 and "id" in rows[0] and not goto_summarizer:
+        row = rows[0]
+        row_id = str(row["id"])
+        
+        # Determine table/type
+        table_type = "unknown"
+        if "tickets" in selected_tables: table_type = "ticket"
+        elif "assets" in selected_tables: table_type = "asset"
+        elif "profiles" in selected_tables or "users" in selected_tables: table_type = "user"
+        
+        if table_type != "unknown":
+            action_buttons = []
+            if table_type == "ticket":
+                base_path = "/admin/tickets" if ctx.is_admin else "/user/tickets"
+                action_buttons.append({"label": "View Ticket", "path": f"{base_path}?ticket_id={row_id}"})
+            elif table_type == "asset":
+                action_buttons.append({"label": "View Asset", "path": f"/admin/assets?asset_id={row_id}"})
+            elif table_type == "user":
+                action_buttons.append({"label": "View User", "path": f"/admin/users?user_id={row_id}"})
+                
+            # Convert row to dict, ensuring datetime objects are strings
+            def _serialize(v):
+                if hasattr(v, "isoformat"): return v.isoformat()
+                return str(v) if v is not None else None
+            
+            clean_data = {str(k): _serialize(v) for k, v in row.items()}
+            
+            return {
+                "answer": f"Here is the detailed summary card you requested:",
+                "action_buttons": action_buttons,
+                "widget_type": "RECORD_SUMMARY",
+                "widget_data": {
+                    "type": table_type,
+                    "data": clean_data
+                }
+            }
 
     # ── Step 4: Summarize (fast model) ───────────────────────────────────────
     row_str = str(rows[:30])  # cap context to keep tokens low
@@ -506,14 +573,12 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
         f"You are PredictiX Assistant. A user asked: \"{question}\"\n"
         f"The database returned this data: {row_str}\n\n"
         "INSTRUCTIONS — follow these EXACTLY:\n"
-        "1. Start with a ONE-LINE summary stating the TOTAL count.\n"
-        "2. Then list EVERY SINGLE category/group/status/role from the data with its exact count.\n"
-        "   Format each line as: [emoji] **Category Name:** X items\n"
-        "3. Use 👥 for user roles, 🎫 for ticket status, ⚙️ for asset types, 📊 for general stats.\n"
-        "4. Quote EXACT numbers — never round or approximate.\n"
-        "5. Never say 'Found N records matching' — always show the actual breakdown.\n"
-        "6. Never expose raw UUIDs.\n"
-        "7. End with a polite, helpful closing sentence."
+        "1. If the user asks for details of a SPECIFIC record (like a specific ticket, asset, or user) and there is only 1 record returned, output its details clearly in a bulleted list (e.g. Title, Status, Description, Priority). Do NOT just output aggregate counts.\n"
+        "2. If the user asks for general stats, start with a ONE-LINE summary of the TOTAL count, then list the breakdown of categories with their exact count (e.g. 🎫 **Open Tickets:** 5 items).\n"
+        "3. Use 👥 for users, 🎫 for tickets, ⚙️ for assets, 📊 for general stats.\n"
+        "4. Quote EXACT numbers and data — never round or approximate.\n"
+        "5. Never expose raw UUIDs unless the user explicitly provided one in their question.\n"
+        "6. End with a polite, helpful closing sentence."
     )
     try:
         summary, fb = call_groq(
@@ -531,14 +596,27 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
 
     # Determine interactive action buttons based on queried tables
     action_buttons = []
-    if "profiles" in selected_tables or "users" in selected_tables:
-        action_buttons.append({"label": "Manage Users", "path": "/admin/users"})
-    if "tickets" in selected_tables:
-        action_buttons.append({"label": "View Tickets", "path": "/admin/tickets"})
-    if "assets" in selected_tables:
-        action_buttons.append({"label": "View Assets", "path": "/admin/assets"})
-    if "warehouses" in selected_tables:
-        action_buttons.append({"label": "View Warehouses", "path": "/admin/warehouse"})
+    
+    # Fast-path for single records: provide a deep-link button directly to the item!
+    if rows and len(rows) == 1 and "id" in rows[0]:
+        row_id = str(rows[0]["id"])
+        if "tickets" in selected_tables:
+            base_path = "/admin/tickets" if ctx.is_admin else "/user/tickets"
+            action_buttons.append({"label": "View Ticket", "path": f"{base_path}?ticket_id={row_id}"})
+        elif "assets" in selected_tables:
+            action_buttons.append({"label": "View Asset", "path": f"/admin/assets?asset_id={row_id}"})
+        elif "profiles" in selected_tables or "users" in selected_tables:
+            action_buttons.append({"label": "View User", "path": f"/admin/users?user_id={row_id}"})
+    else:
+        if "profiles" in selected_tables or "users" in selected_tables:
+            action_buttons.append({"label": "Manage Users", "path": "/admin/users"})
+        if "tickets" in selected_tables:
+            base_path = "/admin/tickets" if ctx.is_admin else "/user/tickets"
+            action_buttons.append({"label": "View Tickets", "path": base_path})
+        if "assets" in selected_tables:
+            action_buttons.append({"label": "View Assets", "path": "/admin/assets"})
+        if "warehouses" in selected_tables:
+            action_buttons.append({"label": "View Warehouses", "path": "/admin/warehouse"})
 
     # Limit to 2 buttons max so it doesn't clutter the UI
     action_buttons = action_buttons[:2]
@@ -576,6 +654,21 @@ def handle_prediction_info(question: str, ctx: ToolContext) -> dict:
             {"label": "Go to Assets", "path": "/admin/assets"},
         ]
         return {"answer": answer, "action_buttons": buttons}
+    # Otherwise, check if they are asking about a specific asset's health/prediction for the widget demo
+    if "show asset health card" in q_lower or "health card for" in q_lower:
+        # For the proof-of-concept Widget, we return a mock/real asset data payload
+        return {
+            "answer": "Here is the latest predictive health assessment for the requested asset.",
+            "action_buttons": [],
+            "widget_type": "ASSET_HEALTH",
+            "widget_data": {
+                "name": "Heavy Duty Forklift A-1",
+                "healthScore": 82,
+                "status": "Warning",
+                "failureProbability": 0.45,
+                "predictedFailureDate": "2026-08-15"
+            }
+        }
 
     # Otherwise, query the actual prediction data from DB
     return handle_database(question, ctx)

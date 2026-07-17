@@ -1,7 +1,7 @@
 """PredictiX Chatbot Router – V3 (Token-Optimized, Action-Button enabled)."""
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Optional, Dict
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
@@ -53,6 +53,8 @@ class AgentResponse(BaseModel):
     action_buttons: list[ActionButton] = []
     tool_trace: list[ToolTraceItem] = []
     iterations: int = 1
+    widget_type: Optional[str] = None
+    widget_data: Optional[Dict[str, Any]] = None
 
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
