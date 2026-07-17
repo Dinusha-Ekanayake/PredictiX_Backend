@@ -103,9 +103,10 @@ def handle_action(question: str, ctx: ToolContext) -> dict:
             ctx.db.add(new_ticket)
             ctx.db.commit()
             
+            base_path = "/admin/tickets" if ctx.is_admin else "/user/tickets"
             return {
                 "answer": f"✅ Successfully created a new ticket: **{new_ticket.title}**.",
-                "action_buttons": [{"label": "View Ticket", "path": f"/tickets/{new_ticket.id}"}]
+                "action_buttons": [{"label": "View Ticket", "path": f"{base_path}?ticket_id={new_ticket.id}"}]
             }
             
         # 2. Create Asset
@@ -127,7 +128,7 @@ def handle_action(question: str, ctx: ToolContext) -> dict:
             
             return {
                 "answer": f"✅ Successfully created a new asset: **{new_asset.asset_name}** ({new_asset.asset_code}).",
-                "action_buttons": [{"label": "View Asset", "path": f"/assets/{new_asset.id}"}]
+                "action_buttons": [{"label": "View Asset", "path": f"/admin/assets?asset_id={new_asset.id}"}]
             }
             
         # 3. Create User
