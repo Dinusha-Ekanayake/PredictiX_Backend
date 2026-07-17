@@ -292,6 +292,28 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
     from app.ai.services.llm_service import call_groq
 
     def _get_generic_fallback() -> dict:
+        # Instead of just throwing an email, let the LLM try to answer it based on general persona
+        try:
+            ans, fb = call_groq(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are Sidekick, the PredictiX AI Assistant. The user asked a question that couldn't be answered via database search. "
+                                   "Answer it based on general knowledge of the PredictiX Smart Asset Management System. "
+                                   "Roles: Admins manage users, assets, and settings. Users can view assigned assets, create tickets, and run predictions. "
+                                   "Keep it concise, friendly, and helpful. If you truly cannot answer it, tell them to contact neuromindspredictix@gmail.com."
+                    },
+                    {"role": "user", "content": question}
+                ],
+                model="llama-3.1-8b-instant",
+                max_tokens=300,
+                temperature=0.3,
+            )
+            if ans:
+                return {"answer": fb + str(ans), "action_buttons": []}
+        except Exception:
+            pass
+            
         return {
             "answer": "Please reach out to our admins at **neuromindspredictix@gmail.com** and they'll get back to you as soon as possible.",
             "action_buttons": [{"label": "Copy Admin Email", "path": "copy:neuromindspredictix@gmail.com"}],
@@ -302,8 +324,14 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
 
     # ── Step 0: Dashboard Fast-Path (100% UI Parity) ─────────────────────────
     q_lower = question.lower()
-    is_summary = any(w in q_lower for w in ["summary", "overview", "dashboard stats", "all stats"])
+    is_summary = any(w in q_lower for w in ["summary", "overview", "dashboard stats", "all stats", "how many users", "total users", "how many tickets", "total tickets"])
+    
     if is_summary:
+        if ctx.role not in ["admin", "super_admin"]:
+            return {
+                "answer": "🔒 You do not have permission to view system-wide dashboard statistics. You can only view and manage your own tickets and assigned assets.",
+                "action_buttons": [],
+            }
         try:
             from app.routers.admin_dashboard import _build_admin_summary
             from app.models import Profile
@@ -390,22 +418,17 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                 "You MUST add a WHERE clause to only show records where created_by = '{user_id}' OR assigned_to = '{user_id}'. "
                 "Never expose other users' private data."
             ).replace("{user_id}", ctx.user_id)
+            role_instructions = "\nSECURITY RULE: The user is an admin. They have full access to all data."
 
         sql_prompt = (
-            f"You are an expert PostgreSQL developer for PredictiX.\n\n"
-            f"SCHEMA:\n{schema_str}\n\n"
-            f"SCOPING RULE: {scope_instruction}\n\n"
-            f"TASK: Write a raw PostgreSQL SELECT query to answer: \"{question}\"\n\n"
-            "RULES:\n"
-            "- Output ONLY the raw SQL, no markdown, no backticks, no explanation.\n"
-            "- Only SELECT queries allowed. No INSERT/UPDATE/DELETE/DROP.\n"
-            "- LIMIT results to 50 rows maximum.\n"
-            "- If the question asks 'how many per category', 'count by', 'in each', 'by role', 'by status', 'by type', "
-            "  you MUST use GROUP BY and COUNT(*) to return every category with its count. "
-            "  Also add ORDER BY count DESC so highest counts appear first.\n"
-            "- If the question asks for a total count, use COUNT(*).\n"
-            "- If impossible, output: ERROR: <reason>"
+            f"You are a PostgreSQL expert. Write a query to answer: \"{question}\"\n"
+            f"Use ONLY these tables: {selected_tables}\n"
+            f"Schema:\n{schema_str}\n"
+            f"{role_instructions}\n"
+            "Respond ONLY with raw valid PostgreSQL SQL. No markdown formatting, no backticks, no explanations. "
+            "If the question cannot be answered using the schema, or violates the security rule, output EXACTLY: 'ERROR: reason'"
         )
+
         try:
             raw_sql, fb = call_groq(
                 messages=[{"role": "user", "content": sql_prompt}],
@@ -418,6 +441,12 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
         except Exception as e:
             log.error("SQL generator failed: %s", e)
             return {"answer": "⚠️ I had trouble generating a database query. Please try again shortly.", "action_buttons": []}
+
+        if sql.startswith("ERROR: Permission Denied"):
+            return {
+                "answer": "🔒 You do not have permission to view system-wide data. You can only view records assigned to or created by you.",
+                "action_buttons": [],
+            }
 
         if sql.startswith("ERROR:"):
             return _get_generic_fallback()
