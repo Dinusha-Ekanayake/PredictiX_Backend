@@ -602,6 +602,21 @@ def handle_prediction_info(question: str, ctx: ToolContext) -> dict:
             {"label": "Go to Assets", "path": "/admin/assets"},
         ]
         return {"answer": answer, "action_buttons": buttons}
+    # Otherwise, check if they are asking about a specific asset's health/prediction for the widget demo
+    if "show asset health card" in q_lower or "health card for" in q_lower:
+        # For the proof-of-concept Widget, we return a mock/real asset data payload
+        return {
+            "answer": "Here is the latest predictive health assessment for the requested asset.",
+            "action_buttons": [],
+            "widget_type": "ASSET_HEALTH",
+            "widget_data": {
+                "name": "Heavy Duty Forklift A-1",
+                "healthScore": 82,
+                "status": "Warning",
+                "failureProbability": 0.45,
+                "predictedFailureDate": "2026-08-15"
+            }
+        }
 
     # Otherwise, query the actual prediction data from DB
     return handle_database(question, ctx)
