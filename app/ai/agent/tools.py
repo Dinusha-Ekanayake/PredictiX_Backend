@@ -310,12 +310,12 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                 temperature=0.3,
             )
             if ans:
-                return {"answer": fb + str(ans), "action_buttons": []}
+                return {"answer": fb + str(ans) + "\n\n*(Debug: Fell into generic fallback)*", "action_buttons": []}
         except Exception:
             pass
             
         return {
-            "answer": "Please reach out to our admins at **neuromindspredictix@gmail.com** and they'll get back to you as soon as possible.",
+            "answer": "Please reach out to our admins at **neuromindspredictix@gmail.com** and they'll get back to you as soon as possible. *(Debug: Generic fallback hit)*",
             "action_buttons": [{"label": "Copy Admin Email", "path": "copy:neuromindspredictix@gmail.com"}],
         }
 
@@ -424,8 +424,10 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             f"Use ONLY these tables: {selected_tables}\n"
             f"Schema:\n{schema_str}\n"
             f"{role_instructions}\n"
-            "Respond ONLY with raw valid PostgreSQL SQL. No markdown formatting, no backticks, no explanations. "
-            "If the question cannot be answered using the schema, or violates the security rule, output EXACTLY: 'ERROR: reason'"
+            "CRITICAL INSTRUCTIONS:\n"
+            "1. If the user asks for 'details', 'info', or queries a specific record (like a specific Ticket ID, Asset Name, or User), you MUST use `SELECT *` so the ID and all fields are returned. DO NOT use `COUNT(*)` or aggregate functions for specific record lookups.\n"
+            "2. Respond ONLY with raw valid PostgreSQL SQL. No markdown formatting, no backticks, no explanations.\n"
+            "3. If the question cannot be answered using the schema, or violates the security rule, output EXACTLY: 'ERROR: reason'"
         )
 
         try:
@@ -448,7 +450,7 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             }
 
         if sql.startswith("ERROR:"):
-            return _get_generic_fallback()
+            return {"answer": f"❌ The database agent could not fulfill this request: {sql}", "action_buttons": []}
 
         # Security guard: block any mutation
         import re
@@ -500,11 +502,50 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             except Exception as second_err:
                 log.error("SQL self-healing also failed: %s", second_err)
                 ctx.db.rollback()
-                # If SQL is hopelessly broken, maybe it's a general question that shouldn't be SQL at all.
-                return _get_generic_fallback()
+                return {"answer": f"❌ The database agent encountered an error executing the query:\nSQL: {sql}\nERROR: {second_err}", "action_buttons": []}
 
         if rows is None:
             return {"answer": "📊 The query ran successfully but returned no results. The data matching your request may not exist yet.", "action_buttons": []}
+
+    # ── Fast-Path for Single Records (Widget) ──────────────────────────────
+    # If the database returns exactly 1 record AND it has an ID, we bypass the
+    # text summarizer and return a rich widget.
+    if rows and len(rows) == 1 and "id" in rows[0] and not goto_summarizer:
+        row = rows[0]
+        row_id = str(row["id"])
+        
+        # Determine table/type
+        table_type = "unknown"
+        if "tickets" in selected_tables: table_type = "ticket"
+        elif "assets" in selected_tables: table_type = "asset"
+        elif "profiles" in selected_tables or "users" in selected_tables: table_type = "user"
+        
+        if table_type != "unknown":
+            action_buttons = []
+            if table_type == "ticket":
+                base_path = "/admin/tickets" if ctx.is_admin else "/user/tickets"
+                action_buttons.append({"label": "View Ticket", "path": f"{base_path}?ticket_id={row_id}"})
+            elif table_type == "asset":
+                action_buttons.append({"label": "View Asset", "path": f"/admin/assets?asset_id={row_id}"})
+            elif table_type == "user":
+                action_buttons.append({"label": "View User", "path": f"/admin/users?user_id={row_id}"})
+                
+            # Convert row to dict, ensuring datetime objects are strings
+            def _serialize(v):
+                if hasattr(v, "isoformat"): return v.isoformat()
+                return str(v) if v is not None else None
+            
+            clean_data = {str(k): _serialize(v) for k, v in row.items()}
+            
+            return {
+                "answer": f"Here is the detailed summary card you requested:",
+                "action_buttons": action_buttons,
+                "widget_type": "RECORD_SUMMARY",
+                "widget_data": {
+                    "type": table_type,
+                    "data": clean_data
+                }
+            }
 
     # ── Step 4: Summarize (fast model) ───────────────────────────────────────
     row_str = str(rows[:30])  # cap context to keep tokens low
@@ -532,14 +573,12 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
         f"You are PredictiX Assistant. A user asked: \"{question}\"\n"
         f"The database returned this data: {row_str}\n\n"
         "INSTRUCTIONS — follow these EXACTLY:\n"
-        "1. Start with a ONE-LINE summary stating the TOTAL count.\n"
-        "2. Then list EVERY SINGLE category/group/status/role from the data with its exact count.\n"
-        "   Format each line as: [emoji] **Category Name:** X items\n"
-        "3. Use 👥 for user roles, 🎫 for ticket status, ⚙️ for asset types, 📊 for general stats.\n"
-        "4. Quote EXACT numbers — never round or approximate.\n"
-        "5. Never say 'Found N records matching' — always show the actual breakdown.\n"
-        "6. Never expose raw UUIDs.\n"
-        "7. End with a polite, helpful closing sentence."
+        "1. If the user asks for details of a SPECIFIC record (like a specific ticket, asset, or user) and there is only 1 record returned, output its details clearly in a bulleted list (e.g. Title, Status, Description, Priority). Do NOT just output aggregate counts.\n"
+        "2. If the user asks for general stats, start with a ONE-LINE summary of the TOTAL count, then list the breakdown of categories with their exact count (e.g. 🎫 **Open Tickets:** 5 items).\n"
+        "3. Use 👥 for users, 🎫 for tickets, ⚙️ for assets, 📊 for general stats.\n"
+        "4. Quote EXACT numbers and data — never round or approximate.\n"
+        "5. Never expose raw UUIDs unless the user explicitly provided one in their question.\n"
+        "6. End with a polite, helpful closing sentence."
     )
     try:
         summary, fb = call_groq(
@@ -557,14 +596,27 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
 
     # Determine interactive action buttons based on queried tables
     action_buttons = []
-    if "profiles" in selected_tables or "users" in selected_tables:
-        action_buttons.append({"label": "Manage Users", "path": "/admin/users"})
-    if "tickets" in selected_tables:
-        action_buttons.append({"label": "View Tickets", "path": "/admin/tickets"})
-    if "assets" in selected_tables:
-        action_buttons.append({"label": "View Assets", "path": "/admin/assets"})
-    if "warehouses" in selected_tables:
-        action_buttons.append({"label": "View Warehouses", "path": "/admin/warehouse"})
+    
+    # Fast-path for single records: provide a deep-link button directly to the item!
+    if rows and len(rows) == 1 and "id" in rows[0]:
+        row_id = str(rows[0]["id"])
+        if "tickets" in selected_tables:
+            base_path = "/admin/tickets" if ctx.is_admin else "/user/tickets"
+            action_buttons.append({"label": "View Ticket", "path": f"{base_path}?ticket_id={row_id}"})
+        elif "assets" in selected_tables:
+            action_buttons.append({"label": "View Asset", "path": f"/admin/assets?asset_id={row_id}"})
+        elif "profiles" in selected_tables or "users" in selected_tables:
+            action_buttons.append({"label": "View User", "path": f"/admin/users?user_id={row_id}"})
+    else:
+        if "profiles" in selected_tables or "users" in selected_tables:
+            action_buttons.append({"label": "Manage Users", "path": "/admin/users"})
+        if "tickets" in selected_tables:
+            base_path = "/admin/tickets" if ctx.is_admin else "/user/tickets"
+            action_buttons.append({"label": "View Tickets", "path": base_path})
+        if "assets" in selected_tables:
+            action_buttons.append({"label": "View Assets", "path": "/admin/assets"})
+        if "warehouses" in selected_tables:
+            action_buttons.append({"label": "View Warehouses", "path": "/admin/warehouse"})
 
     # Limit to 2 buttons max so it doesn't clutter the UI
     action_buttons = action_buttons[:2]
