@@ -124,6 +124,44 @@ def _classify_intent(question: str) -> str:
         log.error("Router failed: %s", e)
         return INTENT_DATABASE
 
+def _rewrite_query_with_history(question: str, history: list[dict]) -> str:
+    """Uses LLM to rewrite ambiguous follow-up questions into standalone contextual queries."""
+    if not history:
+        return question
+
+    # Take the last 3 turns to provide context without overloading tokens
+    recent_history = history[-3:]
+    history_text = ""
+    for turn in recent_history:
+        role = turn.get("role", "unknown")
+        content = turn.get("content", "")
+        # Limit assistant content length in case it's a huge dump of tickets
+        if len(content) > 300:
+            content = content[:300] + "...[truncated]"
+        history_text += f"{role}: {content}\n"
+
+    prompt = (
+        "You are a query rewriting assistant.\n"
+        "Given the following conversation history, rewrite the user's latest query into a standalone, fully-contextualized query.\n"
+        "If the user's query is already standalone (e.g. 'how many users are there?'), return it exactly as is.\n"
+        "If the user refers to something in the history (e.g. 'resolve the first one', 'what is its status?'), replace the pronouns or references with the actual entity from the history (e.g. 'resolve ticket #102', 'what is the status of Asset A-100').\n"
+        "Return ONLY the rewritten query, nothing else.\n\n"
+        f"History:\n{history_text}\n"
+        f"User Latest Query: {question}"
+    )
+
+    try:
+        rewritten, _ = call_groq(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.1-8b-instant",
+            max_tokens=50,
+            temperature=0.0
+        )
+        return str(rewritten).strip() if rewritten else question
+    except Exception as e:
+        log.error("Query rewriting failed: %s", e)
+        return question
+
 
 def run_agent(
     question: str,
@@ -147,6 +185,13 @@ def run_agent(
             "tool_trace": [],
             "iterations": 0,
         }
+
+    # Conversational Memory (Query Rewriting)
+    if history and len(history) > 0:
+        original_q = question
+        question = _rewrite_query_with_history(question, history)
+        if question != original_q:
+            log.info("Rewrote query: '%s' -> '%s'", original_q, question)
 
     tool_trace: list[dict] = []
     intent = _classify_intent(question)
