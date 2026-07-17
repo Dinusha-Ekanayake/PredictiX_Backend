@@ -409,16 +409,15 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
 
         # Build role-based scoping instruction
         if ctx.is_admin:
-            scope_instruction = "The current user is an ADMIN. You may query ALL records across the entire system."
+            role_instructions = "SECURITY RULE: The user is an ADMIN. You may query ALL records across the entire system."
             if ctx.warehouse_id:
-                scope_instruction += f" The admin is scoped to warehouse_id = '{ctx.warehouse_id}'."
+                role_instructions += f" The admin is scoped to warehouse_id = '{ctx.warehouse_id}'."
         else:
-            scope_instruction = (
-                f"The current user is a STANDARD USER (id='{ctx.user_id}'). "
+            role_instructions = (
+                f"SECURITY RULE: The current user is a STANDARD USER (id='{ctx.user_id}'). "
                 "You MUST add a WHERE clause to only show records where created_by = '{user_id}' OR assigned_to = '{user_id}'. "
                 "Never expose other users' private data."
             ).replace("{user_id}", ctx.user_id)
-            role_instructions = "\nSECURITY RULE: The user is an admin. They have full access to all data."
 
         sql_prompt = (
             f"You are a PostgreSQL expert. Write a query to answer: \"{question}\"\n"
