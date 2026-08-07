@@ -271,8 +271,8 @@ def _ping_hf_models() -> None:
         try:
             call_hf_inference(repo, "keep_warm_ping", timeout=30, max_cold_start_wait=20)
             log.debug("Pinged %s to keep warm.", repo)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("HF keep-warm ping failed for %s (non-fatal): %s", repo, exc)
 
 
 @asynccontextmanager
