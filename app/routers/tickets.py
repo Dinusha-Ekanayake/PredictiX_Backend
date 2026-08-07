@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -16,6 +18,7 @@ from app.models import (
     TicketPrediction,
     TicketStatusHistory,
 )
+from app.services.in_app_notification_service import InAppNotificationService
 from app.schemas.tickets import (
     TicketCreate,
     TicketUpdate,
@@ -34,6 +37,7 @@ from app.ai.services.ticket_categorization_service import categorize_ticket_text
 from app.ai.services.ticket_priority_service import predict_ticket_priority
 
 router = APIRouter(prefix="/tickets", tags=["Tickets"])
+log = logging.getLogger(__name__)
 
 # Supabase enums are lowercase — normalize incoming values
 VALID_STATUSES = {"open", "in_progress", "pending", "resolved", "closed", "cancelled"}
@@ -89,7 +93,28 @@ def create_ticket(payload: TicketCreate, db: Session = Depends(get_db), _: objec
     db.add(obj)
     db.commit()
     db.refresh(obj)
+
+    if obj.assigned_to:
+        _notify_ticket_assignment(db, obj)
+
     return obj
+
+
+def _notify_ticket_assignment(db: Session, ticket: Ticket) -> None:
+    """Best-effort in-app notification to a newly assigned ticket user.
+    Never allowed to break the ticket create/update flow it's called from."""
+    try:
+        InAppNotificationService.notify_user(
+            db,
+            user_id=str(ticket.assigned_to),
+            title="Ticket assigned to you",
+            message=f"{ticket.ticket_number}: {ticket.title}",
+            priority=ticket.priority or "medium",
+            notification_type="ticket_updated",
+            link_url=f"/admin/tickets?ticket_id={ticket.id}",
+        )
+    except Exception:
+        log.exception("Failed to send ticket assignment notification for %s", ticket.id)
 
 
 @router.get("/status-counts", response_model=dict[str, int])
@@ -385,6 +410,7 @@ def update_ticket(ticket_id: str, payload: TicketUpdate, db: Session = Depends(g
 
     updates = payload.model_dump(exclude_unset=True)
     old_status = obj.status
+    old_assigned_to = obj.assigned_to
 
     # normalize enum fields
     if "status" in updates and updates["status"]:
@@ -415,6 +441,11 @@ def update_ticket(ticket_id: str, payload: TicketUpdate, db: Session = Depends(g
 
     db.commit()
     db.refresh(obj)
+
+    new_assigned_to = updates.get("assigned_to")
+    if new_assigned_to and str(new_assigned_to) != str(old_assigned_to or ""):
+        _notify_ticket_assignment(db, obj)
+
     return obj
 
 
