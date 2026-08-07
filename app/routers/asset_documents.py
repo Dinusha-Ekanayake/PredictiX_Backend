@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import String, cast
 from sqlalchemy.orm import Session
-from app.deps import get_db, require_admin, require_user
+from app.deps import get_db, get_current_user, is_admin_role, require_admin, require_user
 from app.models import Asset, AssetDocument
 from app.schemas.misc import AssetDocumentCreate, AssetDocumentOut
 
@@ -30,8 +31,18 @@ def list_asset_documents(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
 ):
     q = db.query(AssetDocument)
+
+    # Same rule as maintenance.py's list scoping — a regular user only sees
+    # documents for assets assigned to them, not the whole fleet.
+    if not is_admin_role(current_user):
+        uid = str(getattr(current_user, "id", ""))
+        q = q.join(Asset, AssetDocument.asset_id == Asset.id).filter(
+            cast(Asset.assigned_to, String) == uid
+        )
+
     if asset_id:
         q = q.filter(AssetDocument.asset_id == asset_id)
     return q.order_by(AssetDocument.created_at.desc()).offset(offset).limit(limit).all()
