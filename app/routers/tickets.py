@@ -125,7 +125,15 @@ def get_ticket_status_counts(
         if wh_id:
             q = q.filter(Ticket.warehouse_id == wh_id)
     else:
-        q = q.filter((Ticket.assigned_to == current_user.id) | (Ticket.created_by == current_user.id))
+        user_wh_id = getattr(current_user, "warehouse_id", None)
+        if user_wh_id:
+            q = q.filter(
+                (Ticket.warehouse_id == user_wh_id) |
+                (Ticket.assigned_to == current_user.id) |
+                (Ticket.created_by == current_user.id)
+            )
+        else:
+            q = q.filter((Ticket.assigned_to == current_user.id) | (Ticket.created_by == current_user.id))
 
     rows = q.all()
     
@@ -163,10 +171,18 @@ def list_tickets(
     # other employee's ticket titles/descriptions for that asset.
     if not is_admin_role(current_user):
         uid = str(getattr(current_user, "id", ""))
-        q = q.filter(
-            (cast(Ticket.created_by, String) == uid) |
-            (cast(Ticket.assigned_to, String) == uid)
-        )
+        user_wh_id = getattr(current_user, "warehouse_id", None)
+        if user_wh_id:
+            q = q.filter(
+                (Ticket.warehouse_id == user_wh_id) |
+                (cast(Ticket.created_by, String) == uid) |
+                (cast(Ticket.assigned_to, String) == uid)
+            )
+        else:
+            q = q.filter(
+                (cast(Ticket.created_by, String) == uid) |
+                (cast(Ticket.assigned_to, String) == uid)
+            )
 
     if status:
         q = q.filter(Ticket.status == _normalize_status(status))
@@ -205,10 +221,18 @@ def list_tickets_paginated(
     # Role-based scoping
     if not is_admin_role(current_user):
         uid = str(getattr(current_user, "id", ""))
-        q = q.filter(
-            (cast(Ticket.created_by, String) == uid) |
-            (cast(Ticket.assigned_to, String) == uid)
-        )
+        user_wh_id = getattr(current_user, "warehouse_id", None)
+        if user_wh_id:
+            q = q.filter(
+                (Ticket.warehouse_id == user_wh_id) |
+                (cast(Ticket.created_by, String) == uid) |
+                (cast(Ticket.assigned_to, String) == uid)
+            )
+        else:
+            q = q.filter(
+                (cast(Ticket.created_by, String) == uid) |
+                (cast(Ticket.assigned_to, String) == uid)
+            )
 
     if status:
         q = q.filter(Ticket.status == _normalize_status(status))
