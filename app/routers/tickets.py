@@ -448,6 +448,7 @@ def update_ticket(
             ticket_id=obj.id,
             old_status=old_status,
             new_status=new_status,
+            changed_by=getattr(current_user, "id", None),
         )
         db.add(history)
 
