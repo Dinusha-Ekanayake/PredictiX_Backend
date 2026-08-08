@@ -21,7 +21,7 @@
 
 ## 3. Discovered Errors, Failures, and Inconsistencies
 
-### 🟢 Bug 1: Assignee Authorization Failure (FIXED)
+### 🔴 Bug 1: Assignee Authorization Failure (FIXED)
 - **Symptoms:** The test case `test_user_can_view_ticket_when_assignee` in `test_service.py` was failing.
 - **Cause:** `user_can_view_ticket` in `user_ticket_service.py` checked if `ticket.created_by == user_id` and did not allow the assignee to view/list the ticket.
 - **Fix Applied:** Modified `user_can_view_ticket` and `build_user_tickets_query` to check for `ticket.created_by == user_id or ticket.assigned_to == user_id`. All 22 tests are now passing successfully.

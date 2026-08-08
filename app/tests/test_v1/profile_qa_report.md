@@ -8,7 +8,7 @@
 ---
 
 ## 2. Automated Tests Status
-- **Test File Path:** [`app/tests/test_v1/test_profile.py`](file:///c:/Users/USER/Desktop/chakablast/PredictiX_backend/app/tests/test_v1/test_profile.py)
+- **Test File Path:** [`app/tests/qa_automated/test_profile.py`](file:///c:/Users/USER/Desktop/chakablast/PredictiX_backend/app/tests/qa_automated/test_profile.py)
 - **Total Tests:** 1 test (passing).
 
 ---

@@ -28,6 +28,7 @@ class ToolContext:
     """Per-request context handed to every handler."""
     db: Optional[Session]
     user: Any  # Profile or MockProfile
+    frontend_context: Optional[dict] = None
 
     @property
     def is_admin(self) -> bool:
@@ -310,7 +311,7 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                 temperature=0.3,
             )
             if ans:
-                return {"answer": fb + str(ans) + "\n\n*(Debug: Fell into generic fallback)*", "action_buttons": []}
+                return {"answer": fb + str(ans), "action_buttons": []}
         except Exception:
             pass
             
@@ -319,60 +320,198 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             "action_buttons": [{"label": "Copy Admin Email", "path": "copy:neuromindspredictix@gmail.com"}],
         }
 
+    def _get_contextual_fallback(error_reason: str) -> dict:
+        fc = getattr(ctx, "frontend_context", None)
+        if fc:
+            try:
+                ans, fb = call_groq(
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are Sidekick, the PredictiX AI Assistant. "
+                                "We had trouble querying the database directly, but we have this cached frontend dashboard state: "
+                                f"{str(fc)}\n\n"
+                                "Answer the user's question as best as you can using only this cached data. Keep it friendly, helpful, and concise. "
+                                "Do NOT mention 'frontend context', 'cached data', 'database errors', or 'SQL'. Just answer the question naturally. "
+                                "If you cannot answer the question using the provided state, say: 'The database is temporarily busy, but you can find this information on the main dashboard page.'"
+                            )
+                        },
+                        {"role": "user", "content": question}
+                    ],
+                    model="llama-3.1-8b-instant",
+                    max_tokens=300,
+                    temperature=0.3,
+                )
+                if ans:
+                    return {"answer": fb + str(ans), "action_buttons": []}
+            except Exception as e:
+                log.error("Failed to generate contextual fallback: %s", e)
+
+        return {
+            "answer": "⚠️ The database is temporarily busy. You can find this information on the dashboard or relevant asset/ticket pages using the navigation buttons below.",
+            "action_buttons": [
+                {"label": "Go to Dashboard", "path": "/admin/dashboard"},
+                {"label": "View Assets", "path": "/admin/assets"},
+            ],
+        }
+
     # Collect fallback messages from models
     fallback_msg = ""
 
-    # ── Step 0: Dashboard Fast-Path (100% UI Parity) ─────────────────────────
+    # ── Step 0: Dashboard/Overview Fast-Path (100% UI Parity) ─────────────────
     q_lower = question.lower()
-    is_summary = any(w in q_lower for w in ["summary", "overview", "dashboard stats", "all stats", "how many users", "total users", "how many tickets", "total tickets"])
     
+    # Check if this is a general stats summary request (e.g. details about X)
+    general_summary_keywords = ["summary", "overview", "stats", "dashboard stats", "all stats"]
+    is_general_summary = any(w in q_lower for w in general_summary_keywords)
+    is_details_summary = any(
+        f"details about {x}" in q_lower or 
+        f"details of {x}" in q_lower or 
+        f"{x} details" in q_lower or 
+        f"overview of {x}" in q_lower or 
+        f"{x} overview" in q_lower or 
+        f"{x} stats" in q_lower 
+        for x in ["asset", "ticket", "user", "warehouse"]
+    )
+    is_summary = (is_general_summary or is_details_summary) and not any(w in q_lower for w in ["list", "show all", "get all", "find all"])
+
     if is_summary:
         if ctx.role not in ["admin", "super_admin"]:
             return {
-                "answer": "🔒 You do not have permission to view system-wide dashboard statistics. You can only view and manage your own tickets and assigned assets.",
+                "answer": "🔒 You do not have permission to view system-wide statistics. You can only view and manage your own tickets and assigned assets.",
                 "action_buttons": [],
             }
         try:
-            from app.routers.admin_dashboard import _build_admin_summary
-            from app.models import Profile
-
-            # Get exact dashboard KPIs
-            summary_data = _build_admin_summary(ctx.db, ctx.warehouse_id)
-            kpis = summary_data.get("kpis", {})
-
-            # Get exact user counts matching the Users page logic
-            users_q = ctx.db.query(Profile)
-            if ctx.warehouse_id:
-                users_q = users_q.filter((Profile.warehouse_id == ctx.warehouse_id) | (Profile.warehouse_id.is_(None)))
-            all_users = users_q.all()
-
-            total_users = len(all_users)
-            active_users = sum(1 for u in all_users if getattr(u, "status", "").lower() == "active")
-            admins = sum(1 for u in all_users if getattr(u, "role", "").lower() == "admin")
-            super_admins = sum(1 for u in all_users if getattr(u, "role", "").lower() == "super_admin")
-            regular_users = sum(1 for u in all_users if getattr(u, "role", "").lower() == "user")
-
-            # Fake the SQL rows output so the Summarizer handles it perfectly
-            rows = [
-                {"Metric": "Total Users", "Count": total_users},
-                {"Metric": "Active Users", "Count": active_users},
-                {"Metric": "Admins", "Count": admins},
-                {"Metric": "Super Admins", "Count": super_admins},
-                {"Metric": "Regular Users", "Count": regular_users},
-                {"Metric": "Total Assets", "Count": kpis.get("totalAssets", 0)},
-                {"Metric": "Critical Alerts", "Count": kpis.get("criticalAlerts", 0)},
-                {"Metric": "Open Tickets", "Count": kpis.get("openTickets", 0)},
-                {"Metric": "High Priority Tickets", "Count": kpis.get("highPriorityTickets", 0)},
-                {"Metric": "Predicted Failures", "Count": kpis.get("predictedFailures", 0)},
-            ]
+            from app.models import Asset, Ticket, Profile, PdmBatchPrediction
+            from sqlalchemy import func, cast, String, case
             
-            # Jump straight to Step 4: Summarize
-            selected_tables = ["users", "tickets", "assets", "dashboard"]
-            sql = "DASHBOARD_FAST_PATH"
-            goto_summarizer = True
+            is_asset = "asset" in q_lower
+            is_ticket = "ticket" in q_lower
+            is_user = "user" in q_lower or "profile" in q_lower
+            
+            # 1. Fetch Asset Stats if requested or for overall view
+            total_assets, operational, maintenance, critical_band, offline, avg_health_val = 0, 0, 0, 0, 0, 0
+            if is_asset or not (is_ticket or is_user):
+                asset_q = ctx.db.query(Asset)
+                if ctx.warehouse_id:
+                    asset_q = asset_q.filter(Asset.warehouse_id == ctx.warehouse_id)
+                asset_rows = asset_q.with_entities(
+                    func.count(Asset.id),
+                    func.count(Asset.id).filter(cast(Asset.status, String) == "active"),
+                    func.count(Asset.id).filter(cast(Asset.status, String) == "under_maintenance"),
+                    func.count(Asset.id).filter(Asset.health_band == "critical"),
+                    func.count(Asset.id).filter(cast(Asset.status, String).in_(("inactive", "decommissioned"))),
+                ).one()
+                total_assets, operational, maintenance, critical_band, offline = asset_rows
+                total_assets = int(total_assets or 0)
+                operational = int(operational or 0)
+                maintenance = int(maintenance or 0)
+                critical_band = int(critical_band or 0)
+                offline = int(offline or 0)
+
+                health_q = (
+                    ctx.db.query(func.avg(PdmBatchPrediction.health_score))
+                    .select_from(Asset)
+                    .join(
+                        PdmBatchPrediction,
+                        (PdmBatchPrediction.asset_id == Asset.id) & (PdmBatchPrediction.status == "ok"),
+                    )
+                )
+                if ctx.warehouse_id:
+                    health_q = health_q.filter(Asset.warehouse_id == ctx.warehouse_id)
+                avg_health = health_q.scalar()
+                avg_health_val = int(round(float(avg_health))) if avg_health is not None else 64
+
+            # 2. Fetch Ticket Stats if requested or for overall view
+            open_tickets, high_priority, tickets_resolved, avg_resolution_days = 0, 0, 0, 0.0
+            if is_ticket or not (is_asset or is_user):
+                ticket_q = ctx.db.query(Ticket)
+                if ctx.warehouse_id:
+                    ticket_q = ticket_q.filter(Ticket.warehouse_id == ctx.warehouse_id)
+                
+                ticket_rows = ticket_q.with_entities(
+                    func.count(Ticket.id).filter(Ticket.status.notin_(('closed', 'cancelled'))),
+                    func.count(Ticket.id).filter((Ticket.priority == 'high') & Ticket.status.notin_(('closed', 'cancelled'))),
+                    func.count(Ticket.id).filter(Ticket.status.in_(('resolved', 'closed'))),
+                    func.avg(
+                        case(
+                            [(func.coalesce(Ticket.closed_at, Ticket.resolved_at).isnot(None) & Ticket.created_at.isnot(None),
+                             func.extract('epoch', func.coalesce(Ticket.closed_at, Ticket.resolved_at) - Ticket.created_at) / 86400.0)],
+                            else_=None
+                        )
+                    )
+                ).one()
+                
+                open_tickets, high_priority, tickets_resolved, avg_res = ticket_rows
+                open_tickets = int(open_tickets or 0)
+                high_priority = int(high_priority or 0)
+                tickets_resolved = int(tickets_resolved or 0)
+                avg_resolution_days = round(float(avg_res), 1) if avg_res is not None else 0.0
+
+            # 3. Fetch User Stats if requested or for overall view
+            total_users, active_users, admins, regular_users = 0, 0, 0, 0
+            if is_user or not (is_asset or is_ticket):
+                users_q = ctx.db.query(Profile)
+                if ctx.warehouse_id:
+                    users_q = users_q.filter((Profile.warehouse_id == ctx.warehouse_id) | (Profile.warehouse_id.is_(None)))
+                all_users = users_q.all()
+                total_users = len(all_users)
+                active_users = sum(1 for u in all_users if getattr(u, "status", "").lower() == "active")
+                admins = sum(1 for u in all_users if getattr(u, "role", "").lower() == "admin")
+                regular_users = sum(1 for u in all_users if getattr(u, "role", "").lower() == "user")
+
+            # 4. Construct beautiful Markdown response
+            if is_asset:
+                answer = (
+                    f"⚙️ **Asset Fleet Overview**\n\n"
+                    f"Here is a summary of the assets in this warehouse:\n\n"
+                    f"• **Total Assets:** {total_assets:,}\n"
+                    f"• **Average Health:** {avg_health_val}%\n"
+                    f"• **Operational (Active):** {operational:,}\n"
+                    f"• **Under Maintenance:** {maintenance:,}\n"
+                    f"• **Critical Band:** {critical_band:,}\n"
+                    f"• **Offline / Inactive:** {offline:,}"
+                )
+                action_buttons = [{"label": "View Assets Dashboard", "path": "/admin/assets"}]
+            elif is_ticket:
+                answer = (
+                    f"🎫 **Tickets & Helpdesk Overview**\n\n"
+                    f"Here is a summary of the support tickets in this warehouse:\n\n"
+                    f"• **Open Tickets:** {open_tickets:,}\n"
+                    f"• **High Priority:** {high_priority:,}\n"
+                    f"• **Tickets Resolved:** {tickets_resolved:,}\n"
+                    f"• **Average Resolution:** {avg_resolution_days} days"
+                )
+                action_buttons = [{"label": "View Tickets Helpdesk", "path": "/admin/tickets"}]
+            elif is_user:
+                answer = (
+                    f"👥 **User & Team Overview**\n\n"
+                    f"Here is a summary of team accounts in this warehouse:\n\n"
+                    f"• **Total Users:** {total_users:,}\n"
+                    f"• **Active Users:** {active_users:,}\n"
+                    f"• **Administrators:** {admins:,}\n"
+                    f"• **Standard Users:** {regular_users:,}"
+                )
+                action_buttons = [{"label": "View User Management", "path": "/admin/users"}]
+            else:
+                # Overall system-wide overview
+                answer = (
+                    f"📊 **System-Wide Dashboard Summary**\n\n"
+                    f"Here is a summary of current system operations:\n\n"
+                    f"• **Total Assets:** {total_assets:,} ({avg_health_val}% Avg. Health)\n"
+                    f"• **Active Tickets:** {open_tickets:,} ({high_priority:,} High Priority)\n"
+                    f"• **Active Team Members:** {active_users:,} of {total_users:,} total users"
+                )
+                action_buttons = [{"label": "Go to Dashboard", "path": "/admin/dashboard"}]
+
+            return {
+                "answer": answer,
+                "action_buttons": action_buttons
+            }
         except Exception as e:
-            log.error("Dashboard fast-path failed: %s", e)
-            goto_summarizer = False
+            log.error("Overview fast-path failed: %s", e)
+            return _get_generic_fallback()
     else:
         goto_summarizer = False
 
@@ -441,7 +580,13 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             sql = str(raw_sql).strip().lstrip("```sql").lstrip("```").rstrip("```").strip()
         except Exception as e:
             log.error("SQL generator failed: %s", e)
-            return {"answer": "⚠️ I had trouble generating a database query. Please try again shortly.", "action_buttons": []}
+            return _get_contextual_fallback("SQL generator failed")
+
+        if sql.startswith("ERROR: Permission Denied"):
+            return {
+                "answer": "🔒 You do not have permission to view system-wide data. You can only view records assigned to or created by you.",
+                "action_buttons": [],
+            }
 
         if sql.startswith("ERROR: Permission Denied"):
             return {
@@ -450,7 +595,7 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             }
 
         if sql.startswith("ERROR:"):
-            return {"answer": f"❌ The database agent could not fulfill this request: {sql}", "action_buttons": []}
+            return _get_contextual_fallback(sql)
 
         # Security guard: block any mutation
         import re
@@ -502,7 +647,7 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             except Exception as second_err:
                 log.error("SQL self-healing also failed: %s", second_err)
                 ctx.db.rollback()
-                return {"answer": f"❌ The database agent encountered an error executing the query:\nSQL: {sql}\nERROR: {second_err}", "action_buttons": []}
+                return _get_contextual_fallback(str(second_err))
 
         if rows is None:
             return {"answer": "📊 The query ran successfully but returned no results. The data matching your request may not exist yet.", "action_buttons": []}
@@ -555,18 +700,20 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
         if not rows:
             return "📊 No data found."
         lines = [f"📊 **Results ({len(rows)} record{'s' if len(rows) != 1 else ''}):**\n"]
-        for row in rows:
+        for i, row in enumerate(rows):
             keys = list(row.keys())
             # Clean format for two-column stats (e.g. Metric/Count, Category/Total)
             if len(keys) == 2 and str(keys[1]).lower() in ["count", "value", "total", "amount", "sum"]:
                 lines.append(f"• **{row[keys[0]]}:** {row[keys[1]]}")
             else:
-                line_parts = []
+                lines.append(f"\n### 📝 Record #{i+1}")
                 for k, v in row.items():
                     if v is not None and str(v).strip():
+                        # Exclude displaying raw system IDs in the fallback list to keep it clean
+                        if k == "id" or k.endswith("_id"):
+                            continue
                         pretty_key = str(k).replace("_", " ").title()
-                        line_parts.append(f"**{pretty_key}:** {v}")
-                lines.append("• " + " | ".join(line_parts))
+                        lines.append(f"  - **{pretty_key}:** {v}")
         return "\n".join(lines)
 
     summarizer_prompt = (

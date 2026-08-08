@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy import String, cast, func
@@ -32,6 +32,7 @@ from app.schemas.tickets import (
 )
 from app.ai.services.ticket_categorization_service import categorize_ticket_text
 from app.ai.services.ticket_priority_service import predict_ticket_priority
+from app.services.notification_service import NotificationService
 
 router = APIRouter(prefix="/tickets", tags=["Tickets"])
 
@@ -76,7 +77,12 @@ def _generate_ticket_number(db: Session) -> str:
 
 
 @router.post("/", response_model=TicketOut)
-def create_ticket(payload: TicketCreate, db: Session = Depends(get_db), _: object = Depends(get_current_user)):
+def create_ticket(
+    payload: TicketCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    _: object = Depends(get_current_user),
+):
     data = payload.model_dump()
     data["ticket_number"] = _generate_ticket_number(db)
     if data.get("priority"):
@@ -89,6 +95,9 @@ def create_ticket(payload: TicketCreate, db: Session = Depends(get_db), _: objec
     db.add(obj)
     db.commit()
     db.refresh(obj)
+    
+    background_tasks.add_task(NotificationService.notify_on_new_ticket, db, str(obj.id))
+    
     return obj
 
 
@@ -116,7 +125,15 @@ def get_ticket_status_counts(
         if wh_id:
             q = q.filter(Ticket.warehouse_id == wh_id)
     else:
-        q = q.filter((Ticket.assigned_to == current_user.id) | (Ticket.created_by == current_user.id))
+        user_wh_id = getattr(current_user, "warehouse_id", None)
+        if user_wh_id:
+            q = q.filter(
+                (Ticket.warehouse_id == user_wh_id) |
+                (Ticket.assigned_to == current_user.id) |
+                (Ticket.created_by == current_user.id)
+            )
+        else:
+            q = q.filter((Ticket.assigned_to == current_user.id) | (Ticket.created_by == current_user.id))
 
     rows = q.all()
     
@@ -154,10 +171,18 @@ def list_tickets(
     # other employee's ticket titles/descriptions for that asset.
     if not is_admin_role(current_user):
         uid = str(getattr(current_user, "id", ""))
-        q = q.filter(
-            (cast(Ticket.created_by, String) == uid) |
-            (cast(Ticket.assigned_to, String) == uid)
-        )
+        user_wh_id = getattr(current_user, "warehouse_id", None)
+        if user_wh_id:
+            q = q.filter(
+                (Ticket.warehouse_id == user_wh_id) |
+                (cast(Ticket.created_by, String) == uid) |
+                (cast(Ticket.assigned_to, String) == uid)
+            )
+        else:
+            q = q.filter(
+                (cast(Ticket.created_by, String) == uid) |
+                (cast(Ticket.assigned_to, String) == uid)
+            )
 
     if status:
         q = q.filter(Ticket.status == _normalize_status(status))
@@ -196,10 +221,18 @@ def list_tickets_paginated(
     # Role-based scoping
     if not is_admin_role(current_user):
         uid = str(getattr(current_user, "id", ""))
-        q = q.filter(
-            (cast(Ticket.created_by, String) == uid) |
-            (cast(Ticket.assigned_to, String) == uid)
-        )
+        user_wh_id = getattr(current_user, "warehouse_id", None)
+        if user_wh_id:
+            q = q.filter(
+                (Ticket.warehouse_id == user_wh_id) |
+                (cast(Ticket.created_by, String) == uid) |
+                (cast(Ticket.assigned_to, String) == uid)
+            )
+        else:
+            q = q.filter(
+                (cast(Ticket.created_by, String) == uid) |
+                (cast(Ticket.assigned_to, String) == uid)
+            )
 
     if status:
         q = q.filter(Ticket.status == _normalize_status(status))
@@ -296,6 +329,7 @@ def list_my_tickets(
 @router.post("/mine", response_model=UserTicketOut)
 def create_my_ticket(
     payload: UserTicketCreate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
@@ -314,6 +348,9 @@ def create_my_ticket(
     asset_name = None
     if obj.asset_id:
         asset_name = db.query(Asset.asset_name).filter(Asset.id == obj.asset_id).scalar()
+        
+    background_tasks.add_task(NotificationService.notify_on_new_ticket, db, str(obj.id))
+    
     return _serialize_user_ticket(obj, asset_name)
 
 
@@ -321,6 +358,7 @@ def create_my_ticket(
 def update_my_ticket(
     ticket_id: str,
     payload: UserTicketUpdate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
@@ -329,6 +367,11 @@ def update_my_ticket(
         raise HTTPException(status_code=404, detail="Ticket not found")
     if not _is_admin(current_user) and str(obj.created_by) != str(current_user.id):
         raise HTTPException(status_code=403, detail="You can only edit tickets you created.")
+
+    # Record old values
+    old_status = obj.status
+    old_priority = obj.priority
+    old_assigned_to = str(obj.assigned_to) if obj.assigned_to else None
 
     if payload.title is not None:
         obj.title = payload.title
@@ -344,6 +387,17 @@ def update_my_ticket(
     asset_name = None
     if obj.asset_id:
         asset_name = db.query(Asset.asset_name).filter(Asset.id == obj.asset_id).scalar()
+        
+    background_tasks.add_task(
+        NotificationService.notify_on_ticket_update,
+        db,
+        str(obj.id),
+        str(current_user.id),
+        old_status,
+        old_priority,
+        old_assigned_to
+    )
+    
     return _serialize_user_ticket(obj, asset_name)
 
 
@@ -376,7 +430,13 @@ def get_ticket(ticket_id: str, db: Session = Depends(get_db), _: object = Depend
 
 
 @router.put("/{ticket_id}", response_model=TicketOut)
-def update_ticket(ticket_id: str, payload: TicketUpdate, db: Session = Depends(get_db), current_user: object = Depends(get_current_user)):
+def update_ticket(
+    ticket_id: str,
+    payload: TicketUpdate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: object = Depends(get_current_user),
+):
     if not is_admin_role(current_user):
         raise HTTPException(status_code=403, detail="Only admins can update tickets")
     obj = db.query(Ticket).filter(Ticket.id == ticket_id).first()
@@ -385,6 +445,8 @@ def update_ticket(ticket_id: str, payload: TicketUpdate, db: Session = Depends(g
 
     updates = payload.model_dump(exclude_unset=True)
     old_status = obj.status
+    old_priority = obj.priority
+    old_assigned_to = str(obj.assigned_to) if obj.assigned_to else None
 
     # normalize enum fields
     if "status" in updates and updates["status"]:
@@ -410,11 +472,23 @@ def update_ticket(ticket_id: str, payload: TicketUpdate, db: Session = Depends(g
             ticket_id=obj.id,
             old_status=old_status,
             new_status=new_status,
+            changed_by=getattr(current_user, "id", None),
         )
         db.add(history)
 
     db.commit()
     db.refresh(obj)
+    
+    background_tasks.add_task(
+        NotificationService.notify_on_ticket_update,
+        db,
+        str(obj.id),
+        str(getattr(current_user, "id", "")),
+        old_status,
+        old_priority,
+        old_assigned_to
+    )
+    
     return obj
 
 
