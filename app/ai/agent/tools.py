@@ -316,7 +316,7 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             pass
             
         return {
-            "answer": "Please reach out to our admins at **neuromindspredictix@gmail.com** and they'll get back to you as soon as possible.",
+            "answer": "Please reach out to our admins at **neuromindspredictix@gmail.com** and they'll get back to you as soon as possible. *(Debug: Generic fallback hit)*",
             "action_buttons": [{"label": "Copy Admin Email", "path": "copy:neuromindspredictix@gmail.com"}],
         }
 
@@ -581,6 +581,12 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
         except Exception as e:
             log.error("SQL generator failed: %s", e)
             return _get_contextual_fallback("SQL generator failed")
+
+        if sql.startswith("ERROR: Permission Denied"):
+            return {
+                "answer": "🔒 You do not have permission to view system-wide data. You can only view records assigned to or created by you.",
+                "action_buttons": [],
+            }
 
         if sql.startswith("ERROR: Permission Denied"):
             return {
