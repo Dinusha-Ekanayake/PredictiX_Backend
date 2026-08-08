@@ -329,8 +329,8 @@ def create_my_ticket(
         title=payload.title,
         description=payload.description or "",
         status="open",
-        priority=(payload.priority or "medium").lower(),
-        predicted_category=(payload.category or "mechanical").lower(),
+        priority=_normalize_priority(payload.priority) or "medium",
+        predicted_category=_normalize_category(payload.category) or "mechanical",
         created_by=str(current_user.id),  # forced — cannot be spoofed
     )
     db.add(obj)
@@ -360,9 +360,9 @@ def update_my_ticket(
     if payload.description is not None:
         obj.description = payload.description
     if payload.priority:
-        obj.priority = payload.priority.lower()
+        obj.priority = _normalize_priority(payload.priority)
     if payload.category:
-        obj.predicted_category = payload.category.lower()
+        obj.predicted_category = _normalize_category(payload.category)
 
     db.commit()
     db.refresh(obj)
@@ -393,10 +393,18 @@ def delete_my_ticket(
 
 
 @router.get("/{ticket_id}", response_model=TicketOut)
-def get_ticket(ticket_id: str, db: Session = Depends(get_db), _: object = Depends(get_current_user)):
+def get_ticket(ticket_id: str, db: Session = Depends(get_db), current_user: Profile = Depends(get_current_user)):
     obj = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Ticket not found")
+    # Same scoping as list_tickets/list_tickets_paginated: non-admins may
+    # only read tickets they created or are assigned to. Every list endpoint
+    # already enforced this — this single-record getter didn't, so any
+    # authenticated user could read any ticket by guessing/incrementing its id.
+    if not is_admin_role(current_user):
+        uid = str(current_user.id)
+        if str(obj.created_by) != uid and str(obj.assigned_to) != uid:
+            raise HTTPException(status_code=404, detail="Ticket not found")
     return obj
 
 
