@@ -80,7 +80,7 @@ def _generate_ticket_number(db: Session) -> str:
 
 
 @router.post("/", response_model=TicketOut)
-def create_ticket(payload: TicketCreate, db: Session = Depends(get_db), _: object = Depends(get_current_user)):
+def create_ticket(payload: TicketCreate, db: Session = Depends(get_db), current_user: Profile = Depends(get_current_user)):
     data = payload.model_dump()
     data["ticket_number"] = _generate_ticket_number(db)
     if data.get("priority"):
@@ -89,6 +89,18 @@ def create_ticket(payload: TicketCreate, db: Session = Depends(get_db), _: objec
         data["predicted_priority"] = _normalize_priority(data["predicted_priority"])
     if data.get("predicted_category"):
         data["predicted_category"] = _normalize_category(data["predicted_category"])
+
+    # Tag the ticket with a warehouse so it shows up in warehouse-scoped
+    # ticket lists — prefer the linked asset's warehouse (authoritative),
+    # falling back to the creating admin's active warehouse. Without this,
+    # tickets silently had a NULL warehouse_id and were invisible to the
+    # scoped list/status-count endpoints.
+    if not data.get("warehouse_id"):
+        if data.get("asset_id"):
+            data["warehouse_id"] = db.query(Asset.warehouse_id).filter(Asset.id == data["asset_id"]).scalar()
+        if not data.get("warehouse_id") and is_admin_role(current_user):
+            data["warehouse_id"] = active_warehouse_id(current_user)
+
     obj = Ticket(**data)
     db.add(obj)
     db.commit()
@@ -139,7 +151,10 @@ def get_ticket_status_counts(
     if is_admin_role(current_user):
         wh_id = active_warehouse_id(current_user)
         if wh_id:
-            q = q.filter(Ticket.warehouse_id == wh_id)
+            # Tickets with no warehouse_id (orphaned — e.g. created without
+            # an asset) stay visible to every admin rather than vanishing
+            # from everyone's counts. Matches list_tickets/list_tickets_paginated.
+            q = q.filter((Ticket.warehouse_id == wh_id) | (Ticket.warehouse_id.is_(None)))
     else:
         q = q.filter((Ticket.assigned_to == current_user.id) | (Ticket.created_by == current_user.id))
 
@@ -171,18 +186,27 @@ def list_tickets(
 ):
     q = db.query(Ticket)
 
-    # Role-based scoping — matches /paginated: admins see every ticket,
-    # regular users only ever see tickets they created or are assigned to.
-    # This endpoint is what the shared asset-details panel's Tickets tab
-    # calls (via ?asset_id=), so without this a regular user opening any
-    # asset (including one outside their own warehouse) could read every
-    # other employee's ticket titles/descriptions for that asset.
+    # Role-based scoping — matches /paginated: admins see every ticket in
+    # their active warehouse, regular users only ever see tickets they
+    # created or are assigned to. This endpoint is what the shared
+    # asset-details panel's Tickets tab calls (via ?asset_id=), so without
+    # this a regular user opening any asset (including one outside their
+    # own warehouse) could read every other employee's ticket
+    # titles/descriptions for that asset.
     if not is_admin_role(current_user):
         uid = str(getattr(current_user, "id", ""))
         q = q.filter(
             (cast(Ticket.created_by, String) == uid) |
             (cast(Ticket.assigned_to, String) == uid)
         )
+    else:
+        # Pin to the admin's active warehouse, overriding any
+        # client-supplied warehouse_id — same pattern as departments.py.
+        # Tickets with no warehouse_id (orphaned) stay visible to every
+        # admin rather than becoming invisible to everyone.
+        scoped_wh = active_warehouse_id(current_user)
+        if scoped_wh:
+            warehouse_id = scoped_wh
 
     if status:
         q = q.filter(Ticket.status == _normalize_status(status))
@@ -191,7 +215,7 @@ def list_tickets(
     if asset_id:
         q = q.filter(Ticket.asset_id == asset_id)
     if warehouse_id:
-        q = q.filter(Ticket.warehouse_id == warehouse_id)
+        q = q.filter((Ticket.warehouse_id == warehouse_id) | (Ticket.warehouse_id.is_(None)))
     if assigned_to:
         q = q.filter(Ticket.assigned_to == assigned_to)
     return q.order_by(Ticket.created_at.desc()).offset(offset).limit(limit).all()
@@ -225,6 +249,14 @@ def list_tickets_paginated(
             (cast(Ticket.created_by, String) == uid) |
             (cast(Ticket.assigned_to, String) == uid)
         )
+    else:
+        # Pin to the admin's active warehouse, overriding any
+        # client-supplied warehouse_id — same pattern as departments.py.
+        # Tickets with no warehouse_id (orphaned) stay visible to every
+        # admin rather than becoming invisible to everyone.
+        scoped_wh = active_warehouse_id(current_user)
+        if scoped_wh:
+            warehouse_id = scoped_wh
 
     if status:
         q = q.filter(Ticket.status == _normalize_status(status))
@@ -233,7 +265,7 @@ def list_tickets_paginated(
     if asset_id:
         q = q.filter(Ticket.asset_id == asset_id)
     if warehouse_id:
-        q = q.filter(Ticket.warehouse_id == warehouse_id)
+        q = q.filter((Ticket.warehouse_id == warehouse_id) | (Ticket.warehouse_id.is_(None)))
     if search and search.strip():
         term = f"%{search.strip()}%"
         q = q.filter(
@@ -324,8 +356,15 @@ def create_my_ticket(
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
+    warehouse_id = None
+    if payload.asset_id:
+        warehouse_id = db.query(Asset.warehouse_id).filter(Asset.id == payload.asset_id).scalar()
+    if not warehouse_id:
+        warehouse_id = getattr(current_user, "warehouse_id", None)
+
     obj = Ticket(
         asset_id=payload.asset_id,
+        warehouse_id=warehouse_id,
         title=payload.title,
         description=payload.description or "",
         status="open",
