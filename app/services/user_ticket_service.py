@@ -125,6 +125,8 @@ SORTABLE_FIELDS = {
     "priority": Ticket.priority,
     "status": Ticket.status,
     "ticket_number": Ticket.ticket_number,
+    "title": Ticket.title,
+    "name": Ticket.title,
 }
 
 
