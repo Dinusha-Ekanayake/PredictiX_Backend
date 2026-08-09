@@ -38,7 +38,7 @@ from sqlalchemy.orm import Session
 # Existing imports (UNCHANGED)
 from app.services.report_service import ReportService
 from app.services.pdf_render import PDFRenderService
-from app.deps import get_db, require_user, require_admin
+from app.deps import get_db, require_user, require_admin, get_current_user, is_admin_role
 from app.models import Asset, Profile, Report, Ticket, Warehouse
 from app.schemas.report import ReportCreate, ReportUpdate, ReportOut
 
@@ -58,10 +58,21 @@ router = APIRouter(
 def generate_asset_report_endpoint(
     asset_id: uuid.UUID,
     background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
 ):
+    """Regular users may only generate a report for an asset assigned to
+    them — matches the ownership rule in asset_component_rul.py's
+    /assets/{asset_id}/component-rul. 404 (not 403) so an out-of-scope
+    asset's existence isn't revealed."""
+    if not is_admin_role(current_user):
+        asset = db.query(Asset).filter(Asset.id == asset_id).first()
+        if not asset or str(asset.assigned_to) != str(getattr(current_user, "id", "")):
+            raise HTTPException(status_code=404, detail=f"Asset {asset_id} not found")
+
     service = ReportService()
     try:
-        url, pdf_path = service.generate_asset_report(asset_id)
+        url, pdf_path = service.generate_asset_report(asset_id, user_id=current_user.id)
         background_tasks.add_task(os.remove, pdf_path)
         return FileResponse(
             path=pdf_path,

@@ -34,6 +34,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Asset, PdmBatchPrediction
 from app.ai.services.pdm_decision_service import build_decision
+from app.services.in_app_notification_service import InAppNotificationService
 
 # v7 regressor was trained on days_until_next_maintenance up to 365 (see
 # regressor_v7_decision_log.json) — the old 180-day clamp was arbitrary and
@@ -493,6 +494,87 @@ def _fetch_latest_readings(db: Session, asset_ids: list[str]) -> dict[str, Any]:
     return {str(r.asset_id): r for r in rows}
 
 
+def _fetch_previous_risk_levels(db: Session, asset_ids: list[str]) -> dict[str, str | None]:
+    """Batch-fetch each asset's risk_level from BEFORE this run's upsert, so a
+    critical-alert notification only fires on the transition into "critical",
+    not on every run for an asset that's already been critical for weeks."""
+    if not asset_ids:
+        return {}
+    rows = (
+        db.query(PdmBatchPrediction.asset_id, PdmBatchPrediction.risk_level)
+        .filter(PdmBatchPrediction.asset_id.in_(asset_ids))
+        .all()
+    )
+    return {str(asset_id): risk_level for asset_id, risk_level in rows}
+
+
+def _notify_newly_critical_assets(db: Session, assets: list[Asset]) -> None:
+    """Best-effort in-app alert for every asset that transitioned into
+    critical risk THIS run, batched across the whole list rather than one
+    notification round-trip set per asset.
+
+    On a real batch run it's common for a large fraction of the fleet to
+    flip critical at once (e.g. after a model swap, or in this project's
+    live data: 339/1065 assets were critical in one run) — calling
+    notify_admins() once per asset in that scenario turned into 1000+ DB
+    round-trips (272 admin-id queries + 447 preference queries + 447
+    profile queries + 447 inserts, measured on the real fleet). Instead:
+    one assigned-user notification per asset (inherently 1:1, can't be
+    reduced further) is combined into a single _create_notifications_bulk
+    call, and admins get ONE digest notification per warehouse listing all
+    of that warehouse's newly-critical assets, instead of N separate ones.
+
+    Never allowed to raise — a notification failure must not fail the
+    batch run that computed these predictions.
+    """
+    if not assets:
+        return
+    try:
+        assets_by_warehouse: dict[str | None, list[Asset]] = {}
+        for asset in assets:
+            wh_id = str(asset.warehouse_id) if asset.warehouse_id else None
+            assets_by_warehouse.setdefault(wh_id, []).append(asset)
+
+        # ── Assigned users: one bulk call for every asset's assignee ──────────
+        assignee_ids = [str(a.assigned_to) for a in assets if a.assigned_to]
+        if assignee_ids:
+            if len(assets) == 1:
+                message = f"{assets[0].asset_name} ({assets[0].asset_code}) is now at critical risk."
+                link_url = f"/admin/assets?asset_id={assets[0].id}"
+            else:
+                message = f"{len(assets)} assets are now at critical risk."
+                link_url = "/admin/assets?health_band=critical"
+            InAppNotificationService._create_notifications_bulk(
+                db, assignee_ids,
+                title="Asset is now critical risk",
+                message=message,
+                priority="high",
+                notification_type="high_risk_asset",
+                link_url=link_url,
+            )
+
+        # ── Admins: one digest notification per warehouse ─────────────────────
+        for wh_id, wh_assets in assets_by_warehouse.items():
+            if len(wh_assets) == 1:
+                a = wh_assets[0]
+                message = f"{a.asset_name} ({a.asset_code}) is now at critical risk."
+            else:
+                names = ", ".join(f"{a.asset_name} ({a.asset_code})" for a in wh_assets[:5])
+                more = f" and {len(wh_assets) - 5} more" if len(wh_assets) > 5 else ""
+                message = f"{len(wh_assets)} assets are now at critical risk: {names}{more}."
+            InAppNotificationService.notify_admins(
+                db,
+                title="Assets are now critical risk" if len(wh_assets) > 1 else "Asset is now critical risk",
+                message=message,
+                priority="high",
+                notification_type="high_risk_asset",
+                link_url="/admin/assets?health_band=critical",
+                warehouse_id=wh_id,
+            )
+    except Exception:
+        log.exception("Failed to send critical-asset notifications for %d assets", len(assets))
+
+
 _UPSERT_CHUNK_SIZE = 500
 
 
@@ -815,12 +897,14 @@ def run_batch_for_all_assets(
 
     asset_ids = [str(a.id) for a in assets]
     readings_by_asset = _fetch_latest_readings(db, asset_ids)
+    previous_risk_by_asset = _fetch_previous_risk_levels(db, asset_ids)
     today = date.today()
 
     ok_count = 0
     no_data_count = 0
     error_count = 0
     upsert_rows: list[dict] = []
+    newly_critical_assets: list[Asset] = []
 
     scored_assets: list[Asset] = []
     feature_dicts: list[dict[str, Any]] = []
@@ -879,6 +963,8 @@ def run_batch_for_all_assets(
                     breakdown_cost_bundle=breakdown_cost_bundle,
                 )
                 risk_level = _compute_risk_level(failure_probability, days_until)
+                if risk_level == "critical" and previous_risk_by_asset.get(asset_id_str) != "critical":
+                    newly_critical_assets.append(asset)
                 decision = build_decision(
                     failure_probability=failure_probability,
                     maintenance_required=maintenance_required,
@@ -925,6 +1011,10 @@ def run_batch_for_all_assets(
         except Exception as exc:  # noqa: BLE001
             error_msg = str(exc)[:500]
             log.exception("[batch] vectorized inference failed, falling back to per-asset: %s", error_msg)
+            # The per-asset fallback below doesn't compute risk transitions,
+            # so critical-asset alerts are skipped for this run rather than
+            # risk firing on stale/incomplete data.
+            newly_critical_assets = []
             for asset in scored_assets:
                 result = run_batch_for_asset(
                     db=db,
@@ -949,6 +1039,8 @@ def run_batch_for_all_assets(
             upsert_rows = [r for r in upsert_rows if r["asset_id"] not in {str(a.id) for a in scored_assets}]
 
     _upsert_batch_predictions(db, upsert_rows)
+
+    _notify_newly_critical_assets(db, newly_critical_assets)
 
     elapsed = round(time.time() - run_start, 2)
     log.info(

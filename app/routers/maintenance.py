@@ -58,10 +58,23 @@ def list_maintenance_events(
 
 
 @router.get("/{event_id}", response_model=MaintenanceEventOut)
-def get_maintenance_event(event_id: str, db: Session = Depends(get_db)):
+def get_maintenance_event(
+    event_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
     obj = db.query(MaintenanceEvent).filter(MaintenanceEvent.id == event_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Maintenance event not found")
+
+    # Same ownership rule as list_maintenance_events above — a regular user
+    # may only fetch a single event for an asset assigned to them.
+    if not is_admin_role(current_user):
+        uid = str(getattr(current_user, "id", ""))
+        asset = db.query(Asset).filter(Asset.id == obj.asset_id).first()
+        if not asset or str(asset.assigned_to) != uid:
+            raise HTTPException(status_code=404, detail="Maintenance event not found")
+
     return obj
 
 

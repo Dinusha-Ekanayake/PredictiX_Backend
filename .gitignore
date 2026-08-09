@@ -37,3 +37,4 @@ test_results.json
 # Local debug scratch scripts
 _dbg_*.py
 .claude/settings.local.json
+CLAUDE.md

@@ -434,12 +434,12 @@ def _maintenance_section(story, ctx, insights, styles):
         rows = []
         for m in maintenance[:3]:
             rows.append([
-                _datetime(getattr(m, "performed_at", None)) or _datetime(getattr(m, "scheduled_date", None)),
-                getattr(m, "event_type", "—") or "—",
-                getattr(m, "title", "—") or "—",
-                getattr(m, "vendor_name", "—") or "—",
-                f"LKR {float(m.cost_amount):,.0f}" if getattr(m, "cost_amount", None) else "—",
-                f"{float(m.downtime_hours):.1f}h" if getattr(m, "downtime_hours", None) else "—",
+                _datetime(m.get("performed_at")) if m.get("performed_at") else _datetime(m.get("scheduled_date")),
+                m.get("event_type") or "—",
+                m.get("title") or "—",
+                m.get("vendor_name") or "—",
+                f"LKR {float(m['cost_amount']):,.0f}" if m.get("cost_amount") else "—",
+                f"{float(m['downtime_hours']):.1f}h" if m.get("downtime_hours") else "—",
             ])
         story.append(_data_table(
             ["Date", "Type", "Title", "Vendor", "Cost", "Downtime"],
@@ -475,12 +475,12 @@ def _tickets_section(story, ctx, styles):
         rows = []
         for t in tickets[:3]:
             rows.append([
-                str(t.ticket_number or "—"),
-                str(t.title or "—")[:55],
-                str(t.priority or "—"),
-                str(t.status or "—"),
-                str(t.final_category or t.predicted_category or "—"),
-                str(t.opened_at)[:10] if t.opened_at else "—",
+                str(t.get("ticket_number") or "—"),
+                str(t.get("title") or "—")[:55],
+                str(t.get("priority") or "—"),
+                str(t.get("status") or "—"),
+                str(t.get("final_category") or t.get("predicted_category") or "—"),
+                str(t.get("opened_at"))[:10] if t.get("opened_at") else "—",
             ])
         story.append(_data_table(
             ["Ticket #", "Title", "Priority", "Status", "Category", "Opened"],

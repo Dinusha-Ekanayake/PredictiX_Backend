@@ -190,6 +190,21 @@ def is_admin_role(user) -> bool:
     return _role_of(user) in ADMIN_ROLES
 
 
+def assert_asset_in_scope(asset, current_user) -> None:
+    """Block admins/super_admins from reading/writing an asset outside their
+    active warehouse. Raises 404 (not 403) so the asset's existence isn't
+    revealed across warehouse boundaries — mirrors assets.py's own
+    `_assert_asset_in_scope`, exposed here so every asset-detail router
+    (sensor readings, predictions, survival curves, etc.) can share the
+    identical check instead of re-implementing it. Non-admin users are not
+    scoped by this; per-endpoint ownership rules (if any) apply separately.
+    """
+    if _role_of(current_user) in ADMIN_ROLES:
+        wh_id = active_warehouse_id(current_user)
+        if wh_id and str(getattr(asset, "warehouse_id", None)) != wh_id:
+            raise HTTPException(status_code=404, detail="Asset not found")
+
+
 def active_warehouse_id(user) -> Optional[str]:
     """The warehouse a request is scoped to.
 

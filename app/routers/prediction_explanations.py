@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from app.deps import get_db, require_user
-from app.models import PredictionExplanation, PredictionFeatureImportance, PredictionRun
+from app.deps import get_db, get_current_user, require_user, assert_asset_in_scope
+from app.models import Asset, PredictionExplanation, PredictionFeatureImportance, PredictionRun, Profile
 from app.schemas.misc import (
     PredictionExplanationCreate,
     PredictionExplanationOut,
@@ -36,7 +36,14 @@ def list_prediction_explanations(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
 ):
+    if asset_id:
+        asset = db.query(Asset).filter(Asset.id == asset_id).first()
+        if not asset:
+            raise HTTPException(status_code=404, detail="Asset not found")
+        assert_asset_in_scope(asset, current_user)
+
     q = db.query(PredictionExplanation)
     if run_id:
         q = q.filter(PredictionExplanation.run_id == run_id)

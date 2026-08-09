@@ -10,8 +10,8 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.deps import get_db
-from app.models import Asset, Ticket
+from app.deps import get_db, get_current_user, is_admin_role
+from app.models import Asset, Profile, Ticket
 from app.schemas.ticket_summary import TicketSummaryRequest, TicketSummaryResponse
 from app.ai.services.ticket_summary_service import (
     build_ticket_summary_input,
@@ -49,11 +49,25 @@ async def generate_summary(payload: TicketSummaryRequest):
 
 
 @router.get("/by-ticket/{ticket_id}", response_model=TicketSummaryResponse)
-async def get_summary_by_ticket(ticket_id: str, db: Session = Depends(get_db)):
-    """Fetch a ticket, build its input, and generate a fresh summary."""
+async def get_summary_by_ticket(
+    ticket_id: str,
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
+    """Fetch a ticket, build its input, and generate a fresh summary.
+
+    Same ownership rule as the rest of the tickets API (see tickets.py):
+    admins/super_admins can summarise any ticket, a regular user only one
+    they created or are assigned to.
+    """
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
+
+    if not is_admin_role(current_user) and str(current_user.id) not in (
+        str(ticket.created_by), str(ticket.assigned_to)
+    ):
+        raise HTTPException(status_code=403, detail="You do not have access to this ticket.")
 
     asset_name = asset_code = None
     if ticket.asset_id is not None:

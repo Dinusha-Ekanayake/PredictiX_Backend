@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
 from sqlalchemy.orm import Session
 
-from app.deps import get_db, require_user
+from app.deps import get_db, get_current_user, require_user, assert_asset_in_scope
 from app.models import (
     Asset,
     MaintenanceEvent,
@@ -9,6 +9,7 @@ from app.models import (
     AssetFailurePrediction,
     AssetCostPrediction,
     TicketPrediction,
+    Profile,
 )
 from app.schemas.prediction import (
     PredictionRequest,
@@ -113,7 +114,7 @@ def _build_cost_input(asset, last_event) -> dict:
     }
 
 
-def _run_cost_prediction_for_asset(asset_id: str, db: Session) -> dict:
+def _run_cost_prediction_for_asset(asset_id: str, db: Session, current_user: Profile) -> dict:
     """Shared by GET /cost/{asset_id} and POST /cost/live/{asset_id}.
     Runs the breakdown cost model (currently v5.0) live and returns its native dict shape
     plus asset_id/model_version — the fields BreakdownCostPredictionOut expects.
@@ -126,6 +127,7 @@ def _run_cost_prediction_for_asset(asset_id: str, db: Session) -> dict:
     asset = db.query(Asset).filter(Asset.id == asset_id).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
+    assert_asset_in_scope(asset, current_user)
 
     last_event = (
         db.query(MaintenanceEvent)
@@ -229,7 +231,16 @@ def get_prediction_run(run_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/failure/{asset_id}", response_model=AssetFailurePredictionOut)
-def get_latest_failure_prediction(asset_id: str, db: Session = Depends(get_db)):
+def get_latest_failure_prediction(
+    asset_id: str,
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
+    asset = db.query(Asset).filter(Asset.id == asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    assert_asset_in_scope(asset, current_user)
+
     row = (
         db.query(AssetFailurePrediction)
         .filter(AssetFailurePrediction.asset_id == asset_id)
@@ -250,7 +261,11 @@ def get_failure_prediction_by_run(run_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/cost/{asset_id}", response_model=BreakdownCostPredictionOut)
-def get_latest_cost_prediction(asset_id: str, db: Session = Depends(get_db)):
+def get_latest_cost_prediction(
+    asset_id: str,
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
     """
     Return the breakdown cost prediction (currently v5.0) for an asset — always runs live.
 
@@ -263,7 +278,7 @@ def get_latest_cost_prediction(asset_id: str, db: Session = Depends(get_db)):
     wrong response_model and would 500. Since predict_breakdown_cost() is
     ~15ms (see model docs §1), always running live is simpler and correct.
     """
-    return _run_cost_prediction_for_asset(asset_id, db)
+    return _run_cost_prediction_for_asset(asset_id, db, current_user)
 
 
 @router.get("/cost/run/{run_id}", response_model=AssetCostPredictionOut)
@@ -275,7 +290,11 @@ def get_cost_prediction_by_run(run_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/cost/live/{asset_id}", response_model=BreakdownCostPredictionOut)
-def run_live_cost_prediction(asset_id: str, db: Session = Depends(get_db)):
+def run_live_cost_prediction(
+    asset_id: str,
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
     """
     Force-run the breakdown cost model for one asset, bypassing cache.
     (Functionally identical to GET /cost/{asset_id} now that that endpoint
@@ -283,7 +302,7 @@ def run_live_cost_prediction(asset_id: str, db: Session = Depends(get_db)):
     compatibility with existing callers that POST here after a maintenance
     event to refresh the estimate.)
     """
-    return _run_cost_prediction_for_asset(asset_id, db)
+    return _run_cost_prediction_for_asset(asset_id, db, current_user)
 
 
 @router.get("/ticket/{ticket_id}", response_model=TicketPredictionOut)

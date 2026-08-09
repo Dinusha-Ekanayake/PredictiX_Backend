@@ -4,14 +4,13 @@ Handles sending emails to admins and relevant team members when users are create
 All data is fetched from PostgreSQL database - no mock data used
 """
 
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from typing import List, Optional
 import os
 from datetime import datetime
 from sqlalchemy.orm import Session
 from pathlib import Path
+
+from app.deps import ADMIN_ROLES
 
 # Load environment variables from .env file
 try:
@@ -22,15 +21,6 @@ try:
 except ImportError:
     pass
 
-
-class EmailConfig:
-    """Email configuration - set these via environment variables"""
-    SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-    SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-    SENDER_EMAIL = os.getenv("SENDER_EMAIL", "noreply@predictix.lk")
-    SENDER_PASSWORD = os.getenv("SENDER_PASSWORD", "")
-    USE_TLS = os.getenv("USE_TLS", "true").lower() == "true"
-    
 
 class EmailTemplates:
     """Email templates for different notifications"""
@@ -338,7 +328,26 @@ class EmailTemplates:
 
 class NotificationService:
     """Service to send email notifications using PostgreSQL database data"""
-    
+
+    @staticmethod
+    def _admin_emails_for_warehouse(db: Session, warehouse_id: Optional[str]) -> List[str]:
+        """Active admin/super_admin emails, scoped to a warehouse.
+
+        Falls back to every active admin fleet-wide when warehouse_id is
+        unset (e.g. an orphaned ticket, or a user with no warehouse
+        assigned yet) so notifications are never silently dropped.
+        """
+        from app.models import Profile
+
+        q = db.query(Profile.email).filter(
+            Profile.role.in_(ADMIN_ROLES),
+            Profile.status == "active",
+            Profile.email.isnot(None),
+        )
+        if warehouse_id:
+            q = q.filter(Profile.warehouse_id == warehouse_id)
+        return [email for (email,) in q.all()]
+
     @staticmethod
     def send_email(to_emails: List[str], subject: str, html_body: str) -> bool:
         """
@@ -445,19 +454,10 @@ class NotificationService:
             NotificationService.send_email([new_user.email], subject, html_body)
             
             # ============================================================
-            # 2. SEND NOTIFICATION TO ALL ADMIN USERS FROM DATABASE
+            # 2. SEND NOTIFICATION TO ADMINS IN THE NEW USER'S WAREHOUSE
             # ============================================================
-            admin_profiles = db.query(Profile).filter(
-                Profile.role == "admin",
-                Profile.status == "active"
-            ).all()
-            
-            admin_emails = [admin.email for admin in admin_profiles if admin.email]
-            
-            # HARDCODED FOR PRESENTATION / DEMONSTRATION
-            if "sharadaabeywickrama@gmail.com" not in admin_emails:
-                admin_emails.append("sharadaabeywickrama@gmail.com")
-            
+            admin_emails = NotificationService._admin_emails_for_warehouse(db, new_user.warehouse_id)
+
             if admin_emails:
                 print(f"[NOTIFICATION] Notifying {len(admin_emails)} admin(s) from database")
                 subject, html_body = EmailTemplates.new_user_admin_notification(
@@ -538,19 +538,10 @@ class NotificationService:
             updated_at = (datetime.now()).strftime('%B %d, %Y at %I:%M %p')
             
             # ============================================================
-            # SEND NOTIFICATION TO ALL ADMIN USERS FROM DATABASE
+            # SEND NOTIFICATION TO ADMINS IN THE USER'S WAREHOUSE
             # ============================================================
-            admin_profiles = db.query(Profile).filter(
-                Profile.role == "admin",
-                Profile.status == "active"
-            ).all()
+            admin_emails = NotificationService._admin_emails_for_warehouse(db, user.warehouse_id)
 
-            admin_emails = [admin.email for admin in admin_profiles if admin.email]
-            
-            # HARDCODED FOR PRESENTATION / DEMONSTRATION
-            if "sharadaabeywickrama@gmail.com" not in admin_emails:
-                admin_emails.append("sharadaabeywickrama@gmail.com")
-            
             if admin_emails:
                 print(f"[NOTIFICATION] Notifying {len(admin_emails)} admin(s) of profile update from database", flush=True)
                 
@@ -616,19 +607,10 @@ class NotificationService:
         try:
             from app.models import Profile
             
-            # Fetch active admins to receive the email
-            admin_profiles = db.query(Profile).filter(
-                Profile.role == "admin",
-                Profile.status == "active"
-            ).all()
-            
-            admin_emails = [admin.email for admin in admin_profiles if admin.email]
-            
-            # Ensure demonstration/client email is included
-            target_demo_email = "sharadaabeywickrama@gmail.com"
-            if target_demo_email not in admin_emails:
-                admin_emails.append(target_demo_email)
-            
+            # FAQs are a shared knowledge base (not tied to a warehouse or
+            # asset), so every active admin/super_admin is notified.
+            admin_emails = NotificationService._admin_emails_for_warehouse(db, None)
+
             if not admin_emails:
                 print("[NOTIFICATION] No admins to notify for new FAQ - skipping email", flush=True)
                 return False
@@ -670,18 +652,11 @@ class NotificationService:
                     assignee_name = assignee.full_name
                     assignee_email = assignee.email
                     
-            # Admin recipients
-            admin_profiles = db.query(Profile).filter(
-                Profile.role == "admin",
-                Profile.status == "active"
-            ).all()
-            admin_emails = [admin.email for admin in admin_profiles if admin.email]
-            
-            # Target demo email
-            target_demo_email = "sharadaabeywickrama@gmail.com"
-            if target_demo_email not in admin_emails:
-                admin_emails.append(target_demo_email)
-                
+            # Admin recipients — scoped to the ticket's own warehouse so
+            # admins don't get flooded with notifications for tickets
+            # outside the warehouse they manage.
+            admin_emails = NotificationService._admin_emails_for_warehouse(db, ticket.warehouse_id)
+
             # Determine overall recipients list ensuring uniqueness
             recipients = set(admin_emails)
             if creator_email:
@@ -730,13 +705,16 @@ class NotificationService:
             if old_priority != ticket.priority:
                 changes.append(f"<li><b>Priority:</b> Changed from <b>{old_priority}</b> to <b>{ticket.priority}</b></li>")
             
-            # Check assignee change
+            # Check assignee change (single lookup, reused below for both
+            # the changelog name and the notification recipient email).
             old_assignee_name = "Unassigned"
+            old_assignee_email = None
             if old_assigned_to:
                 old_assignee = db.query(Profile).filter(Profile.id == old_assigned_to).first()
                 if old_assignee:
                     old_assignee_name = old_assignee.full_name
-            
+                    old_assignee_email = old_assignee.email
+
             new_assignee_name = "Unassigned"
             new_assignee_email = None
             if ticket.assigned_to:
@@ -759,18 +737,9 @@ class NotificationService:
             creator = db.query(Profile).filter(Profile.id == ticket.created_by).first()
             creator_email = creator.email if creator else None
             
-            # Fetch active admins
-            admin_profiles = db.query(Profile).filter(
-                Profile.role == "admin",
-                Profile.status == "active"
-            ).all()
-            admin_emails = [admin.email for admin in admin_profiles if admin.email]
-            
-            # Target demo email
-            target_demo_email = "sharadaabeywickrama@gmail.com"
-            if target_demo_email not in admin_emails:
-                admin_emails.append(target_demo_email)
-                
+            # Admins scoped to the ticket's own warehouse — see notify_on_new_ticket.
+            admin_emails = NotificationService._admin_emails_for_warehouse(db, ticket.warehouse_id)
+
             # Build recipients set
             recipients = set(admin_emails)
             if creator_email:
@@ -778,11 +747,9 @@ class NotificationService:
             if new_assignee_email:
                 recipients.add(new_assignee_email)
             # Notify old assignee too if they were removed/changed
-            if old_assigned_to:
-                old_assignee = db.query(Profile).filter(Profile.id == old_assigned_to).first()
-                if old_assignee and old_assignee.email:
-                    recipients.add(old_assignee.email)
-                    
+            if old_assignee_email:
+                recipients.add(old_assignee_email)
+
             email_list = list(recipients)
             if not email_list:
                 return False

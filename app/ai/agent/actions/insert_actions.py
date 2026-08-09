@@ -8,8 +8,31 @@ import uuid
 from app.ai.agent.tools import ToolContext
 from app.ai.services.llm_service import call_groq
 from app.models import Ticket, Asset, Profile
+from app.services.user_ticket_service import generate_ticket_number
 
 log = logging.getLogger("predictix.actions")
+
+_VALID_PRIORITIES = {"low", "medium", "high"}
+_VALID_STATUSES = {"open", "in_progress", "pending", "resolved", "closed", "cancelled"}
+
+
+def _normalize_priority(raw: Optional[str]) -> str:
+    """Best-effort normalization of the LLM's free-text priority guess.
+    Falls back to 'medium' for anything unrecognized rather than raising —
+    this is chat-agent output, not a strict API contract, so a silent
+    fallback beats surfacing a generic error for a minor LLM quirk."""
+    v = (raw or "medium").strip().lower()
+    if v in {"critical", "urgent", "severe"}:
+        v = "high"
+    return v if v in _VALID_PRIORITIES else "medium"
+
+
+def _normalize_status(raw: Optional[str]) -> Optional[str]:
+    """Same best-effort approach as _normalize_priority — returns None
+    (meaning "don't change it") for anything unrecognized instead of
+    letting an invalid enum value hit the DB and fail the whole commit."""
+    v = (raw or "").strip().lower().replace(" ", "_")
+    return v if v in _VALID_STATUSES else None
 
 ACTION_PROMPT = """
 You are the Action Router for PredictiX Sidekick.
@@ -93,9 +116,10 @@ def handle_action(question: str, ctx: ToolContext) -> dict:
             # Anyone can create a ticket
             new_ticket = Ticket(
                 id=uuid.uuid4(),
+                ticket_number=generate_ticket_number(ctx.db),
                 title=data.get("title") or "New Ticket from Chat",
                 description=data.get("description") or "Created via Sidekick",
-                priority=data.get("priority") or "medium",
+                priority=_normalize_priority(data.get("priority")),
                 created_by=uuid.UUID(ctx.user_id),
                 status="open",
                 warehouse_id=uuid.UUID(ctx.warehouse_id) if ctx.warehouse_id else None
@@ -181,12 +205,15 @@ def handle_action(question: str, ctx: ToolContext) -> dict:
                 return {"answer": f"⚠️ I couldn't find a ticket matching '{ticket_id_str}'. Please check the ticket number.", "action_buttons": []}
                 
             updated_fields = []
-            if data.get("status") and data.get("status") != ticket.status:
-                ticket.status = data.get("status")
+            new_status = _normalize_status(data.get("status"))
+            if new_status and new_status != ticket.status:
+                ticket.status = new_status
                 updated_fields.append(f"status to '{ticket.status}'")
-            if data.get("priority") and data.get("priority") != ticket.priority:
-                ticket.priority = data.get("priority")
-                updated_fields.append(f"priority to '{ticket.priority}'")
+            if data.get("priority"):
+                new_priority = _normalize_priority(data.get("priority"))
+                if new_priority != ticket.priority:
+                    ticket.priority = new_priority
+                    updated_fields.append(f"priority to '{ticket.priority}'")
                 
             if not updated_fields:
                 return {"answer": f"The ticket is already up-to-date. No changes were made.", "action_buttons": [{"label": "View Ticket", "path": f"/tickets/{ticket.id}"}]}

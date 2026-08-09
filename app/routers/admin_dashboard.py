@@ -188,6 +188,18 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
     maint_anchor_dt       = misc_agg[1] or now
     est_maintenance_cost  = int(misc_agg[2] or 0)
 
+    # health_distribution's 5 bands only cover assets with a completed
+    # ('ok', non-null health_score) prediction — an asset with a failed
+    # prediction run (status='no_data') or no pdm_batch_predictions row at
+    # all falls into none of them. That silently made the chart's total
+    # (sum of the 5 bands) diverge from totalAssets shown elsewhere on the
+    # same dashboard (e.g. 1065 vs 1073), reading as "the numbers don't
+    # match" rather than "8 assets haven't been scored yet". Add an explicit
+    # band for them so every asset is accounted for exactly once.
+    unclassified = max(total_assets - total_preds, 0)
+    if unclassified > 0:
+        health_distribution.append({"name": "No Data", "count": unclassified})
+
     kpis = {
         "totalAssets":        total_assets,
         "criticalAlerts":     critical_alerts,
@@ -208,8 +220,37 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
     ticket_months = _months_ending_at(ticket_anchor_dt, 6)
     cost_months   = _months_ending_at(maint_anchor_dt, 6)
 
-    # ── healthTrend ───────────────────────────────────────────────────────────
-    health_trend = [{"month": abbr, "avgHealth": fleet_health} for (_, _, abbr) in cost_months]
+    # ── healthTrend (real historical data, not fabricated) ────────────────────
+    # Previously this repeated the single CURRENT fleet_health value across all
+    # 6 months — a flat line with no real variation, inconsistent with the
+    # ticket/cost/downtime trends right next to it on the same page, which all
+    # plot genuine historical data (#99). pdm_batch_predictions can't supply
+    # real history: it's an upsert table, one row per asset, latest score
+    # only. pdm_prediction_history is the append-only log the batch job has
+    # actually been writing to since 2026-07-10 (5000+ real rows) — use that
+    # instead. Months with no recorded predictions get a null gap in the line
+    # rather than an invented number; if there's no history at all yet, the
+    # array comes back empty so the frontend's existing "No health-trend
+    # data." state shows instead of a misleadingly blank chart.
+    _health_hist_rows = db.execute(text(f"""
+        SELECT to_char(h.predicted_at, 'YYYY-MM') AS ym,
+               AVG(h.health_score)                AS avg_health,
+               MAX(h.predicted_at)                 AS latest
+        FROM pdm_prediction_history h
+        WHERE h.health_score IS NOT NULL
+          AND h.asset_id IN (SELECT id FROM assets {_assets_where})
+        GROUP BY ym
+    """), _wh).fetchall()
+
+    health_by_ym = {r[0]: float(r[1]) for r in _health_hist_rows}
+    if health_by_ym:
+        health_anchor_dt = max(r[2] for r in _health_hist_rows)
+        health_trend = [
+            {"month": abbr, "avgHealth": round(health_by_ym[f"{y:04d}-{m:02d}"], 1) if f"{y:04d}-{m:02d}" in health_by_ym else None}
+            for (y, m, abbr) in _months_ending_at(health_anchor_dt, 6)
+        ]
+    else:
+        health_trend = []
 
     # ── Query 4: ticket trend grouped by month×status ─────────────────────────
     _tt_q = (
@@ -515,43 +556,35 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
         )
     ai_insights = ai_insights[:4]
 
-    # ── aiSummary (cached LLM, never blocks) ──────────────────────────────────
-    # The LLM (run_warehouse_agent → Groq, 3–10s + ~50 DB queries) is NEVER
-    # called inline here. Instead we serve the most recent LLM summary from a
-    # short-TTL in-memory cache and kick off a background refresh when it goes
-    # stale. Until the first refresh lands (or if the LLM is unavailable) we fall
-    # back to the instant, data-grounded KPI summary below — so the dashboard is
-    # always sub-second and the AI text appears automatically once ready.
+    # ── aiSummary (data-grounded, deterministic — no LLM call here) ───────────
+    # This card previously tried to serve a live-cached Groq summary
+    # (run_warehouse_agent) behind `if warehouse_id is None`, but the only
+    # caller of this function always resolves a real warehouse via
+    # active_warehouse_id() — which raises rather than ever returning None —
+    # so that branch could never run. It wasn't a bug in the LLM integration
+    # itself (run_warehouse_agent works and is warehouse-scoped correctly;
+    # see the user-triggered "Full report" flow in warehouse_dashboard.py,
+    # which calls the same function and produces real output), it was just
+    # dead code left after the scoping model changed.
     #
-    # IMPORTANT: run_warehouse_agent() (and the cache wrapping it) has no
-    # warehouse scoping at all — it summarizes across the whole fleet and
-    # picks an arbitrary single warehouse for display. That's fine for a
-    # super_admin viewing the unscoped/fleet-wide view (warehouse_id is None
-    # here), but showing it to a regular admin locked to one warehouse would
-    # present another warehouse's (or the whole fleet's) data as if it were
-    # theirs. Only use the cached LLM summary when this request itself isn't
-    # warehouse-scoped; a scoped admin always gets the data-grounded fallback
-    # below, which IS built from this function's own correctly-scoped kpis.
-    ai_summary = None
-    if warehouse_id is None:
-        from app.services.ai_summary_cache import get_cached_summary, maybe_refresh
-        maybe_refresh()  # non-blocking; no-op if fresh or already running
-        ai_summary = get_cached_summary()
-
-    # Lets the frontend show an honest "AI-generated" badge only when the
-    # text really did come from the LLM — the fallback below is a plain
-    # f-string, not RAG/BERT/XGBoost-derived, and was previously always
-    # labeled as if it were regardless of which one actually produced it.
-    ai_summary_is_generated = ai_summary is not None
-
-    if not ai_summary:
-        ai_summary = (
-            f"Fleet health averages {fleet_health}% across {int(total_assets)} assets. "
-            f"{int(critical_alerts)} assets are at risk and {int(predicted_failures)} are "
-            f"predicted to fail within the maintenance horizon. "
-            f"{int(open_tickets)} tickets are open ({int(high_priority_tickets)} high priority). "
-            f"Estimated maintenance cost is Rs.{est_maintenance_cost:,}."
-        )
+    # Deliberately not re-wiring it as a live per-request/TTL cache: Groq's
+    # call volume is limited, and it's better spent on user-initiated
+    # requests (chatbot, "Full report") than an always-on background timer
+    # nobody explicitly asked for. This card stays a plain, honest,
+    # zero-cost data summary — the frontend already labels it "Data summary"
+    # rather than claiming it's AI-generated.
+    #
+    # Cheap upgrade path if real AI text is wanted here later: generate it
+    # once a day inside the existing scheduled batch job (one Groq call per
+    # warehouse per day) and persist it, rather than any live cache.
+    ai_summary_is_generated = False
+    ai_summary = (
+        f"Fleet health averages {fleet_health}% across {int(total_assets)} assets. "
+        f"{int(critical_alerts)} assets are at risk and {int(predicted_failures)} are "
+        f"predicted to fail within the maintenance horizon. "
+        f"{int(open_tickets)} tickets are open ({int(high_priority_tickets)} high priority). "
+        f"Estimated maintenance cost is Rs.{est_maintenance_cost:,}."
+    )
 
     return {
         "kpis": kpis,
