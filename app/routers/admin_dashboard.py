@@ -188,6 +188,18 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
     maint_anchor_dt       = misc_agg[1] or now
     est_maintenance_cost  = int(misc_agg[2] or 0)
 
+    # health_distribution's 5 bands only cover assets with a completed
+    # ('ok', non-null health_score) prediction — an asset with a failed
+    # prediction run (status='no_data') or no pdm_batch_predictions row at
+    # all falls into none of them. That silently made the chart's total
+    # (sum of the 5 bands) diverge from totalAssets shown elsewhere on the
+    # same dashboard (e.g. 1065 vs 1073), reading as "the numbers don't
+    # match" rather than "8 assets haven't been scored yet". Add an explicit
+    # band for them so every asset is accounted for exactly once.
+    unclassified = max(total_assets - total_preds, 0)
+    if unclassified > 0:
+        health_distribution.append({"name": "No Data", "count": unclassified})
+
     kpis = {
         "totalAssets":        total_assets,
         "criticalAlerts":     critical_alerts,
@@ -208,8 +220,37 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
     ticket_months = _months_ending_at(ticket_anchor_dt, 6)
     cost_months   = _months_ending_at(maint_anchor_dt, 6)
 
-    # ── healthTrend ───────────────────────────────────────────────────────────
-    health_trend = [{"month": abbr, "avgHealth": fleet_health} for (_, _, abbr) in cost_months]
+    # ── healthTrend (real historical data, not fabricated) ────────────────────
+    # Previously this repeated the single CURRENT fleet_health value across all
+    # 6 months — a flat line with no real variation, inconsistent with the
+    # ticket/cost/downtime trends right next to it on the same page, which all
+    # plot genuine historical data (#99). pdm_batch_predictions can't supply
+    # real history: it's an upsert table, one row per asset, latest score
+    # only. pdm_prediction_history is the append-only log the batch job has
+    # actually been writing to since 2026-07-10 (5000+ real rows) — use that
+    # instead. Months with no recorded predictions get a null gap in the line
+    # rather than an invented number; if there's no history at all yet, the
+    # array comes back empty so the frontend's existing "No health-trend
+    # data." state shows instead of a misleadingly blank chart.
+    _health_hist_rows = db.execute(text(f"""
+        SELECT to_char(h.predicted_at, 'YYYY-MM') AS ym,
+               AVG(h.health_score)                AS avg_health,
+               MAX(h.predicted_at)                 AS latest
+        FROM pdm_prediction_history h
+        WHERE h.health_score IS NOT NULL
+          AND h.asset_id IN (SELECT id FROM assets {_assets_where})
+        GROUP BY ym
+    """), _wh).fetchall()
+
+    health_by_ym = {r[0]: float(r[1]) for r in _health_hist_rows}
+    if health_by_ym:
+        health_anchor_dt = max(r[2] for r in _health_hist_rows)
+        health_trend = [
+            {"month": abbr, "avgHealth": round(health_by_ym[f"{y:04d}-{m:02d}"], 1) if f"{y:04d}-{m:02d}" in health_by_ym else None}
+            for (y, m, abbr) in _months_ending_at(health_anchor_dt, 6)
+        ]
+    else:
+        health_trend = []
 
     # ── Query 4: ticket trend grouped by month×status ─────────────────────────
     _tt_q = (

@@ -18,7 +18,9 @@ from pathlib import Path
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from sqlalchemy.exc import InterfaceError, OperationalError
 from fastapi.middleware.cors import CORSMiddleware
 
 # ─── Routers ──────────────────────────────────────────────────────────────────
@@ -408,6 +410,39 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ── Error handlers ────────────────────────────────────────────────────────────
+# Starlette's middleware stack is:
+#     ServerErrorMiddleware -> CORSMiddleware -> ExceptionMiddleware -> routes
+# An exception that reaches ServerErrorMiddleware (i.e. one with no registered
+# handler) is turned into a bare 500 *outside* CORSMiddleware, so that response
+# carries no Access-Control-Allow-Origin header. The browser then reports it as
+# "blocked by CORS policy / Failed to fetch" and the real cause — usually a DB
+# connection failure — is completely hidden from the Network tab and the
+# console. Handlers registered here run inside ExceptionMiddleware, so their
+# responses travel back out through CORSMiddleware and DO get CORS headers.
+@app.exception_handler(OperationalError)
+@app.exception_handler(InterfaceError)
+async def _db_unavailable_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Connection-level DB failures (pooler at max clients, connect timeout,
+    server closed the connection) -> honest 503 instead of an opaque CORS error.
+
+    Only connection-class errors map to 503; ProgrammingError/IntegrityError and
+    friends are real bugs and must keep bubbling up rather than being disguised
+    as a transient outage.
+
+    NOTE: a handler registered for bare `Exception` would NOT help here —
+    Starlette routes that one to ServerErrorMiddleware, which sits *outside*
+    CORSMiddleware, so its response still ends up without CORS headers. Only
+    handlers for specific exception types run inside ExceptionMiddleware and
+    get the headers, which is why these are registered per-type.
+    """
+    log.error("[DB] %s on %s %s: %s", type(exc).__name__, request.method, request.url.path, exc)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Database temporarily unavailable. Please try again shortly."},
+    )
 
 # ─── Router registration ──────────────────────────────────────────────────────
 # Auth, users & profiles
