@@ -247,7 +247,9 @@ def list_tickets_paginated(
     if search and search.strip():
         term = f"%{search.strip()}%"
         q = q.filter(
-            Ticket.title.ilike(term) | Ticket.description.ilike(term)
+            Ticket.title.ilike(term) |
+            Ticket.description.ilike(term) |
+            Ticket.ticket_number.ilike(term)
         )
 
     total = q.count()
