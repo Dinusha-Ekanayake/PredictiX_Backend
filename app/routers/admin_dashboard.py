@@ -556,43 +556,35 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
         )
     ai_insights = ai_insights[:4]
 
-    # ── aiSummary (cached LLM, never blocks) ──────────────────────────────────
-    # The LLM (run_warehouse_agent → Groq, 3–10s + ~50 DB queries) is NEVER
-    # called inline here. Instead we serve the most recent LLM summary from a
-    # short-TTL in-memory cache and kick off a background refresh when it goes
-    # stale. Until the first refresh lands (or if the LLM is unavailable) we fall
-    # back to the instant, data-grounded KPI summary below — so the dashboard is
-    # always sub-second and the AI text appears automatically once ready.
+    # ── aiSummary (data-grounded, deterministic — no LLM call here) ───────────
+    # This card previously tried to serve a live-cached Groq summary
+    # (run_warehouse_agent) behind `if warehouse_id is None`, but the only
+    # caller of this function always resolves a real warehouse via
+    # active_warehouse_id() — which raises rather than ever returning None —
+    # so that branch could never run. It wasn't a bug in the LLM integration
+    # itself (run_warehouse_agent works and is warehouse-scoped correctly;
+    # see the user-triggered "Full report" flow in warehouse_dashboard.py,
+    # which calls the same function and produces real output), it was just
+    # dead code left after the scoping model changed.
     #
-    # IMPORTANT: run_warehouse_agent() (and the cache wrapping it) has no
-    # warehouse scoping at all — it summarizes across the whole fleet and
-    # picks an arbitrary single warehouse for display. That's fine for a
-    # super_admin viewing the unscoped/fleet-wide view (warehouse_id is None
-    # here), but showing it to a regular admin locked to one warehouse would
-    # present another warehouse's (or the whole fleet's) data as if it were
-    # theirs. Only use the cached LLM summary when this request itself isn't
-    # warehouse-scoped; a scoped admin always gets the data-grounded fallback
-    # below, which IS built from this function's own correctly-scoped kpis.
-    ai_summary = None
-    if warehouse_id is None:
-        from app.services.ai_summary_cache import get_cached_summary, maybe_refresh
-        maybe_refresh()  # non-blocking; no-op if fresh or already running
-        ai_summary = get_cached_summary()
-
-    # Lets the frontend show an honest "AI-generated" badge only when the
-    # text really did come from the LLM — the fallback below is a plain
-    # f-string, not RAG/BERT/XGBoost-derived, and was previously always
-    # labeled as if it were regardless of which one actually produced it.
-    ai_summary_is_generated = ai_summary is not None
-
-    if not ai_summary:
-        ai_summary = (
-            f"Fleet health averages {fleet_health}% across {int(total_assets)} assets. "
-            f"{int(critical_alerts)} assets are at risk and {int(predicted_failures)} are "
-            f"predicted to fail within the maintenance horizon. "
-            f"{int(open_tickets)} tickets are open ({int(high_priority_tickets)} high priority). "
-            f"Estimated maintenance cost is Rs.{est_maintenance_cost:,}."
-        )
+    # Deliberately not re-wiring it as a live per-request/TTL cache: Groq's
+    # call volume is limited, and it's better spent on user-initiated
+    # requests (chatbot, "Full report") than an always-on background timer
+    # nobody explicitly asked for. This card stays a plain, honest,
+    # zero-cost data summary — the frontend already labels it "Data summary"
+    # rather than claiming it's AI-generated.
+    #
+    # Cheap upgrade path if real AI text is wanted here later: generate it
+    # once a day inside the existing scheduled batch job (one Groq call per
+    # warehouse per day) and persist it, rather than any live cache.
+    ai_summary_is_generated = False
+    ai_summary = (
+        f"Fleet health averages {fleet_health}% across {int(total_assets)} assets. "
+        f"{int(critical_alerts)} assets are at risk and {int(predicted_failures)} are "
+        f"predicted to fail within the maintenance horizon. "
+        f"{int(open_tickets)} tickets are open ({int(high_priority_tickets)} high priority). "
+        f"Estimated maintenance cost is Rs.{est_maintenance_cost:,}."
+    )
 
     return {
         "kpis": kpis,
