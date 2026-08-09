@@ -158,11 +158,17 @@ def build_user_tickets_query(
         q = q.filter(Ticket.asset_id == asset_id)
     if search:
         like = f"%{search}%"
+        from app.models import Profile
+        assigned_user_exists = db.query(Profile.id).filter(
+            (Profile.id == Ticket.assigned_to) &
+            (Profile.full_name.ilike(like))
+        ).exists()
         q = q.filter(
             or_(
                 Ticket.title.ilike(like),
                 Ticket.description.ilike(like),
                 Ticket.ticket_number.ilike(like),
+                assigned_user_exists,
             )
         )
     if date_from:

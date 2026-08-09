@@ -246,10 +246,16 @@ def list_tickets_paginated(
         q = q.filter(Ticket.warehouse_id == warehouse_id)
     if search and search.strip():
         term = f"%{search.strip()}%"
+        from app.models import Profile
+        assigned_user_exists = db.query(Profile.id).filter(
+            (Profile.id == Ticket.assigned_to) &
+            (Profile.full_name.ilike(term))
+        ).exists()
         q = q.filter(
             Ticket.title.ilike(term) |
             Ticket.description.ilike(term) |
-            Ticket.ticket_number.ilike(term)
+            Ticket.ticket_number.ilike(term) |
+            assigned_user_exists
         )
 
     total = q.count()
