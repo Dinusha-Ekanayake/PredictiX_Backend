@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy import String, cast, func
@@ -35,6 +35,7 @@ from app.schemas.tickets import (
 )
 from app.ai.services.ticket_categorization_service import categorize_ticket_text
 from app.ai.services.ticket_priority_service import predict_ticket_priority
+from app.services.notification_service import NotificationService
 
 router = APIRouter(prefix="/tickets", tags=["Tickets"])
 log = logging.getLogger(__name__)
@@ -80,7 +81,12 @@ def _generate_ticket_number(db: Session) -> str:
 
 
 @router.post("/", response_model=TicketOut)
-def create_ticket(payload: TicketCreate, db: Session = Depends(get_db), current_user: Profile = Depends(get_current_user)):
+def create_ticket(
+    payload: TicketCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
     data = payload.model_dump()
     data["ticket_number"] = _generate_ticket_number(db)
     if data.get("priority"):
@@ -109,6 +115,8 @@ def create_ticket(payload: TicketCreate, db: Session = Depends(get_db), current_
     if obj.assigned_to:
         _notify_ticket_assignment(db, obj)
 
+    background_tasks.add_task(NotificationService.notify_on_new_ticket, db, str(obj.id))
+
     return obj
 
 
@@ -135,15 +143,10 @@ def get_ticket_status_counts(
     current_user: Profile = Depends(get_current_user),
 ):
     """Aggregate ticket counts by status for dashboards.
-    Admins/super_admins see counts for their active warehouse only (same
-    scoping as every other admin-facing endpoint — assets, admin-dashboard
-    summary, list_tickets_paginated). Users see counts for tickets assigned
-    to them or created by them.
-
-    Previously admins saw a fleet-wide (unscoped) total here, which didn't
-    match the warehouse-scoped counts shown on the admin dashboard and
-    every other admin ticket view — e.g. 228 tickets here vs 208 on the
-    dashboard for the same admin.
+    Everyone (users, admins, super_admins) sees counts scoped to their own
+    warehouse — same visibility as list_tickets/list_tickets_paginated/
+    get_ticket. Users additionally see tickets assigned to or created by
+    them even if those fall outside their own warehouse.
     """
     counts = {"open": 0, "in-progress": 0, "resolved": 0, "closed": 0}
     q = db.query(Ticket.status, func.count(Ticket.id)).group_by(Ticket.status)
@@ -156,10 +159,18 @@ def get_ticket_status_counts(
             # from everyone's counts. Matches list_tickets/list_tickets_paginated.
             q = q.filter((Ticket.warehouse_id == wh_id) | (Ticket.warehouse_id.is_(None)))
     else:
-        q = q.filter((Ticket.assigned_to == current_user.id) | (Ticket.created_by == current_user.id))
+        user_wh_id = getattr(current_user, "warehouse_id", None)
+        if user_wh_id:
+            q = q.filter(
+                (Ticket.warehouse_id == user_wh_id) |
+                (Ticket.assigned_to == current_user.id) |
+                (Ticket.created_by == current_user.id)
+            )
+        else:
+            q = q.filter((Ticket.assigned_to == current_user.id) | (Ticket.created_by == current_user.id))
 
     rows = q.all()
-    
+
     for status, count in rows:
         if status in ("open", "pending"):
             counts["open"] += count
@@ -186,19 +197,26 @@ def list_tickets(
 ):
     q = db.query(Ticket)
 
-    # Role-based scoping — matches /paginated: admins see every ticket in
-    # their active warehouse, regular users only ever see tickets they
-    # created or are assigned to. This endpoint is what the shared
-    # asset-details panel's Tickets tab calls (via ?asset_id=), so without
-    # this a regular user opening any asset (including one outside their
-    # own warehouse) could read every other employee's ticket
-    # titles/descriptions for that asset.
+    # Role-based scoping — matches /paginated and get_ticket: everyone
+    # (users, admins, super_admins) can see every ticket in their own
+    # warehouse and can comment on it; only owners/admins may edit one
+    # (enforced separately in update_my_ticket/update_ticket). Users also
+    # see tickets assigned to or created by them even outside their
+    # warehouse (e.g. a cross-warehouse assignment).
     if not is_admin_role(current_user):
         uid = str(getattr(current_user, "id", ""))
-        q = q.filter(
-            (cast(Ticket.created_by, String) == uid) |
-            (cast(Ticket.assigned_to, String) == uid)
-        )
+        user_wh_id = getattr(current_user, "warehouse_id", None)
+        if user_wh_id:
+            q = q.filter(
+                (Ticket.warehouse_id == user_wh_id) |
+                (cast(Ticket.created_by, String) == uid) |
+                (cast(Ticket.assigned_to, String) == uid)
+            )
+        else:
+            q = q.filter(
+                (cast(Ticket.created_by, String) == uid) |
+                (cast(Ticket.assigned_to, String) == uid)
+            )
     else:
         # Pin to the admin's active warehouse, overriding any
         # client-supplied warehouse_id — same pattern as departments.py.
@@ -235,20 +253,29 @@ def list_tickets_paginated(
 ):
     """Paginated ticket list with search, filters and total count.
     Used by the frontend ticket page instead of direct Supabase client calls.
-    Admins see all tickets; regular users see only tickets they created or are assigned to.
+    Everyone sees every ticket in their own warehouse (see list_tickets for
+    the full scoping rationale); only owners/admins may edit one.
     """
     from sqlalchemy import or_, cast
     from sqlalchemy import String
 
     q = db.query(Ticket)
 
-    # Role-based scoping
+    # Role-based scoping — see list_tickets.
     if not is_admin_role(current_user):
         uid = str(getattr(current_user, "id", ""))
-        q = q.filter(
-            (cast(Ticket.created_by, String) == uid) |
-            (cast(Ticket.assigned_to, String) == uid)
-        )
+        user_wh_id = getattr(current_user, "warehouse_id", None)
+        if user_wh_id:
+            q = q.filter(
+                (Ticket.warehouse_id == user_wh_id) |
+                (cast(Ticket.created_by, String) == uid) |
+                (cast(Ticket.assigned_to, String) == uid)
+            )
+        else:
+            q = q.filter(
+                (cast(Ticket.created_by, String) == uid) |
+                (cast(Ticket.assigned_to, String) == uid)
+            )
     else:
         # Pin to the admin's active warehouse, overriding any
         # client-supplied warehouse_id — same pattern as departments.py.
@@ -280,8 +307,8 @@ def list_tickets_paginated(
 
 # ── User (owner-scoped) ticket endpoints ──────────────────────────────────────
 # Registered BEFORE "/{ticket_id}" so "/mine" isn't captured as an id.
-# Ownership is enforced server-side via the app JWT (get_current_user): a
-# non-admin user may only read/modify tickets they created.
+# Edit/delete rights are enforced server-side via the app JWT
+# (get_current_user): only the ticket's creator or an admin may modify it.
 
 def _is_admin(user: Profile) -> bool:
     # Includes super_admin — see app.deps.is_admin_role.
@@ -353,6 +380,7 @@ def list_my_tickets(
 @router.post("/mine", response_model=UserTicketOut)
 def create_my_ticket(
     payload: UserTicketCreate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
@@ -378,6 +406,9 @@ def create_my_ticket(
     asset_name = None
     if obj.asset_id:
         asset_name = db.query(Asset.asset_name).filter(Asset.id == obj.asset_id).scalar()
+
+    background_tasks.add_task(NotificationService.notify_on_new_ticket, db, str(obj.id))
+
     return _serialize_user_ticket(obj, asset_name)
 
 
@@ -385,6 +416,7 @@ def create_my_ticket(
 def update_my_ticket(
     ticket_id: str,
     payload: UserTicketUpdate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
@@ -393,6 +425,11 @@ def update_my_ticket(
         raise HTTPException(status_code=404, detail="Ticket not found")
     if not _is_admin(current_user) and str(obj.created_by) != str(current_user.id):
         raise HTTPException(status_code=403, detail="You can only edit tickets you created.")
+
+    # Record old values
+    old_status = obj.status
+    old_priority = obj.priority
+    old_assigned_to = str(obj.assigned_to) if obj.assigned_to else None
 
     if payload.title is not None:
         obj.title = payload.title
@@ -408,6 +445,17 @@ def update_my_ticket(
     asset_name = None
     if obj.asset_id:
         asset_name = db.query(Asset.asset_name).filter(Asset.id == obj.asset_id).scalar()
+
+    background_tasks.add_task(
+        NotificationService.notify_on_ticket_update,
+        db,
+        str(obj.id),
+        str(current_user.id),
+        old_status,
+        old_priority,
+        old_assigned_to
+    )
+
     return _serialize_user_ticket(obj, asset_name)
 
 
@@ -436,19 +484,29 @@ def get_ticket(ticket_id: str, db: Session = Depends(get_db), current_user: Prof
     obj = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    # Same scoping as list_tickets/list_tickets_paginated: non-admins may
-    # only read tickets they created or are assigned to. Every list endpoint
-    # already enforced this — this single-record getter didn't, so any
-    # authenticated user could read any ticket by guessing/incrementing its id.
+    # Same scoping as list_tickets/list_tickets_paginated: everyone can read
+    # (and comment on) any ticket in their own warehouse; only owners/admins
+    # may edit one (enforced in update_my_ticket/update_ticket). Without
+    # this, any authenticated user could read any ticket by
+    # guessing/incrementing its id.
     if not is_admin_role(current_user):
         uid = str(current_user.id)
-        if str(obj.created_by) != uid and str(obj.assigned_to) != uid:
+        user_wh_id = getattr(current_user, "warehouse_id", None)
+        same_warehouse = user_wh_id is not None and str(obj.warehouse_id) == str(user_wh_id)
+        involved = str(obj.created_by) == uid or str(obj.assigned_to) == uid
+        if not same_warehouse and not involved:
             raise HTTPException(status_code=404, detail="Ticket not found")
     return obj
 
 
 @router.put("/{ticket_id}", response_model=TicketOut)
-def update_ticket(ticket_id: str, payload: TicketUpdate, db: Session = Depends(get_db), current_user: object = Depends(get_current_user)):
+def update_ticket(
+    ticket_id: str,
+    payload: TicketUpdate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: object = Depends(get_current_user),
+):
     if not is_admin_role(current_user):
         raise HTTPException(status_code=403, detail="Only admins can update tickets")
     obj = db.query(Ticket).filter(Ticket.id == ticket_id).first()
@@ -457,7 +515,8 @@ def update_ticket(ticket_id: str, payload: TicketUpdate, db: Session = Depends(g
 
     updates = payload.model_dump(exclude_unset=True)
     old_status = obj.status
-    old_assigned_to = obj.assigned_to
+    old_priority = obj.priority
+    old_assigned_to = str(obj.assigned_to) if obj.assigned_to else None
 
     # normalize enum fields
     if "status" in updates and updates["status"]:
@@ -483,6 +542,7 @@ def update_ticket(ticket_id: str, payload: TicketUpdate, db: Session = Depends(g
             ticket_id=obj.id,
             old_status=old_status,
             new_status=new_status,
+            changed_by=getattr(current_user, "id", None),
         )
         db.add(history)
 
@@ -492,6 +552,16 @@ def update_ticket(ticket_id: str, payload: TicketUpdate, db: Session = Depends(g
     new_assigned_to = updates.get("assigned_to")
     if new_assigned_to and str(new_assigned_to) != str(old_assigned_to or ""):
         _notify_ticket_assignment(db, obj)
+
+    background_tasks.add_task(
+        NotificationService.notify_on_ticket_update,
+        db,
+        str(obj.id),
+        str(getattr(current_user, "id", "")),
+        old_status,
+        old_priority,
+        old_assigned_to
+    )
 
     return obj
 

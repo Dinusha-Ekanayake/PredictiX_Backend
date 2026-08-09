@@ -12,11 +12,17 @@ router = APIRouter(
 
 
 def _can_view_ticket(ticket: Ticket, current_user: Profile) -> bool:
-    """Same rule as tickets.py's list scoping: admins see everything,
-    a regular user only tickets they created or are assigned to."""
+    """Same rule as tickets.py's get_ticket/list scoping: everyone can
+    view (and comment on) any ticket in their own warehouse; users also
+    keep visibility into tickets they created or are assigned to outside
+    their warehouse. Comment/edit rights on the comment itself stay
+    narrower — see delete_ticket_comment."""
     if is_admin_role(current_user):
         return True
     uid = str(getattr(current_user, "id", ""))
+    user_wh_id = getattr(current_user, "warehouse_id", None)
+    if user_wh_id is not None and str(ticket.warehouse_id) == str(user_wh_id):
+        return True
     return str(ticket.created_by) == uid or str(ticket.assigned_to) == uid
 
 
@@ -62,13 +68,19 @@ def list_ticket_comments(
         q = db.query(TicketComment)
     else:
         # No ticket_id filter and not an admin — scope to comments on
-        # tickets this user can actually see, instead of the whole table.
+        # tickets this user can actually see (own warehouse, or tickets
+        # they created/are assigned to), instead of the whole table.
         uid = str(getattr(current_user, "id", ""))
-        q = (
-            db.query(TicketComment)
-            .join(Ticket, Ticket.id == TicketComment.ticket_id)
-            .filter((Ticket.created_by == uid) | (Ticket.assigned_to == uid))
-        )
+        user_wh_id = getattr(current_user, "warehouse_id", None)
+        q = db.query(TicketComment).join(Ticket, Ticket.id == TicketComment.ticket_id)
+        if user_wh_id is not None:
+            q = q.filter(
+                (Ticket.warehouse_id == user_wh_id) |
+                (Ticket.created_by == uid) |
+                (Ticket.assigned_to == uid)
+            )
+        else:
+            q = q.filter((Ticket.created_by == uid) | (Ticket.assigned_to == uid))
     return q.order_by(TicketComment.created_at.asc()).offset(offset).limit(limit).all()
 
 

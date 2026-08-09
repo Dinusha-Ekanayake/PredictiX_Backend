@@ -46,6 +46,7 @@ class ToolTraceItem(BaseModel):
 class AgentRequest(BaseModel):
     question: str
     history: Optional[list[ChatHistoryTurn]] = None
+    frontend_context: Optional[dict] = None
 
 
 class AgentResponse(BaseModel):
@@ -97,7 +98,7 @@ def chatbot_agent(
             iterations=0,
         )
 
-    ctx = ToolContext(db=db, user=current_user)
+    ctx = ToolContext(db=db, user=current_user, frontend_context=request.frontend_context)
     history = [t.model_dump() for t in (request.history or [])]
 
     result = run_agent(question=request.question, history=history, ctx=ctx)

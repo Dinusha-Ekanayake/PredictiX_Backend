@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status, BackgroundTasks
 from sqlalchemy.orm import Session
 
 from app.deps import get_current_user, get_db
@@ -33,6 +33,7 @@ from app.schemas.user_tickets import (
     UserTicketUpdate,
 )
 from app.services import user_ticket_service as svc
+from app.services.notification_service import NotificationService
 
 router = APIRouter(prefix="/user/tickets", tags=["User - Tickets"])
 
@@ -63,6 +64,7 @@ def list_my_tickets(
     query = svc.build_user_tickets_query(
         db,
         user_id=current_user.id,
+        warehouse_id=getattr(current_user, "warehouse_id", None),
         status=status_filter,
         priority=priority,
         asset_id=asset_id,
@@ -106,7 +108,7 @@ def get_my_ticket(
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    if not svc.user_can_view_ticket(ticket, current_user.id):
+    if not svc.user_can_view_ticket(ticket, current_user.id, getattr(current_user, "warehouse_id", None)):
         raise HTTPException(status_code=403, detail="Not allowed to view this ticket")
 
     comments = svc.fetch_ticket_comments(db, ticket_id)
@@ -157,6 +159,7 @@ def preview_my_ticket_ai(
 )
 def create_my_ticket(
     payload: UserTicketCreate,
+    background_tasks: BackgroundTasks,
     current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -179,6 +182,8 @@ def create_my_ticket(
         db.rollback()
         raise HTTPException(status_code=400, detail=f"Could not create ticket: {exc}")
 
+    background_tasks.add_task(NotificationService.notify_on_new_ticket, db, str(ticket.id))
+
     detail = UserTicketDetail.model_validate(ticket)
     detail.comments = []
     detail.attachments = []
@@ -189,6 +194,7 @@ def create_my_ticket(
 @router.put("/{ticket_id}", response_model=UserTicketDetail)
 def update_my_ticket(
     payload: UserTicketUpdate,
+    background_tasks: BackgroundTasks,
     ticket_id: UUID = Path(...),
     current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -203,6 +209,11 @@ def update_my_ticket(
             status_code=403, detail="You can only update tickets you created"
         )
 
+    # Record old values
+    old_status = ticket.status
+    old_priority = ticket.priority
+    old_assigned_to = str(ticket.assigned_to) if ticket.assigned_to else None
+
     updates = payload.model_dump(exclude_unset=True)
     if not updates:
         raise HTTPException(status_code=400, detail="No updatable fields provided")
@@ -215,6 +226,16 @@ def update_my_ticket(
     comments = svc.fetch_ticket_comments(db, ticket_id)
     attachments = svc.fetch_ticket_attachments(db, ticket_id)
     history = svc.fetch_ticket_history(db, ticket_id)
+
+    background_tasks.add_task(
+        NotificationService.notify_on_ticket_update,
+        db,
+        str(ticket.id),
+        str(current_user.id),
+        old_status,
+        old_priority,
+        old_assigned_to
+    )
 
     detail = UserTicketDetail.model_validate(ticket)
     detail.comments = [UserTicketCommentOut.model_validate(c) for c in comments]
@@ -241,7 +262,7 @@ def list_my_ticket_comments(
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    if not svc.user_can_view_ticket(ticket, current_user.id):
+    if not svc.user_can_view_ticket(ticket, current_user.id, getattr(current_user, "warehouse_id", None)):
         raise HTTPException(status_code=403, detail="Not allowed to view this ticket")
 
     comments = svc.fetch_ticket_comments(db, ticket_id)
@@ -263,7 +284,7 @@ def add_my_ticket_comment(
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    if not svc.user_can_view_ticket(ticket, current_user.id):
+    if not svc.user_can_view_ticket(ticket, current_user.id, getattr(current_user, "warehouse_id", None)):
         raise HTTPException(
             status_code=403, detail="Not allowed to comment on this ticket"
         )
@@ -292,7 +313,7 @@ def add_my_ticket_attachment(
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    if not svc.user_can_view_ticket(ticket, current_user.id):
+    if not svc.user_can_view_ticket(ticket, current_user.id, getattr(current_user, "warehouse_id", None)):
         raise HTTPException(
             status_code=403, detail="Not allowed to add attachments to this ticket"
         )

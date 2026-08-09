@@ -8,11 +8,17 @@ router = APIRouter(prefix="/ticket-attachments", tags=["Ticket Attachments"])
 
 
 def _can_view_ticket(ticket: Ticket, current_user: Profile) -> bool:
-    """Same rule as tickets.py's list scoping: admins see everything,
-    a regular user only tickets they created or are assigned to."""
+    """Same rule as tickets.py's get_ticket/list scoping: everyone can
+    view (and attach files to) any ticket in their own warehouse; users
+    also keep visibility into tickets they created or are assigned to
+    outside their warehouse. Deletion of an attachment stays narrower —
+    see delete_ticket_attachment."""
     if is_admin_role(current_user):
         return True
     uid = str(getattr(current_user, "id", ""))
+    user_wh_id = getattr(current_user, "warehouse_id", None)
+    if user_wh_id is not None and str(ticket.warehouse_id) == str(user_wh_id):
+        return True
     return str(ticket.created_by) == uid or str(ticket.assigned_to) == uid
 
 
@@ -51,11 +57,16 @@ def list_ticket_attachments(
         q = db.query(TicketAttachment)
     else:
         uid = str(getattr(current_user, "id", ""))
-        q = (
-            db.query(TicketAttachment)
-            .join(Ticket, Ticket.id == TicketAttachment.ticket_id)
-            .filter((Ticket.created_by == uid) | (Ticket.assigned_to == uid))
-        )
+        user_wh_id = getattr(current_user, "warehouse_id", None)
+        q = db.query(TicketAttachment).join(Ticket, Ticket.id == TicketAttachment.ticket_id)
+        if user_wh_id is not None:
+            q = q.filter(
+                (Ticket.warehouse_id == user_wh_id) |
+                (Ticket.created_by == uid) |
+                (Ticket.assigned_to == uid)
+            )
+        else:
+            q = q.filter((Ticket.created_by == uid) | (Ticket.assigned_to == uid))
     return q.order_by(TicketAttachment.created_at.desc()).all()
 
 

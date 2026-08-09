@@ -110,10 +110,16 @@ def get_owned_ticket_or_none(
     )
 
 
-def user_can_view_ticket(ticket: Ticket, user_id: UUID) -> bool:
-    """A user may only view tickets they created — not others' tickets,
-    even if assigned to them."""
-    return ticket.created_by == user_id
+def user_can_view_ticket(
+    ticket: Ticket, user_id: UUID, warehouse_id: Optional[UUID] = None
+) -> bool:
+    """A user may view (and comment on) a ticket they created, are assigned
+    to, or that belongs to their own warehouse — matches the visibility
+    rule in app.routers.tickets.get_ticket. Editing stays owner-only, see
+    get_owned_ticket_or_none."""
+    if warehouse_id is not None and ticket.warehouse_id == warehouse_id:
+        return True
+    return ticket.created_by == user_id or ticket.assigned_to == user_id
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +139,7 @@ def build_user_tickets_query(
     db: Session,
     *,
     user_id: UUID,
+    warehouse_id: Optional[UUID] = None,
     status: Optional[str] = None,
     priority: Optional[str] = None,
     asset_id: Optional[UUID] = None,
@@ -142,10 +149,13 @@ def build_user_tickets_query(
     sort_by: str = "created_at",
     sort_dir: str = "desc",
 ):
-    """Build a SQLAlchemy query scoped to the tickets the user CREATED.
-    A user only sees their own tickets — never tickets created by others,
-    even if assigned to them."""
-    q = db.query(Ticket).filter(Ticket.created_by == user_id)
+    """Build a SQLAlchemy query scoped to tickets the user can see: ones
+    they created or are assigned to, plus every ticket in their own
+    warehouse (matches user_can_view_ticket / app.routers.tickets.list_tickets)."""
+    visibility = [Ticket.created_by == user_id, Ticket.assigned_to == user_id]
+    if warehouse_id is not None:
+        visibility.append(Ticket.warehouse_id == warehouse_id)
+    q = db.query(Ticket).filter(or_(*visibility))
 
     if status:
         q = q.filter(Ticket.status == status)
