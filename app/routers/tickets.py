@@ -204,6 +204,8 @@ def list_tickets_paginated(
     search: str | None = Query(default=None),
     asset_id: str | None = Query(default=None),
     warehouse_id: str | None = Query(default=None),
+    sort_by: str | None = Query(default=None),
+    sort_dir: str = Query(default="desc", pattern="^(asc|desc)$"),
     limit: int = Query(default=10, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
@@ -249,7 +251,28 @@ def list_tickets_paginated(
         )
 
     total = q.count()
-    rows = q.order_by(Ticket.created_at.desc()).offset(offset).limit(limit).all()
+
+    # Sort results
+    sort_col = Ticket.created_at
+    if sort_by:
+        s_by = sort_by.lower()
+        if s_by in ("title", "name"):
+            sort_col = Ticket.title
+        elif s_by == "priority":
+            sort_col = Ticket.priority
+        elif s_by == "status":
+            sort_col = Ticket.status
+        elif s_by == "ticket_number":
+            sort_col = Ticket.ticket_number
+        elif s_by == "updated_at":
+            sort_col = Ticket.updated_at
+
+    if sort_dir.lower() == "asc":
+        q = q.order_by(sort_col.asc())
+    else:
+        q = q.order_by(sort_col.desc())
+
+    rows = q.offset(offset).limit(limit).all()
 
     return {"tickets": [TicketOut.model_validate(t) for t in rows], "total": total}
 
