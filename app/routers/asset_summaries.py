@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
 from datetime import datetime
+from uuid import UUID
 import logging
 
 from app.schemas.asset_summary import AssetSummaryRequest, AssetSummaryResponse
@@ -8,6 +9,7 @@ from app.ai.services.asset_summary_service import generate_asset_summary, get_as
 from app.deps import (
     get_db,
     require_user,
+    require_admin,
     get_current_user,
     is_admin_role,
     assert_asset_in_scope,
@@ -90,7 +92,7 @@ def _latest_prediction(db: Session, asset_id) -> AssetFailurePrediction | None:
 
 @router.get("/by-asset/{asset_id}", response_model=AssetSummaryResponse)
 async def get_summary_by_asset(
-    asset_id: str,
+    asset_id: UUID,
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
@@ -127,14 +129,19 @@ async def get_summary_by_asset(
         raise HTTPException(status_code=500, detail=f"Summary generation failed: {str(e)}")
 
 
-@router.post("/generate", response_model=AssetSummaryResponse)
+@router.post("/generate", response_model=AssetSummaryResponse, dependencies=[Depends(require_admin)])
 async def generate_summary(payload: AssetSummaryRequest):
     """
-    Generate a summary for asset data using the Seq2Seq model
-    
-    This endpoint takes formatted asset/vehicle input text and generates 
-    a human-readable summary using the pre-trained Seq2Seq model hosted on HuggingFace.
-    
+    Generate a summary for arbitrary asset/fleet text using the Seq2Seq model.
+
+    This endpoint takes formatted, free-form input text — not tied to any
+    specific asset a caller must own — and triggers real external HF
+    inference, so it's admin-gated rather than any-authenticated-user like
+    the rest of this router: a regular "user" account has no legitimate
+    reason to call it directly (the warehouse report feature that uses it
+    is itself admin-only), and without this gate any authenticated account
+    could repeatedly trigger uncapped external-API cost with no rate limit.
+
     Input format example:
     "Vehicle: SLW0225 | Type: Light Truck 3.5T | Model: Mitsubishi Canter | Component health: oil 93.5%, brakes 79.7%, tires 58.7%, battery 66.3%, hydraulics 62.5%"
     """
