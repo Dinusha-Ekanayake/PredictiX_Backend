@@ -15,11 +15,17 @@ Design (mirrors the training pipeline in
   * servicing just resets `days_since_last_service` — no degradation history is
     needed, which is why a single snapshot is enough.
 
-Warehouse reporting (`fleet_survival_summary`) fuses three models, each owning
-its question:
-    PdM   (asset_failure_predictions) -> WHICH assets are critical
-    this  (survival)                  -> WHICH component, P(fail) in 7 / 30 days
-    cost  (asset_cost_predictions)    -> WHAT the replacement costs
+Warehouse reporting (`fleet_survival_summary`) fuses three questions, all
+answered from `pdm_batch_predictions` — the single source of truth for PdM
+output (populated by the daily scheduler + the asset-page "Run AI"
+trigger). asset_failure_predictions / asset_cost_predictions were the old
+on-demand-only tables, superseded by pdm_batch_predictions since the
+v7/decision-layer unification and never written to since — reading from
+them here silently produced an empty/stale critical-asset set and cost
+map regardless of how current the real predictions actually were:
+    PdM   -> WHICH assets are critical      (health_score)
+    this  -> WHICH component, P(fail) in 7 / 30 days
+    cost  -> WHAT the replacement costs     (estimated_cost_lkr)
 and returns the expected replacement spend for the next 7 and 30 days.
 """
 
@@ -284,18 +290,17 @@ def _p_service(fail_probs: list[float]) -> float:
 
 
 def _latest_cost_map(db: Session, codes: list[str]) -> dict[str, float]:
+    """pdm_batch_predictions has exactly one (upserted) row per asset, so —
+    unlike the old asset_cost_predictions table this replaced — there's no
+    "latest of several rows" ambiguity to resolve with DISTINCT ON."""
     if not codes:
         return {}
     from sqlalchemy import bindparam
     rows = db.execute(text("""
-        SELECT a.asset_code, c.estimated_cost
-        FROM (
-            SELECT DISTINCT ON (asset_id) asset_id, estimated_cost, created_at
-            FROM asset_cost_predictions
-            ORDER BY asset_id, created_at DESC
-        ) c
-        JOIN assets a ON a.id = c.asset_id
-        WHERE a.asset_code IN :codes
+        SELECT a.asset_code, p.estimated_cost_lkr
+        FROM pdm_batch_predictions p
+        JOIN assets a ON a.id = p.asset_id
+        WHERE a.asset_code IN :codes AND p.status = 'ok'
     """).bindparams(bindparam("codes", expanding=True)), {"codes": codes}).fetchall()
     return {r[0]: (float(r[1]) if r[1] is not None else None) for r in rows}
 
@@ -305,16 +310,16 @@ def fleet_survival_summary(db: Session, max_assets: int = 25,
                            asset_codes: list[str] | None = None) -> dict[str, Any]:
     """Warehouse-level survival + cost aggregation over the critical set.
 
-    * Critical set comes from the PdM pipeline (asset_failure_predictions) — either
+    * Critical set comes from the PdM pipeline (pdm_batch_predictions) — either
       the explicit `asset_codes` or the `max_assets` lowest-health assets.
     * Each asset is scored on all five components for P(fail) in 7 / 30 days.
-    * Replacement cost is read from the cost model (asset_cost_predictions), and
+    * Replacement cost is read from the same pdm_batch_predictions row, and
       the expected spend is  P(service within Nd) * cost  summed over the fleet.
 
     Returns the new warehouse-report structure PLUS the legacy `component_summary`
     / `watchlist` keys so existing consumers keep working.
     """
-    from app.models import Asset, AssetFailurePrediction
+    from app.models import Asset, PdmBatchPrediction
 
     if asset_codes:
         rows = (
@@ -325,9 +330,9 @@ def fleet_survival_summary(db: Session, max_assets: int = 25,
     else:
         rows = (
             db.query(Asset.asset_code, Asset.id)
-            .join(AssetFailurePrediction, Asset.id == AssetFailurePrediction.asset_id)
-            .filter(AssetFailurePrediction.health_score.isnot(None))
-            .order_by(AssetFailurePrediction.health_score.asc())
+            .join(PdmBatchPrediction, Asset.id == PdmBatchPrediction.asset_id)
+            .filter(PdmBatchPrediction.status == "ok", PdmBatchPrediction.health_score.isnot(None))
+            .order_by(PdmBatchPrediction.health_score.asc())
             .limit(max_assets)
             .all()
         )

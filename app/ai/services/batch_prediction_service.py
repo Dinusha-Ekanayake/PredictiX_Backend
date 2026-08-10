@@ -309,7 +309,18 @@ def _run_classifier_batch(
     clf_features: list[str],
     clf_threshold: float,
     clf_categorical_cols: list[str],
-) -> list[tuple[float, bool]]:
+) -> list[tuple[float | None, bool]]:
+    """Returns one (failure_probability, maintenance_required) pair per row.
+
+    failure_probability is None when the classifier genuinely could not
+    score that row, after both the vectorized attempt and the per-row
+    fallback below have failed. Callers MUST treat None as a failed
+    prediction (pdm_batch_predictions status="error", no fabricated
+    numbers) — never substitute a default probability. A prior version of
+    the per-row fallback defaulted to 0.05 on failure with no error signal,
+    which recorded a scoring failure as "5% chance of failure, healthy":
+    the opposite of a fail-safe for a predictive-maintenance system.
+    """
     df = clf_model.build_frame(feature_dicts)
     try:
         probas = clf_model.predict_proba_positive(df)
@@ -320,13 +331,18 @@ def _run_classifier_batch(
     except Exception as e:
         log.warning("Batched LightGBM classification failed: %s. Falling back to per-row.", e)
 
-    results = []
+    results: list[tuple[float | None, bool]] = []
     for i in range(len(df)):
         try:
             prob = float(clf_model.predict_proba_positive(df.iloc[[i]])[0])
-        except Exception:
-            prob = 0.05
-        results.append((round(prob, 4), bool(prob >= clf_threshold)))
+            results.append((round(prob, 4), bool(prob >= clf_threshold)))
+        except Exception as row_exc:
+            log.error(
+                "LightGBM classification failed for row %d even after per-row fallback — "
+                "recording as a failed prediction, not a fabricated probability: %s",
+                i, row_exc,
+            )
+            results.append((None, False))
     return results
 
 
@@ -752,6 +768,18 @@ def run_batch_for_asset(
         (failure_probability, maintenance_required), = _run_classifier_batch(
             [fd], clf_model, clf_features, clf_threshold, clf_categorical_cols
         )
+        if failure_probability is None:
+            elapsed = int(time.time() * 1000) - start_ms
+            _upsert_single(db, asset_id_str, {
+                **_empty_prediction_fields(),
+                "run_duration_ms": elapsed,
+                "error_message": "Classifier inference failed for this asset",
+                "status": "error",
+            })
+            db.commit()
+            log.error("[batch] asset %s — classifier inference failed, marked as error", asset_id_str[:8])
+            return {"asset_id": asset_id_str, "status": "error"}
+
         (days_until, pred_date, top_explanations, horizon_saturated), = _run_regressor_batch(
             [fd], reg_model, reg_features, reg_categorical_cols, today
         )
@@ -955,6 +983,22 @@ def run_batch_for_all_assets(
                 scored_assets, feature_dicts, classifier_results, regressor_results
             ):
                 asset_id_str = str(asset.id)
+
+                if failure_probability is None:
+                    error_count += 1
+                    log.error(
+                        "[batch] asset %s (%s) — classifier inference failed, marking as error",
+                        asset_id_str[:8], asset.asset_code or "?",
+                    )
+                    upsert_rows.append({
+                        "asset_id": asset_id_str,
+                        **_empty_prediction_fields(),
+                        "run_duration_ms": 0,
+                        "error_message": "Classifier inference failed for this asset",
+                        "status": "error",
+                    })
+                    continue
+
                 health_score, health_status = _compute_health_score(fd, failure_probability, days_until)
                 contributing_factors = _compute_contributing_factors(fd, failure_probability)
                 estimated_cost, min_cost, max_cost = _estimate_cost(

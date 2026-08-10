@@ -30,7 +30,7 @@ from sqlalchemy import func, text
 from datetime import datetime, timedelta
 
 from app.models import (
-    Asset, AssetFailurePrediction, AssetCostPrediction,
+    Asset, AssetFailurePrediction,
     MaintenanceEvent, Ticket, Profile, Warehouse,
     Department, PredictionFeatureImportance, PredictionExplanation,
 )
@@ -212,15 +212,19 @@ def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
     avg_vehicle_age = db.query(func.avg(Asset.vehicle_age_years)).scalar() or 0
 
     # ── HEALTH & FAILURE PREDICTIONS ─────────────────────
-    # Deduplicate to the LATEST prediction per asset (one row per asset_id) so every
-    # health metric is derived from ONE consistent set. Assets accrue multiple
-    # prediction runs over time; counting all rows previously over-counted the fleet
-    # (health bands summed to more than the asset total).
+    # pdm_batch_predictions is the single source of truth for PdM output —
+    # upserted with exactly one row per asset, so unlike the old
+    # asset_failure_predictions history table this replaced (which needed a
+    # DISTINCT ON to dedupe multiple prediction runs per asset), every
+    # health metric here is already derived from one consistent set with no
+    # extra dedup step. asset_failure_predictions was superseded since the
+    # v7/decision-layer unification and never written to since — reading
+    # from it here silently produced a stale/empty risk breakdown.
     latest_preds = db.execute(text("""
-        SELECT DISTINCT ON (asset_id)
-            asset_id, health_score, failure_probability, risk_level, days_until_maintenance
-        FROM asset_failure_predictions
-        ORDER BY asset_id, created_at DESC
+        SELECT
+            asset_id, health_score, failure_probability, risk_level, predicted_days_until_maintenance
+        FROM pdm_batch_predictions
+        WHERE status = 'ok'
     """)).fetchall()
 
     health_vals = [float(r[1]) for r in latest_preds if r[1] is not None]
@@ -294,17 +298,15 @@ def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
     )
     top_shap_features = [(name, count) for name, count in top_explanations_raw]
 
-    # Fallback: pull SHAP drivers from the top_explanations JSONB on the LATEST
-    # prediction per asset (append-only history), handling the v7 model shapes:
-    # {"top_factors": [{"feature": ...}]} or a bare list [{"feature": ...}].
+    # Fallback: pull SHAP drivers from the top_explanations JSONB on
+    # pdm_batch_predictions (one current row per asset already), handling
+    # the v7 model shapes: {"top_factors": [{"feature": ...}]} or a bare
+    # list [{"feature": ...}].
     if not top_shap_features:
         rows = db.execute(text("""
-            SELECT top_explanations FROM (
-                SELECT DISTINCT ON (asset_id) asset_id, health_score, top_explanations
-                FROM asset_failure_predictions
-                ORDER BY asset_id, created_at DESC
-            ) latest
-            WHERE latest.health_score < 60
+            SELECT top_explanations
+            FROM pdm_batch_predictions
+            WHERE status = 'ok' AND health_score < 60
             LIMIT 50
         """)).fetchall()
         feat_counts: dict[str, int] = {}
@@ -338,20 +340,22 @@ def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
         elif score >= 50: health_buckets["50-59%"] += 1
         else:             health_buckets["Below 50%"] += 1
 
-    # Worst assets by LATEST health score (deduped per asset). A watch list of the
-    # lowest-health units (<60), not the Critical count — so an asset cannot appear
-    # twice from multiple prediction runs.
+    # Worst assets by health score. pdm_batch_predictions already holds
+    # exactly one (current) row per asset, so no per-asset dedup is needed.
+    # failure_probability / risk_level / days_until_maintenance /
+    # top_explanations were previously hardcoded placeholders (100.0,
+    # 'critical', 0, '[]') instead of this same row's real columns — every
+    # asset in this list showed an identical fabricated 100% failure
+    # probability and "critical" label regardless of its actual prediction.
     critical_rows = db.execute(text("""
-        SELECT * FROM (
-            SELECT DISTINCT ON (p.asset_id)
-                a.asset_code, a.asset_name, a.model, a.make, a.vehicle_type, a.status,
-                p.health_score, 100.0 as failure_probability, 'critical' as risk_level, 0 as days_until_maintenance,
-                '[]' as top_explanations
-            FROM pdm_batch_predictions p
-            JOIN assets a ON a.id = p.asset_id
-            ORDER BY p.asset_id, p.predicted_at DESC
-        ) latest
-        ORDER BY CASE WHEN latest.asset_code LIKE 'SIM-%' THEN 0 ELSE 1 END, latest.health_score ASC
+        SELECT
+            a.asset_code, a.asset_name, a.model, a.make, a.vehicle_type, a.status,
+            p.health_score, p.failure_probability, p.risk_level, p.predicted_days_until_maintenance,
+            p.top_explanations
+        FROM pdm_batch_predictions p
+        JOIN assets a ON a.id = p.asset_id
+        WHERE p.status = 'ok'
+        ORDER BY CASE WHEN a.asset_code LIKE 'SIM-%' THEN 0 ELSE 1 END, p.health_score ASC
         LIMIT 25
     """)).fetchall()
     def _fp_pct(v) -> str:
@@ -376,28 +380,25 @@ def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
     ]
 
     # ── COST PREDICTIONS ──────────────────────────────────
-    # Cost predictions are append-only (one row per asset per batch run), so
-    # aggregate over only the LATEST prediction per asset — otherwise totals
-    # inflate as runs accumulate.
+    # pdm_batch_predictions already holds exactly one (current) row per
+    # asset, so — unlike the old asset_cost_predictions history table this
+    # replaced — no "latest per asset" dedup is needed here. Currency isn't
+    # a column on pdm_batch_predictions (LKR is the only currency this
+    # pipeline ever produces), so it's a fixed literal rather than MAX(...).
     cost_row = db.execute(text("""
         SELECT
-            COALESCE(SUM(estimated_cost), 0) AS total_cost,
-            COALESCE(AVG(estimated_cost), 0) AS avg_cost,
-            COALESCE(MIN(min_cost), 0)       AS min_cost,
-            COALESCE(MAX(max_cost), 0)       AS max_cost,
-            MAX(currency)                    AS currency
-        FROM (
-            SELECT DISTINCT ON (asset_id)
-                estimated_cost, min_cost, max_cost, currency
-            FROM asset_cost_predictions
-            ORDER BY asset_id, created_at DESC
-        ) latest_costs
+            COALESCE(SUM(estimated_cost_lkr), 0) AS total_cost,
+            COALESCE(AVG(estimated_cost_lkr), 0) AS avg_cost,
+            COALESCE(MIN(min_cost_lkr), 0)       AS min_cost,
+            COALESCE(MAX(max_cost_lkr), 0)       AS max_cost
+        FROM pdm_batch_predictions
+        WHERE status = 'ok'
     """)).fetchone()
     total_estimated_cost = float(cost_row[0] or 0)
     avg_cost_per_asset   = float(cost_row[1] or 0)
     min_cost_estimate    = float(cost_row[2] or 0)
     max_cost_estimate    = float(cost_row[3] or 0)
-    currency             = cost_row[4] or "LKR"
+    currency             = "LKR"
 
     # ── MAINTENANCE EVENTS ────────────────────────────────
     # Reporting window = the THREE CALENDAR MONTHS ending with the most RECENT activity
