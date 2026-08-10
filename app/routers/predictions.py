@@ -1,7 +1,16 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from app.deps import get_db, get_current_user, require_user, assert_asset_in_scope
+from app.deps import (
+    get_db,
+    get_current_user,
+    require_user,
+    assert_asset_in_scope,
+    is_admin_role,
+    active_warehouse_id,
+    user_can_view_asset,
+)
 from app.models import (
     Asset,
     MaintenanceEvent,
@@ -9,6 +18,7 @@ from app.models import (
     AssetFailurePrediction,
     AssetCostPrediction,
     TicketPrediction,
+    Ticket,
     Profile,
 )
 from app.schemas.prediction import (
@@ -38,6 +48,55 @@ router = APIRouter(
     tags=["Predictions"],
     dependencies=[Depends(require_user)],
 )
+
+
+# ── Warehouse/ownership scoping helpers ────────────────────────────────────────
+# This router's endpoints were previously unscoped: any authenticated user
+# could read any prediction run, failure/cost prediction, or ticket
+# prediction by ID — including the by-asset endpoints' own scoping being
+# bypassable by going through the by-run-id routes instead, since a run_id
+# is enumerable via the unscoped /runs list. These helpers apply the same
+# warehouse-wide visibility rule established for assets (see app.deps) and
+# tickets (see tickets.py) consistently across every route below.
+
+def _user_can_view_ticket(ticket: Ticket, current_user: Profile) -> bool:
+    """Same rule as tickets.py's get_ticket/list_tickets."""
+    uid = str(getattr(current_user, "id", ""))
+    user_wh_id = getattr(current_user, "warehouse_id", None)
+    if user_wh_id is not None and str(ticket.warehouse_id) == str(user_wh_id):
+        return True
+    return str(ticket.created_by) == uid or str(ticket.assigned_to) == uid
+
+
+def _assert_run_in_scope(run: PredictionRun, db: Session, current_user: Profile) -> None:
+    """404s if the caller can't see the asset/ticket a prediction run is
+    linked to. A run may be linked to an asset, a ticket, both, or neither
+    (both FKs are nullable) — visible if the caller requested it themselves,
+    or can see whichever it's linked to; a run linked to neither is
+    admin-only (nothing to attribute non-admin visibility to)."""
+    if str(getattr(run, "requested_by", None) or "") == str(getattr(current_user, "id", "")):
+        return
+
+    asset = db.query(Asset).filter(Asset.id == run.asset_id).first() if run.asset_id else None
+    ticket = db.query(Ticket).filter(Ticket.id == run.ticket_id).first() if run.ticket_id else None
+
+    if is_admin_role(current_user):
+        wh_id = active_warehouse_id(current_user)
+        if not wh_id:
+            return
+        if asset is not None and str(asset.warehouse_id) == wh_id:
+            return
+        if ticket is not None and str(ticket.warehouse_id) == wh_id:
+            return
+        if asset is None and ticket is None:
+            return
+    else:
+        if asset is not None and user_can_view_asset(asset, current_user):
+            return
+        if ticket is not None and _user_can_view_ticket(ticket, current_user):
+            return
+
+    raise HTTPException(status_code=404, detail="Prediction run not found")
 
 
 # ── Shared input builder ──────────────────────────────────────────────────────
@@ -218,15 +277,48 @@ def list_prediction_runs(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
 ):
-    return db.query(PredictionRun).order_by(PredictionRun.run_started_at.desc()).offset(offset).limit(limit).all()
+    q = (
+        db.query(PredictionRun)
+        .outerjoin(Asset, Asset.id == PredictionRun.asset_id)
+        .outerjoin(Ticket, Ticket.id == PredictionRun.ticket_id)
+    )
+    if is_admin_role(current_user):
+        wh_id = active_warehouse_id(current_user)
+        if wh_id:
+            q = q.filter(
+                or_(
+                    Asset.warehouse_id == wh_id,
+                    Ticket.warehouse_id == wh_id,
+                    (PredictionRun.asset_id.is_(None)) & (PredictionRun.ticket_id.is_(None)),
+                )
+            )
+    else:
+        uid = str(getattr(current_user, "id", ""))
+        user_wh_id = getattr(current_user, "warehouse_id", None)
+        conditions = [
+            PredictionRun.requested_by == getattr(current_user, "id", None),
+            Asset.assigned_to == uid,
+            Ticket.created_by == uid,
+            Ticket.assigned_to == uid,
+        ]
+        if user_wh_id:
+            conditions += [Asset.warehouse_id == user_wh_id, Ticket.warehouse_id == user_wh_id]
+        q = q.filter(or_(*conditions))
+    return q.order_by(PredictionRun.run_started_at.desc()).offset(offset).limit(limit).all()
 
 
 @router.get("/runs/{run_id}", response_model=PredictionRunOut)
-def get_prediction_run(run_id: str, db: Session = Depends(get_db)):
+def get_prediction_run(
+    run_id: str,
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
     row = db.query(PredictionRun).filter(PredictionRun.id == run_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Prediction run not found")
+    _assert_run_in_scope(row, db, current_user)
     return row
 
 
@@ -253,10 +345,20 @@ def get_latest_failure_prediction(
 
 
 @router.get("/failure/run/{run_id}", response_model=AssetFailurePredictionOut)
-def get_failure_prediction_by_run(run_id: str, db: Session = Depends(get_db)):
+def get_failure_prediction_by_run(
+    run_id: str,
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
     row = db.query(AssetFailurePrediction).filter(AssetFailurePrediction.run_id == run_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Failure prediction not found")
+    asset = db.query(Asset).filter(Asset.id == row.asset_id).first()
+    if asset is not None:
+        if is_admin_role(current_user):
+            assert_asset_in_scope(asset, current_user)
+        elif not user_can_view_asset(asset, current_user):
+            raise HTTPException(status_code=404, detail="Failure prediction not found")
     return row
 
 
@@ -282,10 +384,20 @@ def get_latest_cost_prediction(
 
 
 @router.get("/cost/run/{run_id}", response_model=AssetCostPredictionOut)
-def get_cost_prediction_by_run(run_id: str, db: Session = Depends(get_db)):
+def get_cost_prediction_by_run(
+    run_id: str,
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
     row = db.query(AssetCostPrediction).filter(AssetCostPrediction.run_id == run_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Cost prediction not found")
+    asset = db.query(Asset).filter(Asset.id == row.asset_id).first()
+    if asset is not None:
+        if is_admin_role(current_user):
+            assert_asset_in_scope(asset, current_user)
+        elif not user_can_view_asset(asset, current_user):
+            raise HTTPException(status_code=404, detail="Cost prediction not found")
     return row
 
 
@@ -306,7 +418,20 @@ def run_live_cost_prediction(
 
 
 @router.get("/ticket/{ticket_id}", response_model=TicketPredictionOut)
-def get_ticket_prediction(ticket_id: str, db: Session = Depends(get_db)):
+def get_ticket_prediction(
+    ticket_id: str,
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
+    ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    if ticket is not None:
+        if is_admin_role(current_user):
+            wh_id = active_warehouse_id(current_user)
+            if wh_id and str(ticket.warehouse_id) != wh_id:
+                raise HTTPException(status_code=404, detail="Ticket prediction not found")
+        elif not _user_can_view_ticket(ticket, current_user):
+            raise HTTPException(status_code=404, detail="Ticket prediction not found")
+
     row = (
         db.query(TicketPrediction)
         .filter(TicketPrediction.ticket_id == ticket_id)

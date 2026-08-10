@@ -14,7 +14,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from app.deps import get_db, get_current_user, is_admin_role, require_admin, require_user
+from app.deps import get_db, get_current_user, is_admin_role, require_admin, require_user, active_warehouse_id
 from app.models import Asset, PdmBatchPrediction
 from app.ai.services.batch_prediction_service import (
     run_batch_for_all_assets,
@@ -67,12 +67,33 @@ def list_batch_predictions(
     limit: int = Query(default=1000, ge=1, le=5000),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
 ) -> list[dict]:
     """Returns the most recent pre-computed prediction for every asset that
-    has been processed by the batch scheduler."""
+    has been processed by the batch scheduler.
+
+    Scoped to the caller: admins/super_admins see their active warehouse;
+    regular users see their own warehouse plus any asset assigned to them.
+    Previously unscoped entirely — any authenticated account of any role
+    could pull failure-probability/health-score predictions for the whole
+    fleet across every warehouse.
+    """
+    q = db.query(PdmBatchPrediction).join(Asset, Asset.id == PdmBatchPrediction.asset_id)
+
+    if is_admin_role(current_user):
+        wh_id = active_warehouse_id(current_user)
+        if wh_id:
+            q = q.filter(Asset.warehouse_id == wh_id)
+    else:
+        uid = str(getattr(current_user, "id", ""))
+        user_wh_id = getattr(current_user, "warehouse_id", None)
+        if user_wh_id:
+            q = q.filter((Asset.warehouse_id == user_wh_id) | (Asset.assigned_to == uid))
+        else:
+            q = q.filter(Asset.assigned_to == uid)
+
     rows = (
-        db.query(PdmBatchPrediction)
-        .order_by(PdmBatchPrediction.predicted_at.desc())
+        q.order_by(PdmBatchPrediction.predicted_at.desc())
         .offset(offset)
         .limit(limit)
         .all()

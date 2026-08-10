@@ -205,6 +205,25 @@ def assert_asset_in_scope(asset, current_user) -> None:
             raise HTTPException(status_code=404, detail="Asset not found")
 
 
+def user_can_view_asset(asset, current_user) -> bool:
+    """True if a non-admin ("user" role) caller may view this asset.
+
+    Same warehouse-wide visibility rule already established for tickets
+    (see tickets.py's list_tickets/get_ticket): any user may see any asset
+    in their own warehouse, plus any asset specifically assigned to them
+    even outside it. Admins/super_admins are scoped separately by
+    assert_asset_in_scope above — this only covers the non-admin case,
+    which several asset-domain endpoints were found to skip entirely,
+    leaving a "user" account with broader read access than a warehouse-
+    pinned admin.
+    """
+    uid = str(getattr(current_user, "id", ""))
+    user_wh_id = getattr(current_user, "warehouse_id", None)
+    if user_wh_id is not None and str(getattr(asset, "warehouse_id", None)) == str(user_wh_id):
+        return True
+    return str(getattr(asset, "assigned_to", None)) == uid
+
+
 def active_warehouse_id(user) -> Optional[str]:
     """The warehouse a request is scoped to.
 

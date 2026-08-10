@@ -13,6 +13,7 @@ from app.deps import (
     require_admin,
     active_warehouse_id,
     is_admin_role,
+    user_can_view_asset,
     _role_of,
     ADMIN_ROLES,
 )
@@ -42,6 +43,24 @@ def _assert_asset_in_scope(obj: Asset, current_user) -> None:
     if scoped_wh and str(obj.warehouse_id) != scoped_wh:
         raise HTTPException(status_code=404, detail="Asset not found")
 
+
+def _non_admin_visibility_filter(current_user):
+    """SQLAlchemy filter for a non-admin ("user" role) caller's asset
+    visibility: their own warehouse, plus any asset specifically assigned
+    to them even outside it — the same warehouse-wide rule already
+    established for tickets (tickets.py's list_tickets/get_ticket).
+
+    _enforced_warehouse() only ever scopes admin roles (returns None for
+    "user"), and every read endpoint below only narrowed its query when
+    that value was non-None — so a plain "user" account got zero warehouse
+    scoping at all, wider access than a warehouse-pinned admin.
+    """
+    uid = str(getattr(current_user, "id", ""))
+    user_wh_id = getattr(current_user, "warehouse_id", None)
+    if user_wh_id:
+        return or_(Asset.warehouse_id == user_wh_id, Asset.assigned_to == uid)
+    return Asset.assigned_to == uid
+
 # require_user gates every endpoint (valid token needed); mutating endpoints
 # additionally require_admin below.
 router = APIRouter(
@@ -64,10 +83,12 @@ def list_assets_dropdown(
 ):
     """Returns only id, asset_code, asset_name, asset_type, warehouse_id — fast for populating dropdowns."""
     q = db.query(Asset.id, Asset.asset_code, Asset.asset_name, Asset.asset_type, Asset.warehouse_id)
-    # Scope admins/super_admins to their active warehouse.
-    scoped_wh = _enforced_warehouse(current_user)
-    if scoped_wh:
-        q = q.filter(Asset.warehouse_id == scoped_wh)
+    if is_admin_role(current_user):
+        scoped_wh = _enforced_warehouse(current_user)
+        if scoped_wh:
+            q = q.filter(Asset.warehouse_id == scoped_wh)
+    else:
+        q = q.filter(_non_admin_visibility_filter(current_user))
     if search:
         like_term = f"%{search.strip()}%"
         q = q.filter(or_(
@@ -149,12 +170,20 @@ def list_assets(
 ):
     q = db.query(Asset)
 
-    # Warehouse scoping: admins/super_admins are pinned to their active
-    # warehouse. Any client-supplied warehouse_id is overridden so it can't be
-    # used to read another warehouse's assets.
-    scoped_wh = _enforced_warehouse(current_user)
-    if scoped_wh:
-        warehouse_id = scoped_wh
+    # Warehouse scoping. Admins/super_admins are pinned to their active
+    # warehouse — any client-supplied warehouse_id is overridden so it can't
+    # be used to read another warehouse's assets. Non-admin "user" accounts
+    # get the same warehouse-wide visibility used everywhere else in the
+    # app (tickets, comments): their own warehouse, plus anything assigned
+    # to them. Previously a "user" caller who simply omitted warehouse_id
+    # got the entire fleet across every warehouse — broader access than a
+    # scoped admin.
+    if is_admin_role(current_user):
+        scoped_wh = _enforced_warehouse(current_user)
+        if scoped_wh:
+            warehouse_id = scoped_wh
+    else:
+        q = q.filter(_non_admin_visibility_filter(current_user))
 
     if search:
         like_term = f"%{search.strip()}%"
@@ -281,10 +310,13 @@ def count_assets(
 ):
     q = db.query(Asset)
 
-    # Warehouse scoping (see list_assets): pin admins to their active warehouse.
-    scoped_wh = _enforced_warehouse(current_user)
-    if scoped_wh:
-        warehouse_id = scoped_wh
+    # Warehouse scoping (see list_assets).
+    if is_admin_role(current_user):
+        scoped_wh = _enforced_warehouse(current_user)
+        if scoped_wh:
+            warehouse_id = scoped_wh
+    else:
+        q = q.filter(_non_admin_visibility_filter(current_user))
 
     if search:
         like_term = f"%{search.strip()}%"
@@ -364,9 +396,13 @@ def get_asset_stats(
     the list endpoint doesn't change what the summary cards report.
     """
     q = db.query(Asset)
-    scoped_wh = _enforced_warehouse(current_user)
-    if scoped_wh:
-        q = q.filter(Asset.warehouse_id == scoped_wh)
+    if is_admin_role(current_user):
+        scoped_wh = _enforced_warehouse(current_user)
+        if scoped_wh:
+            q = q.filter(Asset.warehouse_id == scoped_wh)
+    else:
+        scoped_wh = None
+        q = q.filter(_non_admin_visibility_filter(current_user))
 
     # Real values of the asset_status Postgres enum: active, inactive,
     # under_maintenance, critical, decommissioned.
@@ -397,8 +433,11 @@ def get_asset_stats(
             (PdmBatchPrediction.asset_id == Asset.id) & (PdmBatchPrediction.status == "ok"),
         )
     )
-    if scoped_wh:
-        health_q = health_q.filter(Asset.warehouse_id == scoped_wh)
+    if is_admin_role(current_user):
+        if scoped_wh:
+            health_q = health_q.filter(Asset.warehouse_id == scoped_wh)
+    else:
+        health_q = health_q.filter(_non_admin_visibility_filter(current_user))
     avg_health_score, scored_count = health_q.one()
     scored_count = int(scored_count or 0)
 
@@ -425,9 +464,12 @@ def get_asset_analytics(
     don't silently reflect only whatever page of the table is showing.
     """
     base_q = db.query(Asset)
-    scoped_wh = _enforced_warehouse(current_user)
-    if scoped_wh:
-        base_q = base_q.filter(Asset.warehouse_id == scoped_wh)
+    if is_admin_role(current_user):
+        scoped_wh = _enforced_warehouse(current_user)
+        if scoped_wh:
+            base_q = base_q.filter(Asset.warehouse_id == scoped_wh)
+    else:
+        base_q = base_q.filter(_non_admin_visibility_filter(current_user))
 
     status_rows = (
         base_q.with_entities(cast(Asset.status, String), func.count(Asset.id))
@@ -500,7 +542,12 @@ def get_asset(
     obj = db.query(Asset).filter(Asset.id == asset_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Asset not found")
-    _assert_asset_in_scope(obj, current_user)
+    if is_admin_role(current_user):
+        _assert_asset_in_scope(obj, current_user)
+    elif not user_can_view_asset(obj, current_user):
+        # 404, not 403 — same rationale as _assert_asset_in_scope: don't
+        # reveal that an asset outside the caller's warehouse exists.
+        raise HTTPException(status_code=404, detail="Asset not found")
     return obj
 
 
