@@ -42,7 +42,7 @@ from sqlalchemy.orm import Session
 # Existing imports (UNCHANGED)
 from app.services.report_service import ReportService
 from app.services.pdf_render import PDFRenderService
-from app.deps import get_db, require_user, require_admin, get_current_user, is_admin_role, active_warehouse_id
+from app.deps import get_db, require_user, require_admin, get_current_user, is_admin_role, active_warehouse_id, assert_asset_in_scope
 from app.models import Asset, Profile, Report, Ticket, Warehouse
 from app.schemas.report import ReportCreate, ReportUpdate, ReportOut
 from app.core.config import allowed_frontend_origins
@@ -59,7 +59,7 @@ router = APIRouter(
 )
 
 
-@router.post("/{asset_id}")
+@router.post("/{asset_id}", deprecated=True, summary="[Deprecated] Server-rendered asset report")
 def generate_asset_report_endpoint(
     asset_id: uuid.UUID,
     background_tasks: BackgroundTasks,
@@ -68,12 +68,25 @@ def generate_asset_report_endpoint(
 ):
     """Regular users may only generate a report for an asset assigned to
     them — matches the ownership rule in asset_component_rul.py's
-    /assets/{asset_id}/component-rul. 404 (not 403) so an out-of-scope
-    asset's existence isn't revealed."""
-    if not is_admin_role(current_user):
-        asset = db.query(Asset).filter(Asset.id == asset_id).first()
-        if not asset or str(asset.assigned_to) != str(getattr(current_user, "id", "")):
-            raise HTTPException(status_code=404, detail=f"Asset {asset_id} not found")
+    /assets/{asset_id}/component-rul. Admins are scoped to their active
+    warehouse (previously not checked at all here — any admin could
+    generate a report, including its maintenance/ticket history and AI
+    insights, for an asset in a warehouse they don't manage). 404 (not
+    403) so an out-of-scope asset's existence isn't revealed.
+
+    Deprecated: superseded by the client-built HTML report
+    (src/lib/assetPdfExport.ts) rendered via POST /reports/render-pdf —
+    the frontend's own generateAssetReport() caller for this route was
+    already removed ("report now handled by parent via onReport prop").
+    Kept live rather than deleted in case any external caller still
+    depends on it; not used by this app's own frontend."""
+    asset = db.query(Asset).filter(Asset.id == asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail=f"Asset {asset_id} not found")
+    if is_admin_role(current_user):
+        assert_asset_in_scope(asset, current_user)
+    elif str(asset.assigned_to) != str(getattr(current_user, "id", "")):
+        raise HTTPException(status_code=404, detail=f"Asset {asset_id} not found")
 
     service = ReportService()
     try:
@@ -93,8 +106,16 @@ def generate_asset_report_endpoint(
         raise HTTPException(status_code=500, detail=f"Failed to generate report: {str(e)}")
 
 
-@router.get("/dummy/pdf")
+@router.get(
+    "/dummy/pdf",
+    dependencies=[Depends(require_admin)],
+    summary="[Dev/QA only] Render a PDF with hardcoded dummy data",
+)
 def generate_dummy_pdf(background_tasks: BackgroundTasks):
+    """Styling-test endpoint — every field is hardcoded, no real data ever
+    touched. Was reachable by any authenticated user regardless of role;
+    admin-gated since there's no reason a regular account needs to trigger
+    PDF rendering on demand, even against fake data."""
     try:
         pdf_service = PDFRenderService()
         dummy_context = {
@@ -185,17 +206,25 @@ reports_router = APIRouter(
 )
 
 @reports_router.post("/", response_model=ReportOut)
-def create_report(payload: ReportCreate, db: Session = Depends(get_db)):
+def create_report(
+    payload: ReportCreate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
     if payload.asset_id and not db.query(Asset).filter(Asset.id == payload.asset_id).first():
         raise HTTPException(status_code=404, detail="Asset not found")
     if payload.warehouse_id and not db.query(Warehouse).filter(Warehouse.id == payload.warehouse_id).first():
         raise HTTPException(status_code=404, detail="Warehouse not found")
     if payload.ticket_id and not db.query(Ticket).filter(Ticket.id == payload.ticket_id).first():
         raise HTTPException(status_code=404, detail="Ticket not found")
-    if payload.generated_by and not db.query(Profile).filter(Profile.id == payload.generated_by).first():
-        raise HTTPException(status_code=404, detail="User not found")
 
-    obj = Report(**payload.model_dump())
+    data = payload.model_dump()
+    # generated_by was previously accepted verbatim from the request body —
+    # validated to be a real profile, but never forced to equal the caller,
+    # so a user could attribute a report they generated to someone else.
+    data["generated_by"] = current_user.id
+
+    obj = Report(**data)
     db.add(obj)
     db.commit()
     db.refresh(obj)
@@ -240,7 +269,7 @@ def list_reports(
 
 @reports_router.get("/{report_id}", response_model=ReportOut)
 def get_report(
-    report_id: str,
+    report_id: uuid.UUID,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -257,7 +286,7 @@ def get_report(
 
 @reports_router.put("/{report_id}", response_model=ReportOut)
 def update_report(
-    report_id: str,
+    report_id: uuid.UUID,
     payload: ReportUpdate,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
@@ -282,7 +311,7 @@ def update_report(
 
 
 @reports_router.delete("/{report_id}", dependencies=[Depends(require_admin)])
-def delete_report(report_id: str, db: Session = Depends(get_db)):
+def delete_report(report_id: uuid.UUID, db: Session = Depends(get_db)):
     obj = db.query(Report).filter(Report.id == report_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Report not found")
