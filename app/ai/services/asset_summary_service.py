@@ -201,7 +201,6 @@ def _fallback_summary(fields: dict[str, str]) -> str:
     sentences.append(rec[:1].upper() + rec[1:])
 
     return " ".join(sentences)
-    return sentence
 
 
 def get_asset_summary_repo() -> str:
@@ -227,7 +226,11 @@ def _summarize_via_space(space_id, input_text: str):
             or None
         )
         client = Client(space_id, token=space_token, verbose=False)
-        out = client.predict(input_text, api_name="/predict")
+        # client.predict(...) is just submit(...).result() with no timeout —
+        # an asleep/hanging Space blocks this call (and the request thread)
+        # indefinitely. Same class of bug already fixed in knowledge_service.py
+        # for its requests.post call; bound it here too via Job.result(timeout=).
+        out = client.submit(input_text, api_name="/predict").result(timeout=60)
         return (out or "").strip() or None
     except Exception as e:  # noqa: BLE001
         logger.warning("[AssetSummary] Space %s unavailable (%s)", space_id, e)
