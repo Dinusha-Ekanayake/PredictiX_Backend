@@ -89,10 +89,23 @@ REG_MODEL_PATH = MODEL_DIR / "pdm_regressor_model"  / "predictix_pdm_regressor_v
 CLF_DECISION_LOG_PATH = MODEL_DIR / "pdm_classifier_model" / "classifier_v7_decision_log.json"
 REG_DECISION_LOG_PATH = MODEL_DIR / "pdm_regressor_model"  / "regressor_v7_decision_log.json"
 
+# Cost-estimation (breakdown_cost_model.py's own MODEL_PATH) and survival
+# analysis (survival_service.py's MODEL_DIR / "survival_bundle.pkl") each
+# have a real decision-log/training-report on disk already, same as
+# classifier/regressor — they just weren't being registered into
+# model_registry, so there was no single queryable place recording which
+# version of *every* PdM model family is actually live at once.
+COST_MODEL_PATH = MODEL_DIR / "cost_estimation_model" / "predictix_breakdown_cost_model_v5.pkl"
+COST_DECISION_LOG_PATH = MODEL_DIR / "cost_estimation_model" / "predictix_breakdown_cost_model_v5_log.json"
+SURVIVAL_MODEL_PATH = MODEL_DIR / "survival_analysis" / "survival_bundle.pkl"
+SURVIVAL_DECISION_LOG_PATH = MODEL_DIR / "survival_analysis" / "training_report.json"
+
 # Same names used as the model_registry.model_name keys throughout the app —
 # kept in sync with app.ai.services.vehicle_prediction_service.
 CLASSIFIER_MODEL_NAME = "pdm_classifier_model"
 REGRESSOR_MODEL_NAME = "pdm_regressor_model"
+COST_MODEL_NAME = "cost_estimation_model"
+SURVIVAL_MODEL_NAME = "survival_analysis_model"
 
 clf_model = None            # LgbModelBundle
 clf_features: list = []
@@ -117,16 +130,35 @@ def _load_decision_log(path: Path) -> dict:
         return {}
 
 
-def _upsert_model_registry(db, model_name: str, model_type: str, version: str, artifact_path: Path, metrics: dict) -> None:
+def _json_safe(value):
+    """Recursively replace NaN/Infinity floats with None. Postgres's
+    json/jsonb columns reject literal NaN ("invalid input syntax for type
+    json") even though Python's json module happily reads/writes it —
+    training_report.json's weibull_rho is NaN for every component, which
+    would otherwise break every metrics upsert for the survival model."""
+    if isinstance(value, float):
+        return None if (value != value or value in (float("inf"), float("-inf"))) else value
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    return value
+
+
+def _upsert_model_registry(
+    db, model_name: str, model_type: str, version: str, artifact_path: Path,
+    metrics: dict, framework: str = "lightgbm",
+) -> None:
     from app.models import ModelRegistry
 
+    metrics = _json_safe(metrics)
     existing = (
         db.query(ModelRegistry)
         .filter(ModelRegistry.model_name == model_name, ModelRegistry.version == version)
         .first()
     )
     if existing:
-        existing.framework = "lightgbm"
+        existing.framework = framework
         existing.artifact_path = str(artifact_path)
         existing.metrics = metrics
         existing.is_active = True
@@ -135,7 +167,7 @@ def _upsert_model_registry(db, model_name: str, model_type: str, version: str, a
             model_name=model_name,
             model_type=model_type,
             version=version,
-            framework="lightgbm",
+            framework=framework,
             artifact_path=str(artifact_path),
             metrics=metrics,
             is_active=True,
@@ -152,6 +184,8 @@ def _register_active_models() -> None:
 
     clf_log = _load_decision_log(CLF_DECISION_LOG_PATH)
     reg_log = _load_decision_log(REG_DECISION_LOG_PATH)
+    cost_log = _load_decision_log(COST_DECISION_LOG_PATH)
+    survival_log = _load_decision_log(SURVIVAL_DECISION_LOG_PATH)
 
     db = SessionLocal()
     try:
@@ -164,6 +198,18 @@ def _register_active_models() -> None:
             _upsert_model_registry(
                 db, REGRESSOR_MODEL_NAME, "maintenance_regression",
                 str(reg_log.get("version", "unknown")), REG_MODEL_PATH, reg_log,
+            )
+        if cost_log:
+            _upsert_model_registry(
+                db, COST_MODEL_NAME, "cost_estimation",
+                str(cost_log.get("version", "unknown")), COST_MODEL_PATH, cost_log,
+                framework=str(cost_log.get("predictor", "catboost")).lower(),
+            )
+        if survival_log:
+            _upsert_model_registry(
+                db, SURVIVAL_MODEL_NAME, "component_survival_analysis",
+                str(survival_log.get("version", "unknown")), SURVIVAL_MODEL_PATH, survival_log,
+                framework="lifelines-weibull-aft",
             )
         db.commit()
     except Exception:
