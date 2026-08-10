@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from app.models import (
     Asset, AssetFailurePrediction,
     MaintenanceEvent, Ticket, Profile, Warehouse,
-    Department, PredictionFeatureImportance, PredictionExplanation,
+    Department,
 )
 
 # ── KB Integration ───────────────────────────────────────────────
@@ -286,47 +286,45 @@ def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
     soon_maintenance   = sum(1 for d in days_vals if d <= 30)
     avg_days_to_maintenance = int(sum(days_vals) / len(days_vals)) if days_vals else None
 
-    # SHAP top features from prediction explanations table
-    top_explanations_raw = (
-        db.query(PredictionFeatureImportance.feature_name, func.count(PredictionFeatureImportance.id))
-        .join(PredictionExplanation, PredictionFeatureImportance.explanation_id == PredictionExplanation.id)
-        .filter(PredictionFeatureImportance.rank_order <= 3)
-        .group_by(PredictionFeatureImportance.feature_name)
-        .order_by(func.count(PredictionFeatureImportance.id).desc())
-        .limit(8)
-        .all()
-    )
-    top_shap_features = [(name, count) for name, count in top_explanations_raw]
-
-    # Fallback: pull SHAP drivers from the top_explanations JSONB on
+    # SHAP top features, sourced from the top_explanations JSONB on
     # pdm_batch_predictions (one current row per asset already), handling
     # the v7 model shapes: {"top_factors": [{"feature": ...}]} or a bare
     # list [{"feature": ...}].
-    if not top_shap_features:
-        rows = db.execute(text("""
-            SELECT top_explanations
-            FROM pdm_batch_predictions
-            WHERE status = 'ok' AND health_score < 60
-            LIMIT 50
-        """)).fetchall()
-        feat_counts: dict[str, int] = {}
-        for (explanations,) in rows:
-            if isinstance(explanations, str):
-                try:
-                    explanations = json.loads(explanations)
-                except (ValueError, TypeError):
-                    explanations = {}
-            factors = (
-                explanations.get("top_factors")
-                if isinstance(explanations, dict) else explanations
-            )
-            if not isinstance(factors, list):
-                factors = []
-            for feat in factors[:3]:
-                name = feat.get("feature") if isinstance(feat, dict) else None
-                if name:
-                    feat_counts[name] = feat_counts.get(name, 0) + 1
-        top_shap_features = sorted(feat_counts.items(), key=lambda x: -x[1])[:8]
+    #
+    # This used to try PredictionExplanation/PredictionFeatureImportance
+    # first and only fall back to pdm_batch_predictions when that query
+    # came back empty. In practice it always came back empty: nothing in
+    # the real classifier/regressor/batch pipeline ever writes to those
+    # two tables — the only writer is the admin-only manual annotation
+    # endpoint in prediction_explanations.py, which nothing calls as part
+    # of actually generating a prediction. That made the "primary" query
+    # a dead extra round-trip on every single report generation, always
+    # falling through to what was really the only working path — so this
+    # is that path directly, not a fallback.
+    rows = db.execute(text("""
+        SELECT top_explanations
+        FROM pdm_batch_predictions
+        WHERE status = 'ok' AND health_score < 60
+        LIMIT 50
+    """)).fetchall()
+    feat_counts: dict[str, int] = {}
+    for (explanations,) in rows:
+        if isinstance(explanations, str):
+            try:
+                explanations = json.loads(explanations)
+            except (ValueError, TypeError):
+                explanations = {}
+        factors = (
+            explanations.get("top_factors")
+            if isinstance(explanations, dict) else explanations
+        )
+        if not isinstance(factors, list):
+            factors = []
+        for feat in factors[:3]:
+            name = feat.get("feature") if isinstance(feat, dict) else None
+            if name:
+                feat_counts[name] = feat_counts.get(name, 0) + 1
+    top_shap_features = sorted(feat_counts.items(), key=lambda x: -x[1])[:8]
 
     # Health score distribution buckets — derived from the SAME deduped per-asset set,
     # so the bands always sum to scored_assets. "Below 60%" is split into "50–59%"
