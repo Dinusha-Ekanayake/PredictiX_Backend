@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from fastapi import APIRouter, HTTPException, Depends, Query
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -238,11 +240,11 @@ def debug_features():
 
 @router.post("/classification", response_model=ClassificationResponse)
 def classification(payload: PredictionRequest):
-    from app.main import clf_model, clf_features
+    from app.main import clf_model, clf_features, clf_threshold
 
     if clf_model is None:
         raise HTTPException(status_code=500, detail="Classification model is not loaded")
-    return run_classification(payload.model_dump(), clf_model, clf_features)
+    return run_classification(payload.model_dump(), clf_model, clf_features, clf_threshold)
 
 
 @router.post("/regression", response_model=RegressionResponse)
@@ -261,7 +263,7 @@ def health_score(payload: PredictionRequest):
 
 @router.post("/full", response_model=FullPredictionResponse)
 def full_prediction(payload: PredictionRequest):
-    from app.main import clf_model, clf_features, reg_model, reg_features
+    from app.main import clf_model, clf_features, reg_model, reg_features, clf_threshold
 
     if clf_model is None or reg_model is None:
         raise HTTPException(status_code=500, detail="Models are not loaded")
@@ -269,16 +271,27 @@ def full_prediction(payload: PredictionRequest):
         data=payload.model_dump(),
         clf_model=clf_model, clf_features=clf_features,
         reg_model=reg_model, reg_features=reg_features,
+        clf_threshold=clf_threshold,
     )
 
 
-@router.get("/runs", response_model=list[PredictionRunOut])
+@router.get(
+    "/runs", response_model=list[PredictionRunOut],
+    deprecated=True,
+    summary="[Deprecated — always empty] Prediction run log",
+)
 def list_prediction_runs(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
+    """PredictionRun has no writer anywhere in this codebase — nothing has
+    ever inserted a row, so this will always return an empty list. Kept
+    for API-compatibility rather than deleted outright; marked deprecated
+    so an empty response reads as "this data source isn't populated", not
+    as a bug to chase. The real per-asset prediction history lives in
+    pdm_batch_predictions / pdm_prediction_history (see batch_predictions.py)."""
     q = (
         db.query(PredictionRun)
         .outerjoin(Asset, Asset.id == PredictionRun.asset_id)
@@ -309,12 +322,18 @@ def list_prediction_runs(
     return q.order_by(PredictionRun.run_started_at.desc()).offset(offset).limit(limit).all()
 
 
-@router.get("/runs/{run_id}", response_model=PredictionRunOut)
+@router.get(
+    "/runs/{run_id}", response_model=PredictionRunOut,
+    deprecated=True,
+    summary="[Deprecated — always 404s] Single prediction run",
+)
 def get_prediction_run(
-    run_id: str,
+    run_id: UUID,
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
+    """See list_prediction_runs — PredictionRun has no writer, so any
+    run_id will 404 here. Not a broken lookup; the table is simply empty."""
     row = db.query(PredictionRun).filter(PredictionRun.id == run_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Prediction run not found")
@@ -322,12 +341,21 @@ def get_prediction_run(
     return row
 
 
-@router.get("/failure/{asset_id}", response_model=AssetFailurePredictionOut)
+@router.get(
+    "/failure/{asset_id}", response_model=AssetFailurePredictionOut,
+    deprecated=True,
+    summary="[Deprecated — always 404s] Cached failure prediction",
+)
 def get_latest_failure_prediction(
-    asset_id: str,
+    asset_id: UUID,
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
+    """AssetFailurePrediction has no writer anywhere in this codebase —
+    batch_prediction_service.py upserts into pdm_batch_predictions instead
+    (see get_batch_prediction in batch_predictions.py for the real,
+    populated source of failure-probability data). Every call here 404s
+    because the table is empty, not because a specific asset lacks data."""
     asset = db.query(Asset).filter(Asset.id == asset_id).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
@@ -344,12 +372,18 @@ def get_latest_failure_prediction(
     return row
 
 
-@router.get("/failure/run/{run_id}", response_model=AssetFailurePredictionOut)
+@router.get(
+    "/failure/run/{run_id}", response_model=AssetFailurePredictionOut,
+    deprecated=True,
+    summary="[Deprecated — always 404s] Failure prediction by run",
+)
 def get_failure_prediction_by_run(
-    run_id: str,
+    run_id: UUID,
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
+    """See get_latest_failure_prediction — AssetFailurePrediction has no
+    writer, so this always 404s regardless of run_id."""
     row = db.query(AssetFailurePrediction).filter(AssetFailurePrediction.run_id == run_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Failure prediction not found")
@@ -364,7 +398,7 @@ def get_failure_prediction_by_run(
 
 @router.get("/cost/{asset_id}", response_model=BreakdownCostPredictionOut)
 def get_latest_cost_prediction(
-    asset_id: str,
+    asset_id: UUID,
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
@@ -380,15 +414,24 @@ def get_latest_cost_prediction(
     wrong response_model and would 500. Since predict_breakdown_cost() is
     ~15ms (see model docs §1), always running live is simpler and correct.
     """
-    return _run_cost_prediction_for_asset(asset_id, db, current_user)
+    return _run_cost_prediction_for_asset(str(asset_id), db, current_user)
 
 
-@router.get("/cost/run/{run_id}", response_model=AssetCostPredictionOut)
+@router.get(
+    "/cost/run/{run_id}", response_model=AssetCostPredictionOut,
+    deprecated=True,
+    summary="[Deprecated — always 404s] Cost prediction by run",
+)
 def get_cost_prediction_by_run(
-    run_id: str,
+    run_id: UUID,
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
+    """AssetCostPrediction has no writer anywhere in this codebase — see
+    get_latest_cost_prediction's docstring above for the same fact about
+    this table, and use GET /predictions/cost/{asset_id} instead, which
+    runs the real cost model live. Every call here 404s because the table
+    is empty, not because this specific run lacks a cost prediction."""
     row = db.query(AssetCostPrediction).filter(AssetCostPrediction.run_id == run_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Cost prediction not found")
@@ -403,7 +446,7 @@ def get_cost_prediction_by_run(
 
 @router.post("/cost/live/{asset_id}", response_model=BreakdownCostPredictionOut)
 def run_live_cost_prediction(
-    asset_id: str,
+    asset_id: UUID,
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
@@ -414,12 +457,12 @@ def run_live_cost_prediction(
     compatibility with existing callers that POST here after a maintenance
     event to refresh the estimate.)
     """
-    return _run_cost_prediction_for_asset(asset_id, db, current_user)
+    return _run_cost_prediction_for_asset(str(asset_id), db, current_user)
 
 
 @router.get("/ticket/{ticket_id}", response_model=TicketPredictionOut)
 def get_ticket_prediction(
-    ticket_id: str,
+    ticket_id: UUID,
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
