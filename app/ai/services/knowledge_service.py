@@ -14,7 +14,15 @@ def search_knowledge(query: str, match_count: int = 3) -> list:
         if token := os.getenv("HF_TOKEN"):
             headers["Authorization"] = f"Bearer {token}"
             
-        response = requests.post(api_url, headers=headers, json={"inputs": [query], "options": {"wait_for_model": True}})
+        # wait_for_model can legitimately take a while on a cold HF endpoint,
+        # but with no timeout at all a hanging endpoint blocked the calling
+        # request (chat/report generation) indefinitely instead of failing
+        # over to the empty-results path below.
+        response = requests.post(
+            api_url, headers=headers,
+            json={"inputs": [query], "options": {"wait_for_model": True}},
+            timeout=60,
+        )
         if response.status_code != 200:
             print(f"HF API Error: {response.text}")
             return []

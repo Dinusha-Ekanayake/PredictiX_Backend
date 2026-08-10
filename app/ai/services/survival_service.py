@@ -15,11 +15,17 @@ Design (mirrors the training pipeline in
   * servicing just resets `days_since_last_service` — no degradation history is
     needed, which is why a single snapshot is enough.
 
-Warehouse reporting (`fleet_survival_summary`) fuses three models, each owning
-its question:
-    PdM   (asset_failure_predictions) -> WHICH assets are critical
-    this  (survival)                  -> WHICH component, P(fail) in 7 / 30 days
-    cost  (asset_cost_predictions)    -> WHAT the replacement costs
+Warehouse reporting (`fleet_survival_summary`) fuses three questions, all
+answered from `pdm_batch_predictions` — the single source of truth for PdM
+output (populated by the daily scheduler + the asset-page "Run AI"
+trigger). asset_failure_predictions / asset_cost_predictions were the old
+on-demand-only tables, superseded by pdm_batch_predictions since the
+v7/decision-layer unification and never written to since — reading from
+them here silently produced an empty/stale critical-asset set and cost
+map regardless of how current the real predictions actually were:
+    PdM   -> WHICH assets are critical      (health_score)
+    this  -> WHICH component, P(fail) in 7 / 30 days
+    cost  -> WHAT the replacement costs     (estimated_cost_lkr)
 and returns the expected replacement spend for the next 7 and 30 days.
 """
 
@@ -279,23 +285,62 @@ def predict_all_components(db: Session, asset_id: str,
 # ── Warehouse fleet summary (the warehouse report — new in v3) ────────────────
 
 def _p_service(fail_probs: list[float]) -> float:
-    """P(at least one of the five components fails within the horizon)."""
+    """P(at least one of the five components fails within the horizon),
+    under the assumption that the components' *residual* failure risk is
+    independent once conditioned on the shared feature snapshot.
+
+    This is a weaker assumption than it looks: all five components' hazards
+    are scored from the same `feat` dict (age, mileage, usage intensity,
+    etc. — see build_asset_feature_dict), so the dominant source of
+    correlation between components — an older, harder-used vehicle running
+    elevated risk across the board — is already captured through those
+    shared covariates before this function ever runs. What's assumed
+    independent is only the *leftover* randomness after that conditioning,
+    not the raw component failures.
+
+    That residual independence assumption can still be wrong — e.g. a
+    single event (a crash, a flood) that damages several systems at once
+    isn't in the feature set — and where it is wrong, positive residual
+    correlation makes this formula an overestimate of the true joint
+    probability (see _p_service_bounds for the model-free bounds this
+    point estimate always falls inside, regardless of the true correlation
+    structure). Callers that need the honest range rather than this single
+    number should use _p_service_bounds instead/in addition.
+    """
     return float(1.0 - np.prod([1.0 - p for p in fail_probs]))
 
 
+def _p_service_bounds(fail_probs: list[float]) -> tuple[float, float]:
+    """Fréchet/Bonferroni bounds on P(at least one component fails) — the
+    range the true joint probability must fall in for ANY correlation
+    structure between components, independent or not. Unlike _p_service,
+    nothing here is an assumption:
+      - lower bound: P(union) can never be less than its largest member
+        (that component failing already puts you in the union).
+      - upper bound: Boole's inequality, P(union) <= sum(P(each)).
+    Useful as an honest uncertainty range around the _p_service point
+    estimate rather than a replacement for it — we don't have real
+    component-failure correlation data to compute the true value.
+    """
+    if not fail_probs:
+        return 0.0, 0.0
+    lower = float(max(fail_probs))
+    upper = float(min(1.0, sum(fail_probs)))
+    return lower, upper
+
+
 def _latest_cost_map(db: Session, codes: list[str]) -> dict[str, float]:
+    """pdm_batch_predictions has exactly one (upserted) row per asset, so —
+    unlike the old asset_cost_predictions table this replaced — there's no
+    "latest of several rows" ambiguity to resolve with DISTINCT ON."""
     if not codes:
         return {}
     from sqlalchemy import bindparam
     rows = db.execute(text("""
-        SELECT a.asset_code, c.estimated_cost
-        FROM (
-            SELECT DISTINCT ON (asset_id) asset_id, estimated_cost, created_at
-            FROM asset_cost_predictions
-            ORDER BY asset_id, created_at DESC
-        ) c
-        JOIN assets a ON a.id = c.asset_id
-        WHERE a.asset_code IN :codes
+        SELECT a.asset_code, p.estimated_cost_lkr
+        FROM pdm_batch_predictions p
+        JOIN assets a ON a.id = p.asset_id
+        WHERE a.asset_code IN :codes AND p.status = 'ok'
     """).bindparams(bindparam("codes", expanding=True)), {"codes": codes}).fetchall()
     return {r[0]: (float(r[1]) if r[1] is not None else None) for r in rows}
 
@@ -305,16 +350,16 @@ def fleet_survival_summary(db: Session, max_assets: int = 25,
                            asset_codes: list[str] | None = None) -> dict[str, Any]:
     """Warehouse-level survival + cost aggregation over the critical set.
 
-    * Critical set comes from the PdM pipeline (asset_failure_predictions) — either
+    * Critical set comes from the PdM pipeline (pdm_batch_predictions) — either
       the explicit `asset_codes` or the `max_assets` lowest-health assets.
     * Each asset is scored on all five components for P(fail) in 7 / 30 days.
-    * Replacement cost is read from the cost model (asset_cost_predictions), and
+    * Replacement cost is read from the same pdm_batch_predictions row, and
       the expected spend is  P(service within Nd) * cost  summed over the fleet.
 
     Returns the new warehouse-report structure PLUS the legacy `component_summary`
     / `watchlist` keys so existing consumers keep working.
     """
-    from app.models import Asset, AssetFailurePrediction
+    from app.models import Asset, PdmBatchPrediction
 
     if asset_codes:
         rows = (
@@ -325,9 +370,9 @@ def fleet_survival_summary(db: Session, max_assets: int = 25,
     else:
         rows = (
             db.query(Asset.asset_code, Asset.id)
-            .join(AssetFailurePrediction, Asset.id == AssetFailurePrediction.asset_id)
-            .filter(AssetFailurePrediction.health_score.isnot(None))
-            .order_by(AssetFailurePrediction.health_score.asc())
+            .join(PdmBatchPrediction, Asset.id == PdmBatchPrediction.asset_id)
+            .filter(PdmBatchPrediction.status == "ok", PdmBatchPrediction.health_score.isnot(None))
+            .order_by(PdmBatchPrediction.health_score.asc())
             .limit(max_assets)
             .all()
         )
@@ -357,6 +402,7 @@ def fleet_survival_summary(db: Session, max_assets: int = 25,
         f7 = [comps[c]["fail_prob_7d"] for c in COMPONENTS]
         f30 = [comps[c]["fail_prob_30d"] for c in COMPONENTS]
         ps7, ps30 = _p_service(f7), _p_service(f30)
+        ps7_bounds, ps30_bounds = _p_service_bounds(f7), _p_service_bounds(f30)
         cost = cost_map.get(code)
         e7 = ps7 * cost if cost is not None else None
         e30 = ps30 * cost if cost is not None else None
@@ -401,6 +447,12 @@ def fleet_survival_summary(db: Session, max_assets: int = 25,
             "soonest_median_days": soonest["median_days"],
             "p_service_7d":       round(ps7, 4),
             "p_service_30d":      round(ps30, 4),
+            # Model-free bounds (see _p_service_bounds) — the true joint
+            # probability falls in this range regardless of how correlated
+            # the components' failures actually are. p_service_Xd is a
+            # point estimate inside it, not a substitute for it.
+            "p_service_7d_bounds":  [round(ps7_bounds[0], 4), round(ps7_bounds[1], 4)],
+            "p_service_30d_bounds": [round(ps30_bounds[0], 4), round(ps30_bounds[1], 4)],
             "est_cost_lkr":       cost,
             "exp_cost_7d_lkr":    round(e7, 2) if e7 is not None else None,
             "exp_cost_30d_lkr":   round(e30, 2) if e30 is not None else None,

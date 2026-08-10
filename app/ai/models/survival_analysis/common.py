@@ -39,7 +39,15 @@ if not DATASET_PATH.exists():
     )
 
 DATA_DIR   = HERE / "data"
-MODELS_DIR = HERE / "models"
+# NOT "HERE / 'models'" — the serving code (survival_service.py's MODEL_DIR)
+# loads survival_bundle.pkl straight from this directory, and every real,
+# currently-loaded artifact (survival_bundle.pkl, training_report.json, the
+# per-component *_aft.pkl/*_features.json) already lives here. A "models/"
+# subfolder does exist alongside this file, but it only holds unfetched
+# Git LFS pointer stubs (~135 bytes each, not real pickles) that predate
+# this comment and were never populated by an actual training run — it is
+# not read by anything and should not be treated as a second copy.
+MODELS_DIR = HERE
 REPORTS_DIR = HERE / "reports"
 
 TRAIN_CSV = DATA_DIR / "survival_snapshots_train.csv"

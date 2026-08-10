@@ -35,6 +35,17 @@ def _classifier_tier(failure_probability: float, urgent_threshold: float) -> str
     return "healthy"
 
 
+def classifier_only_tier(failure_probability: float, clf_threshold: float) -> str:
+    """The classifier-alone tier ("urgent" | "watch" | "healthy"), for
+    callers that don't have a health_score available to run the full
+    build_decision reconciliation below — e.g. the standalone
+    /predictions/classification debug endpoint. Uses the exact same
+    threshold boundaries build_decision does, so a probability-only
+    estimate can never disagree with the fully-reconciled one for the
+    same probability."""
+    return _classifier_tier(failure_probability, clf_threshold)
+
+
 def _health_tier(health_score: float) -> str:
     if health_score >= _HEALTHY_HEALTH_FLOOR:
         return "healthy"
