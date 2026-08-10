@@ -26,7 +26,11 @@ router = APIRouter(
 )
 
 
-@router.get("/{asset_id}/component-rul", response_model=AssetComponentRulResponse)
+@router.get(
+    "/{asset_id}/component-rul", response_model=AssetComponentRulResponse,
+    deprecated=True,
+    summary="[Deprecated] Use GET /survival/{asset_id} instead",
+)
 def get_asset_component_rul(
     asset_id: UUID,
     db: Session = Depends(get_db),
@@ -40,6 +44,15 @@ def get_asset_component_rul(
     Admins are scoped to their active warehouse — previously not checked
     at all here, so any admin could pull component-RUL estimates for an
     asset in a warehouse they don't manage.
+
+    Deprecated: this OLS trend on 1-4 of the asset's own readings is a much
+    weaker method than /survival/{asset_id}'s trained per-component Weibull
+    AFT models (survival_service.py) — same 5 components, fitted on the
+    fleet's real service-event history, and (unlike this endpoint) doesn't
+    degrade to a guessed flat decay rate when an asset has thin reading
+    history, which is the common case. The frontend's Component RUL card
+    now calls /survival/{asset_id} instead. Kept live rather than deleted
+    in case any external caller still depends on it.
     """
     asset = db.query(Asset).filter(Asset.id == asset_id).first()
     if not asset:
