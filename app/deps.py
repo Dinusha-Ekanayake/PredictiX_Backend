@@ -176,6 +176,18 @@ def require_admin(current_user=Depends(get_current_user)):
     return current_user
 
 
+def require_super_admin(current_user=Depends(get_current_user)):
+    """Dependency: request must be an authenticated super_admin — for
+    operations that are fleet-wide/cross-warehouse by nature (e.g.
+    triggering a full-fleet batch recompute), where a regular
+    warehouse-pinned admin having the same access as an ops-level
+    super_admin would let them force an expensive, unscoped operation
+    outside their own warehouse boundary."""
+    if _role_of(current_user) != "super_admin":
+        raise HTTPException(status_code=403, detail="Super admin access required")
+    return current_user
+
+
 def is_super_admin(user) -> bool:
     return _role_of(user) == "super_admin"
 

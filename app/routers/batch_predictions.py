@@ -10,11 +10,21 @@ POST /batch-predictions/run/{asset_id} — re-run predictions for one asset
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from app.deps import get_db, get_current_user, is_admin_role, require_admin, require_user, active_warehouse_id
+from app.deps import (
+    get_db,
+    get_current_user,
+    is_admin_role,
+    require_admin,
+    require_super_admin,
+    require_user,
+    active_warehouse_id,
+    assert_asset_in_scope,
+)
 from app.models import Asset, PdmBatchPrediction
 from app.ai.services.batch_prediction_service import (
     run_batch_for_all_assets,
@@ -103,7 +113,7 @@ def list_batch_predictions(
 
 @router.get("/{asset_id}", summary="Latest cached PDM prediction for one asset")
 def get_batch_prediction(
-    asset_id: str,
+    asset_id: UUID,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ) -> dict:
@@ -112,12 +122,16 @@ def get_batch_prediction(
     Regular users may only fetch predictions for an asset assigned to them
     — otherwise any user could pull failure-probability/health-score
     predictions for any asset in the fleet via the shared asset-details
-    panel's fleet-wide search.
+    panel's fleet-wide search. Admins are scoped to their active warehouse
+    — previously not checked at all here.
     """
-    if not is_admin_role(current_user):
-        asset = db.query(Asset).filter(Asset.id == asset_id).first()
-        if not asset or str(asset.assigned_to) != str(getattr(current_user, "id", "")):
-            raise HTTPException(status_code=404, detail="No batch prediction found for this asset.")
+    asset = db.query(Asset).filter(Asset.id == asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="No batch prediction found for this asset.")
+    if is_admin_role(current_user):
+        assert_asset_in_scope(asset, current_user)
+    elif str(asset.assigned_to) != str(getattr(current_user, "id", "")):
+        raise HTTPException(status_code=404, detail="No batch prediction found for this asset.")
 
     row = (
         db.query(PdmBatchPrediction)
@@ -135,14 +149,21 @@ def get_batch_prediction(
 
 # ── trigger endpoints ──────────────────────────────────────────────────────────
 
-@router.post("/run", summary="Trigger a full batch prediction run for all assets", dependencies=[Depends(require_admin)])
+@router.post("/run", summary="Trigger a full batch prediction run for all assets", dependencies=[Depends(require_super_admin)])
 def trigger_full_batch(db: Session = Depends(get_db)) -> dict:
-    """Immediately runs the PDM pipeline for every active asset and upserts
-    results.  Useful as a cron job target on the EC2 host, or for manual refresh.
+    """Immediately runs the PDM pipeline for every active asset across every
+    warehouse and upserts results. Useful as a cron job target on the EC2
+    host, or for manual refresh.
 
-    This is a *synchronous* endpoint — it blocks until the run completes.
-    For large fleets this may take a while; consider calling from a cron job
-    rather than from a user-facing UI.
+    This is a *synchronous* endpoint — it blocks until the run completes
+    (~1 minute for ~1000 assets, measured against the real fleet). It is
+    also unscoped by design: unlike every other endpoint in this router,
+    it isn't tied to one warehouse. super_admin-only (not just any admin)
+    so a regular, warehouse-pinned admin can't force this expensive,
+    cross-warehouse operation — the frontend never calls this route at
+    all (only the per-asset /run/{asset_id} variant below, which every
+    admin already has correctly-scoped access to); this is an ops/cron
+    entry point, not a user-facing action.
     """
     from app.main import _load_pdm_models
     _load_pdm_models()
@@ -168,7 +189,11 @@ def trigger_full_batch(db: Session = Depends(get_db)) -> dict:
 
 
 @router.post("/run/{asset_id}", summary="Trigger a fresh prediction for one asset", dependencies=[Depends(require_admin)])
-def trigger_single_asset(asset_id: str, db: Session = Depends(get_db)) -> dict:
+def trigger_single_asset(
+    asset_id: UUID,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+) -> dict:
     """Re-runs the full PDM pipeline for a single asset and upserts the result.
     Returns the prediction summary."""
     from app.main import _load_pdm_models
@@ -184,6 +209,9 @@ def trigger_single_asset(asset_id: str, db: Session = Depends(get_db)) -> dict:
     asset = db.query(Asset).filter(Asset.id == asset_id).first()
     if not asset:
         raise HTTPException(status_code=404, detail=f"Asset {asset_id} not found")
+    # Previously unscoped — a regular (non-super) admin could force a live
+    # recompute for an asset belonging to a different warehouse.
+    assert_asset_in_scope(asset, current_user)
 
     result = run_batch_for_asset(
         db=db,
