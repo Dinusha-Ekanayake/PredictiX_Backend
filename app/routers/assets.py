@@ -4,6 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import String, cast, or_, func, case
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.deps import (
@@ -13,13 +14,74 @@ from app.deps import (
     require_admin,
     active_warehouse_id,
     is_admin_role,
+    is_super_admin,
     user_can_view_asset,
     _role_of,
     ADMIN_ROLES,
 )
-from app.models import Asset, PdmBatchPrediction, Profile
+from app.models import (
+    Asset,
+    AssetAssignment,
+    AssetCostPrediction,
+    AssetDocument,
+    AssetFailurePrediction,
+    AssetStatusHistory,
+    Department,
+    MaintenanceEvent,
+    Notification,
+    PdmBatchPrediction,
+    PredictionExplanation,
+    PredictionRun,
+    Profile,
+    Report,
+    SensorReading,
+    Ticket,
+)
 from app.schemas.asset import AssetCreate, AssetOut, AssetListOut, AssetUpdate
 from app.services.service_reminder_service import send_manual_reminder
+
+# Real values of the assets.status Postgres enum.
+_VALID_ASSET_STATUSES = {"active", "inactive", "under_maintenance", "critical", "decommissioned"}
+
+
+def _purge_asset(db: Session, asset_id: str) -> None:
+    """Delete an asset's owned child rows and null out soft references,
+    then the asset itself — mirrors tickets.py's _purge_ticket.
+
+    Without this, deleting any asset with real history (a sensor reading,
+    an assignment, a status change — i.e. almost any real asset) raised an
+    uncaught IntegrityError, since none of these child tables declare
+    ondelete=CASCADE. PdmBatchPrediction/PdmPredictionHistory/
+    ServiceReminderLog already cascade at the DB level and need no manual
+    handling here.
+    """
+    # Owned child rows — deleted outright.
+    db.query(MaintenanceEvent).filter(MaintenanceEvent.asset_id == asset_id).delete(synchronize_session=False)
+    db.query(SensorReading).filter(SensorReading.asset_id == asset_id).delete(synchronize_session=False)
+    db.query(AssetAssignment).filter(AssetAssignment.asset_id == asset_id).delete(synchronize_session=False)
+    db.query(AssetStatusHistory).filter(AssetStatusHistory.asset_id == asset_id).delete(synchronize_session=False)
+    db.query(AssetDocument).filter(AssetDocument.asset_id == asset_id).delete(synchronize_session=False)
+    db.query(AssetFailurePrediction).filter(AssetFailurePrediction.asset_id == asset_id).delete(synchronize_session=False)
+    db.query(AssetCostPrediction).filter(AssetCostPrediction.asset_id == asset_id).delete(synchronize_session=False)
+
+    # Soft references — nulled out, the referencing record itself survives.
+    db.query(PredictionExplanation).filter(PredictionExplanation.asset_id == asset_id).update(
+        {PredictionExplanation.asset_id: None}, synchronize_session=False
+    )
+    db.query(Ticket).filter(Ticket.asset_id == asset_id).update(
+        {Ticket.asset_id: None}, synchronize_session=False
+    )
+    db.query(PredictionRun).filter(PredictionRun.asset_id == asset_id).update(
+        {PredictionRun.asset_id: None}, synchronize_session=False
+    )
+    db.query(Report).filter(Report.asset_id == asset_id).update(
+        {Report.asset_id: None}, synchronize_session=False
+    )
+    db.query(Notification).filter(Notification.related_asset_id == asset_id).update(
+        {Notification.related_asset_id: None}, synchronize_session=False
+    )
+
+    db.query(Asset).filter(Asset.id == asset_id).delete(synchronize_session=False)
 
 
 def _enforced_warehouse(current_user) -> str | None:
@@ -125,6 +187,14 @@ def create_asset(
         if existing_vin:
             raise HTTPException(status_code=400, detail="VIN already exists")
 
+    # Previously unvalidated — a nonexistent department_id raised an
+    # uncaught IntegrityError (ForeignKeyViolation) on commit, a raw 500
+    # instead of a clean 404, unlike warehouse_id/vin/asset_code above.
+    if payload.department_id:
+        existing_dept = db.query(Department).filter(Department.id == payload.department_id).first()
+        if not existing_dept:
+            raise HTTPException(status_code=404, detail="Department not found")
+
     data = payload.model_dump()
     # Pin the new asset to the admin's active warehouse so an admin can't create
     # assets in another warehouse. A super_admin's active warehouse is the one
@@ -132,6 +202,12 @@ def create_asset(
     scoped_wh = _enforced_warehouse(current_user)
     if scoped_wh:
         data["warehouse_id"] = scoped_wh
+
+    # created_by was previously trusted verbatim from the request body —
+    # any admin could attribute a newly created asset to a different real
+    # profile. Always derive it from the authenticated session instead
+    # (and, per AssetUpdate, it can never be changed after this).
+    data["created_by"] = current_user.id
 
     obj = Asset(**data)
     db.add(obj)
@@ -143,10 +219,14 @@ def create_asset(
 @router.get("/", response_model=list[AssetListOut])
 def list_assets(
     search: str | None = Query(default=None, description="Search by asset id, asset code, asset name, VIN, registration, make, model"),
-    warehouse_id: str | None = Query(default=None),
-    department_id: str | None = Query(default=None),
+    # UUID-typed (not str) so FastAPI/Pydantic reject a malformed value with a
+    # clean 422 before it ever reaches the query — these previously reached
+    # Postgres as raw strings and crashed with an uncaught 500
+    # (InvalidTextRepresentation) on anything that wasn't a real UUID.
+    warehouse_id: UUID | None = Query(default=None),
+    department_id: UUID | None = Query(default=None),
     status: str | None = Query(default=None),
-    assigned_to: str | None = Query(default=None),
+    assigned_to: UUID | None = Query(default=None),
     vehicle_type: str | None = Query(default=None),
     asset_type: str | None = Query(default=None),
     vehicle_role: str | None = Query(default=None),
@@ -287,10 +367,12 @@ def list_assets(
 @router.get("/count")
 def count_assets(
     search: str | None = Query(default=None),
-    warehouse_id: str | None = Query(default=None),
-    department_id: str | None = Query(default=None),
+    # UUID-typed for the same reason as list_assets above — a malformed
+    # value now 422s cleanly instead of crashing with an uncaught 500.
+    warehouse_id: UUID | None = Query(default=None),
+    department_id: UUID | None = Query(default=None),
     status: str | None = Query(default=None),
-    assigned_to: str | None = Query(default=None),
+    assigned_to: UUID | None = Query(default=None),
     vehicle_type: str | None = Query(default=None),
     asset_type: str | None = Query(default=None),
     vehicle_role: str | None = Query(default=None),
@@ -535,7 +617,7 @@ def get_asset_analytics(
 
 @router.get("/{asset_id}", response_model=AssetOut)
 def get_asset(
-    asset_id: str,
+    asset_id: UUID,
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
@@ -553,7 +635,7 @@ def get_asset(
 
 @router.put("/{asset_id}", response_model=AssetOut, dependencies=[Depends(require_admin)])
 def update_asset(
-    asset_id: str,
+    asset_id: UUID,
     payload: AssetUpdate,
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
@@ -564,6 +646,16 @@ def update_asset(
     _assert_asset_in_scope(obj, current_user)
 
     update_data = payload.model_dump(exclude_unset=True)
+
+    # A regular admin is pinned to one warehouse and must never be able to
+    # move an asset into a different one via this endpoint — create_asset
+    # already prevents this on the create path by pinning warehouse_id
+    # server-side, but update_asset had no equivalent, so a regular admin
+    # could relocate an asset out of their own warehouse boundary just by
+    # including warehouse_id in the PUT body. super_admins may still
+    # deliberately move an asset between warehouses.
+    if "warehouse_id" in update_data and not is_super_admin(current_user):
+        del update_data["warehouse_id"]
 
     if "vin" in update_data and update_data["vin"]:
         existing_vin = (
@@ -583,6 +675,13 @@ def update_asset(
         if existing_code:
             raise HTTPException(status_code=400, detail="Asset code already exists")
 
+    # Same gap as create_asset — a nonexistent department_id previously
+    # raised an uncaught IntegrityError on commit instead of a clean 404.
+    if update_data.get("department_id"):
+        existing_dept = db.query(Department).filter(Department.id == update_data["department_id"]).first()
+        if not existing_dept:
+            raise HTTPException(status_code=404, detail="Department not found")
+
     for key, value in update_data.items():
         setattr(obj, key, value)
 
@@ -593,8 +692,8 @@ def update_asset(
 
 @router.patch("/{asset_id}/assign", response_model=AssetOut, dependencies=[Depends(require_admin)])
 def assign_asset(
-    asset_id: str,
-    assigned_to: str | None = None,
+    asset_id: UUID,
+    assigned_to: UUID | None = None,
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
@@ -602,6 +701,14 @@ def assign_asset(
     if not obj:
         raise HTTPException(status_code=404, detail="Asset not found")
     _assert_asset_in_scope(obj, current_user)
+
+    # Previously took the raw string with no existence check — assigning
+    # to a nonexistent user_id silently "succeeded" with a dangling
+    # reference.
+    if assigned_to is not None:
+        assignee = db.query(Profile).filter(Profile.id == assigned_to).first()
+        if not assignee:
+            raise HTTPException(status_code=404, detail="User not found")
 
     obj.assigned_to = assigned_to
     db.commit()
@@ -611,17 +718,27 @@ def assign_asset(
 
 @router.patch("/{asset_id}/status", response_model=AssetOut, dependencies=[Depends(require_admin)])
 def update_asset_status(
-    asset_id: str,
+    asset_id: UUID,
     status: str,
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
+    # Previously took the raw string with no enum check — an invalid
+    # status silently "succeeded" but then dropped out of every dashboard
+    # bucket, since get_asset_stats only counts the real enum values.
+    normalized = status.strip().lower()
+    if normalized not in _VALID_ASSET_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid status '{status}'. Valid: {sorted(_VALID_ASSET_STATUSES)}",
+        )
+
     obj = db.query(Asset).filter(Asset.id == asset_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Asset not found")
     _assert_asset_in_scope(obj, current_user)
 
-    obj.status = status
+    obj.status = normalized
     db.commit()
     db.refresh(obj)
     return obj
@@ -629,7 +746,7 @@ def update_asset_status(
 
 @router.delete("/{asset_id}", dependencies=[Depends(require_admin)])
 def delete_asset(
-    asset_id: str,
+    asset_id: UUID,
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
@@ -638,8 +755,12 @@ def delete_asset(
         raise HTTPException(status_code=404, detail="Asset not found")
     _assert_asset_in_scope(obj, current_user)
 
-    db.delete(obj)
-    db.commit()
+    try:
+        _purge_asset(db, asset_id)
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=f"Cannot delete asset: {getattr(exc, 'orig', exc)}")
     return {"message": "Asset deleted successfully"}
 
 
@@ -648,7 +769,7 @@ def delete_asset(
     summary="Send a service reminder email to the assigned user (admin only)",
 )
 def send_service_reminder_endpoint(
-    asset_id: str,
+    asset_id: UUID,
     payload: ServiceReminderRequest | None = None,
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
@@ -657,17 +778,24 @@ def send_service_reminder_endpoint(
     if not is_admin_role(current_user):
         raise HTTPException(status_code=403, detail="Admins only")
 
-    try:
-        asset_uuid = UUID(asset_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid asset id")
+    # asset_id is UUID-typed above now, so FastAPI already rejects a
+    # malformed value with a clean 422 before this body ever runs — no
+    # manual parsing needed here anymore.
+
+    # Previously never looked the asset up at all — any admin, regardless
+    # of which warehouse they're pinned to, could trigger a service-reminder
+    # email for an asset in a warehouse they don't manage.
+    asset = db.query(Asset).filter(Asset.id == asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    _assert_asset_in_scope(asset, current_user)
 
     note = payload.note.strip() if payload and payload.note else None
 
     try:
         result = send_manual_reminder(
             db,
-            asset_id=asset_uuid,
+            asset_id=asset_id,
             sent_by=current_user.id,
             admin_note=note,
         )
