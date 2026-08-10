@@ -89,6 +89,9 @@ class Asset(Base):
     manufacture_year = Column(Integer)
     registration_number = Column(Text)
     vin = Column(Text, unique=True)
+    # Warehouse parking bay, "<zone>-<bay>" e.g. "A-012". Unique per warehouse
+    # (partial unique index, see docs/migrations/009_*.sql); NULL = unassigned.
+    parking_slot = Column(Text)
     status = Column(Text, nullable=False, default="active")
     health_band = Column(Text)
     criticality_score = Column(Numeric(5, 2))
