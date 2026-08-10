@@ -23,6 +23,8 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import InterfaceError, OperationalError
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.core.config import allowed_frontend_origins
+
 # ─── Routers ──────────────────────────────────────────────────────────────────
 from .routers.admin_dashboard import admin_dashboard_router
 from .routers.chatbot import router as chatbot_router
@@ -226,7 +228,7 @@ def _run_scheduled_batch() -> None:
             reg_model=reg_model,
             reg_features=reg_features,
             reg_categorical_cols=reg_categorical_cols,
-            cost_bundle=breakdown_cost_bundle,
+            breakdown_cost_bundle=breakdown_cost_bundle,
         )
     except Exception:
         log.exception("Batch prediction run failed")
@@ -280,7 +282,7 @@ def _ping_hf_models() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     """Load PdM models on startup; start batch scheduler; optionally warm HF models."""
-    global scheduler, cost_bundle
+    global scheduler
 
     _load_pdm_models()
 
@@ -380,32 +382,12 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="PredictiX API", version="1.0", lifespan=lifespan)
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
-_prod_origins = [
-    "https://predicti-x-frontend.vercel.app",
-    "https://predicti-x-frontend-dinusha-ekanayakes-projects.vercel.app",
-]
-_dev_origins = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:3001",
-    "http://127.0.0.1:3001",
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://192.168.56.1:3000",
-    "http://192.168.56.1:3001",
-]
-
-_is_production = os.getenv("ENV", "").strip().lower() == "production"
-_env_origins = os.getenv("ALLOWED_ORIGINS", "")
-_extra_origins = [o.strip() for o in _env_origins.split(",") if o.strip()]
-
-_allowed_origins = list(set(_prod_origins + _extra_origins))
-if not _is_production:
-    _allowed_origins = list(set(_allowed_origins + _dev_origins))
-
+# allowed_frontend_origins() is the single source of truth for "which
+# frontend origins does this API trust" — also reused by the server-side PDF
+# renderer's network allowlist (see app/routers/asset_reports.py).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_allowed_origins,
+    allow_origins=allowed_frontend_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

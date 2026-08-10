@@ -47,3 +47,9 @@ langchain-core==1.4.0
 supabase==2.28.3
 reportlab==4.5.1
 gradio_client
+
+# playwright renders /reports/render-pdf's HTML→PDF export via headless
+# Chromium. `pip install -r requirements.txt` alone is not enough — the
+# browser binary is separate and must be fetched once per host with:
+#   playwright install chromium
+playwright==1.62.0

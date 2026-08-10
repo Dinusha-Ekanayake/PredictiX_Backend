@@ -433,7 +433,14 @@ ADMIN_DASHBOARD_TTL=1800
 WAREHOUSE_DASHBOARD_TTL=1800
 ADMIN_AI_SUMMARY_TTL=21600
 
-# CORS (comma-separated)
+# CORS / trusted frontend origins (comma-separated). Also the network
+# allowlist for the server-side PDF renderer (POST /reports/render-pdf) —
+# the same list is the single source of truth for both.
+# ALLOWED_ORIGINS is always appended on top of PROD/DEV_ALLOWED_ORIGINS.
+# Omit PROD_ALLOWED_ORIGINS / DEV_ALLOWED_ORIGINS to use the built-in
+# defaults (the current Vercel deployments / common localhost dev ports).
+PROD_ALLOWED_ORIGINS=https://your-frontend.vercel.app
+DEV_ALLOWED_ORIGINS=http://localhost:3000,http://localhost:5173
 ALLOWED_ORIGINS=http://localhost:3000,https://your-frontend.vercel.app
 
 # Misc
@@ -442,7 +449,7 @@ DEFAULT_PASSWORD=Predictix@123
 
 Never commit `.env`. On EC2, systemd loads the same values through the service `EnvironmentFile`.
 
-**CORS** is pre-configured for `localhost:3000`, `localhost:3001`, `localhost:5173`, `127.0.0.1:*`, `192.168.56.1:*`, and the Vercel deployment URL.
+**CORS** is pre-configured for `localhost:3000`, `localhost:3001`, `localhost:5173`, `127.0.0.1:*`, `192.168.56.1:*`, and the Vercel deployment URL — set `PROD_ALLOWED_ORIGINS`/`DEV_ALLOWED_ORIGINS` to replace those defaults (e.g. for a new Vercel alias or a staging domain) without a code change.
 
 ---
 
