@@ -168,6 +168,27 @@ def _to_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _clamp_health_pct(value: float) -> float:
+    """Clamp a health-percentage reading to its valid [0, 100] range. NaN
+    (see _to_float_or_nan) passes through unchanged — a genuinely missing
+    reading is not a range violation.
+
+    A small fraction of sensor_readings rows carry out-of-range values (seen
+    live: as low as -304.66%) — a data-generation defect, not a real
+    reading. Left unclamped, it flows straight into _compute_health_score's
+    plain average (which, unlike the tree-based classifier/regressor, has
+    no built-in resistance to an outlier's magnitude) and dominates both the
+    health score and its own contributing-factors breakdown — e.g. a single
+    -265.66 reading alone accounted for -53 of a 100-point scale, enough by
+    itself to swing an otherwise-100%-healthy-looking asset into "Critical."
+    Same fix as the one already applied on the survival-model side
+    (app.ai.services.survival_service._clamp_health_pct).
+    """
+    if value != value:  # NaN
+        return value
+    return max(0.0, min(100.0, value))
+
+
 def _json_safe_fd(fd: dict[str, Any]) -> dict[str, Any]:
     """Feature dicts can hold NaN for genuinely-missing sensor readings
     (see _to_float_or_nan). json.dumps() happily emits the literal token
@@ -266,7 +287,8 @@ def _build_feature_dict(asset: Asset, reading, snapshot_date: date | None = None
     fd["lifetime_breakdown_count"] = _to_int(asset.lifetime_breakdown_count)
 
     for col in _SENSOR_FLOAT_COLS:
-        fd[col] = _to_float_or_nan(getattr(reading, col, None))
+        v = _to_float_or_nan(getattr(reading, col, None))
+        fd[col] = _clamp_health_pct(v) if col in _HEALTH_COMPONENT_COLS else v
     for col in _SENSOR_INT_COLS:
         fd[col] = _to_int(getattr(reading, col, None))
     for col in _SENSOR_BOOL_COLS:
