@@ -9,3 +9,46 @@ alembic/
 
 # Transformer/sentence-transformer model weights — too large for GitHub
 *.safetensors
+scripts/seed_faqs.py
+
+# ONNX asset-summary model artifacts (deployed via Hugging Face, never commit)
+onnx_asset_summary*/
+
+# build / runtime logs
+*.log
+onnx_ticket_summary*/
+*__fp32_tmp/
+*__int8_tmp/
+build_onnx.py
+*_quality_test.py
+ticket_quality_test.py
+.env.example
+
+# Logs / profiling / scratch output
+profile.out
+*.tmp
+admin_summary_tmp.json
+temp_model.json
+_check_maint_tmp.py
+_temp_readme.md
+test_out.txt
+test_results.json
+
+# Fleet-rebuild intermediate caches (regenerable; hold account id mappings)
+scripts/.fleet_cache.pkl
+scripts/.superadmin_ids.pkl
+scripts/.account_ids.pkl
+
+# Scratch JWTs written while testing endpoints by hand. These are live
+# credentials — never commit them.
+scripts/.tok*.txt
+*.token.txt
+
+# Pre-rebuild database backup — contains auth password hashes, real user
+# emails and full table data. Never commit; keep local only.
+old-database/
+
+# Local debug scratch scripts
+_dbg_*.py
+.claude/settings.local.json
+CLAUDE.md

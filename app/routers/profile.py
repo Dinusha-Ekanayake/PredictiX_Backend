@@ -19,36 +19,51 @@ import os
 import uuid as _uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
-from sqlalchemy import String, cast
+from sqlalchemy import String, cast, or_
 from sqlalchemy.orm import Session
 
-from app.deps import get_current_user, get_db
-from app.models import Asset, Department, Profile, Warehouse
+from app.deps import get_current_user, get_db, require_admin, require_user, active_warehouse_id
+from app.models import Asset, AssetAssignment, Department, Profile, Warehouse
 from app.schemas.profile import ProfileOut, ProfileUpdate
 from app.schemas.user_profile import UserProfileUpdate
 from app.services.notification_service import NotificationService
 
 log = logging.getLogger(__name__)
-router = APIRouter(prefix="/profiles", tags=["Profiles"])
+# Every endpoint needs a valid token. The admin-only list/{id} endpoints add
+# require_admin individually; the /me* endpoints resolve the caller themselves.
+router = APIRouter(
+    prefix="/profiles",
+    tags=["Profiles"],
+    dependencies=[Depends(require_user)],
+)
 
 
 # ─── Admin endpoints ──────────────────────────────────────────────────────────
 
-@router.get("/", response_model=list[ProfileOut])
+@router.get("/", response_model=list[ProfileOut], dependencies=[Depends(require_admin)])
 def list_profiles(
     role: str | None = Query(default=None),
     department_id: str | None = Query(default=None),
     warehouse_id: str | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
 ):
     q = db.query(Profile)
     if role:
         q = q.filter(Profile.role == role)
     if department_id:
         q = q.filter(Profile.department_id == department_id)
+
+    # Scope to the caller's active warehouse; overrides any client-supplied
+    # warehouse_id so an admin can't enumerate another warehouse's profiles.
+    scoped_wh = active_warehouse_id(current_user)
+    if scoped_wh:
+        warehouse_id = scoped_wh
     if warehouse_id:
         q = q.filter(Profile.warehouse_id == warehouse_id)
-    return q.order_by(Profile.full_name).all()
+    return q.order_by(Profile.full_name).offset(offset).limit(limit).all()
 
 
 # ─── Self-service endpoints (/profiles/me) ────────────────────────────────────
@@ -73,9 +88,25 @@ def _profile_to_response(user: Profile, db: Session) -> dict:
         wh = db.query(Warehouse).filter(Warehouse.id == user.warehouse_id).first()
         warehouse_name = wh.name if wh else None
 
+    # Same fix as get_my_assets/get_my_stats: count everything assigned to
+    # this user except fully decommissioned assets (union of the direct
+    # column and active asset_assignments rows), not just status=="active" —
+    # otherwise a user's own profile page undercounts their assigned assets
+    # the moment one goes critical/under_maintenance, which is exactly when
+    # it most needs to still be visible to them.
+    assigned_asset_ids_subq = (
+        db.query(AssetAssignment.asset_id)
+        .filter(AssetAssignment.user_id == user.id, AssetAssignment.is_active == True)
+    )
     asset_count = (
         db.query(Asset)
-        .filter(Asset.assigned_to == str(user.id), cast(Asset.status, String) == "active")
+        .filter(
+            or_(
+                Asset.assigned_to == str(user.id),
+                Asset.id.in_(assigned_asset_ids_subq),
+            ),
+            cast(Asset.status, String) != "decommissioned",
+        )
         .count()
     )
 
@@ -156,11 +187,16 @@ def update_my_profile(
         try:
             db.commit()
             db.refresh(current_user)
-            NotificationService.notify_on_profile_update(db, str(current_user.id))
         except Exception:
             db.rollback()
             log.exception("Profile update failed")
             raise HTTPException(status_code=500, detail="Profile update failed")
+
+        # Best-effort admin notification email via Brevo — never blocks the save.
+        try:
+            NotificationService.notify_on_profile_update(db, str(current_user.id))
+        except Exception:
+            log.exception("Profile-update notification failed (non-fatal)")
 
     return _profile_to_response(current_user, db)
 
@@ -224,21 +260,44 @@ def get_my_assets(
     if not db:
         return []
 
+    # Assigned via either the direct assets.assigned_to column OR an active
+    # row in asset_assignments — an asset reassigned only through the
+    # assignments table (without updating assigned_to) would otherwise
+    # silently be missing from this list despite showing up elsewhere
+    # (get_my_profile's asset count already checks both sources via
+    # max(direct, via_table)). Only decommissioned (fully retired) assets
+    # are excluded — critical/under_maintenance assets must still show up,
+    # since those are exactly what most need the user's attention.
+    assigned_asset_ids_subq = (
+        db.query(AssetAssignment.asset_id)
+        .filter(AssetAssignment.user_id == current_user.id, AssetAssignment.is_active == True)
+    )
     assets = (
         db.query(Asset)
-        .filter(Asset.assigned_to == str(current_user.id), cast(Asset.status, String) == "active")
+        .filter(
+            or_(
+                Asset.assigned_to == str(current_user.id),
+                Asset.id.in_(assigned_asset_ids_subq),
+            ),
+            cast(Asset.status, String) != "decommissioned",
+        )
         .all()
     )
+
+    warehouse_ids = {a.warehouse_id for a in assets if a.warehouse_id is not None}
+    warehouses_by_id = {
+        w.id: w
+        for w in db.query(Warehouse.id, Warehouse.name, Warehouse.city).filter(Warehouse.id.in_(warehouse_ids)).all()
+    } if warehouse_ids else {}
 
     result = []
     for asset in assets:
         location = ""
-        if asset.warehouse_id:
-            wh = db.query(Warehouse).filter(Warehouse.id == asset.warehouse_id).first()
-            if wh:
-                location = wh.name
-                if wh.city:
-                    location += f" - {wh.city}"
+        wh = warehouses_by_id.get(asset.warehouse_id)
+        if wh:
+            location = wh.name
+            if wh.city:
+                location += f" - {wh.city}"
 
         result.append({
             "assignment_id": str(asset.id),
@@ -263,12 +322,40 @@ def get_my_stats(
     if not db:
         return {"assignedAssets": 0, "activeAssets": 0}
 
-    count = (
+    # assignedAssets = everything assigned to this user (direct assigned_to
+    # OR an active asset_assignments row — same union as get_my_assets)
+    # except fully decommissioned assets; activeAssets = specifically
+    # status == "active". These were previously the same over-filtered
+    # query (status == "active" only, direct column only), which silently
+    # undercounted assignedAssets for any user with a critical/
+    # under_maintenance asset or a table-only assignment.
+    assigned_asset_ids_subq = (
+        db.query(AssetAssignment.asset_id)
+        .filter(AssetAssignment.user_id == current_user.id, AssetAssignment.is_active == True)
+    )
+    assigned_count = (
         db.query(Asset)
-        .filter(Asset.assigned_to == str(current_user.id), cast(Asset.status, String) == "active")
+        .filter(
+            or_(
+                Asset.assigned_to == str(current_user.id),
+                Asset.id.in_(assigned_asset_ids_subq),
+            ),
+            cast(Asset.status, String) != "decommissioned",
+        )
         .count()
     )
-    return {"assignedAssets": count, "activeAssets": count}
+    active_count = (
+        db.query(Asset)
+        .filter(
+            or_(
+                Asset.assigned_to == str(current_user.id),
+                Asset.id.in_(assigned_asset_ids_subq),
+            ),
+            cast(Asset.status, String) == "active",
+        )
+        .count()
+    )
+    return {"assignedAssets": assigned_count, "activeAssets": active_count}
 
 
 @router.get("/me/colleagues")
@@ -286,9 +373,13 @@ def get_my_colleagues(
         .all()
     )
 
+    # All colleagues share real_user.department_id — resolve the name once
+    # instead of one Department query per colleague (removes the N+1).
+    dept = db.query(Department).filter(Department.id == real_user.department_id).first()
+    dept_name = dept.name if dept else "Unknown"
+
     result = []
     for member in colleagues:
-        dept = db.query(Department).filter(Department.id == member.department_id).first()
         first_name, last_name = _split_name(member.full_name)
         result.append({
             "id": str(member.id),
@@ -298,7 +389,7 @@ def get_my_colleagues(
             "name": member.full_name,
             "email": member.email,
             "contactNumber": member.phone,
-            "department": dept.name if dept else "Unknown",
+            "department": dept_name,
             "role": member.role,
             "status": member.status,
         })
@@ -309,7 +400,7 @@ def get_my_colleagues(
 # Must come after the literal "/me*" routes above, otherwise "/{profile_id}"
 # greedily matches "me" and shadows the self-service profile endpoint.
 
-@router.get("/{profile_id}", response_model=ProfileOut)
+@router.get("/{profile_id}", response_model=ProfileOut, dependencies=[Depends(require_admin)])
 def get_profile(profile_id: str, db: Session = Depends(get_db)):
     obj = db.query(Profile).filter(Profile.id == profile_id).first()
     if not obj:
@@ -317,7 +408,7 @@ def get_profile(profile_id: str, db: Session = Depends(get_db)):
     return obj
 
 
-@router.put("/{profile_id}", response_model=ProfileOut)
+@router.put("/{profile_id}", response_model=ProfileOut, dependencies=[Depends(require_admin)])
 def update_profile(profile_id: str, payload: ProfileUpdate, db: Session = Depends(get_db)):
     obj = db.query(Profile).filter(Profile.id == profile_id).first()
     if not obj:

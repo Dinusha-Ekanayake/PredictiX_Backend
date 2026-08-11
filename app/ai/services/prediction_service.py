@@ -2,24 +2,16 @@ from datetime import timedelta
 
 import numpy as np
 import pandas as pd
-from catboost import Pool
 from fastapi import HTTPException
 
+from app.ai.services.pdm_decision_service import classifier_only_tier
 
-REGRESSION_CATEGORICAL_FEATURES = ["vehicle_role"]
-
-
-def prepare_input(data: dict, feature_list: list[str]) -> pd.DataFrame:
-    df = pd.DataFrame([data])
-
-    for col in feature_list:
-        if col not in df.columns:
-            if col in REGRESSION_CATEGORICAL_FEATURES:
-                df[col] = "unknown"
-            else:
-                df[col] = 0
-
-    return df.loc[:, feature_list].copy()
+_TIER_TO_RISK_LABEL = {"urgent": "High", "watch": "Medium", "healthy": "Low"}
+_RISK_LABEL_TO_ACTION = {
+    "High": "Schedule maintenance immediately",
+    "Medium": "Inspect vehicle soon",
+    "Low": "Continue monitoring",
+}
 
 
 def validate_payload_fields(data: dict, required_fields: list[str]) -> None:
@@ -36,62 +28,22 @@ def validate_payload_fields(data: dict, required_fields: list[str]) -> None:
         )
 
 
-def clean_and_cast_inputs(df: pd.DataFrame, categorical_features: list[str]) -> pd.DataFrame:
-    cleaned = df.copy()
+def get_risk_and_action(prob: float, clf_threshold: float) -> tuple[str, str]:
+    """Classifier-probability-only risk estimate for the debug prediction
+    endpoints, using the exact same tier boundaries the real batch
+    pipeline's decision layer (pdm_decision_service) does.
 
-    for col in cleaned.columns:
-        if col in categorical_features:
-            cleaned[col] = cleaned[col].astype(str)
-        else:
-            try:
-                cleaned[col] = pd.to_numeric(cleaned[col], errors="raise")
-            except Exception:
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"Field '{col}' must be numeric",
-                )
-
-    return cleaned
-
-
-def get_risk_and_action(prob: float, pred_days: int | None = None) -> tuple[str, str]:
-    if pred_days is not None:
-        if prob >= 0.8 or pred_days <= 7:
-            return "High", "Schedule maintenance immediately"
-        if prob >= 0.5 or pred_days <= 30:
-            return "Medium", "Inspect vehicle soon"
-        return "Low", "Continue monitoring"
-
-    if prob >= 0.8:
-        return "High", "Schedule maintenance immediately"
-    if prob >= 0.5:
-        return "Medium", "Inspect vehicle soon"
-    return "Low", "Continue monitoring"
-
-
-def get_top_catboost_shap(reg_model, x_reg: pd.DataFrame) -> list[dict]:
-    cat_feature_indices = [
-        x_reg.columns.get_loc(col)
-        for col in REGRESSION_CATEGORICAL_FEATURES
-        if col in x_reg.columns
-    ]
-
-    pool = Pool(x_reg, cat_features=cat_feature_indices)
-    shap_values = reg_model.get_feature_importance(type="ShapValues", data=pool)
-
-    row_shap = shap_values[0][:-1]
-    feature_names = list(x_reg.columns)
-
-    ranked = sorted(
-        zip(feature_names, row_shap),
-        key=lambda x: abs(x[1]),
-        reverse=True,
-    )
-
-    return [
-        {"feature": feature, "impact": round(float(impact), 4)}
-        for feature, impact in ranked[:5]
-    ]
+    Previously used its own disconnected, hardcoded 0.8/0.5 probability
+    cuts (with a 7/30-day override build_decision's tier never considers
+    at all) — a probability that read e.g. "High" here could read
+    "medium" risk_level in the real pdm_batch_predictions row for the
+    same evidence. days_until is intentionally not used for
+    classification here, matching build_decision (it only affects how
+    the predicted date is framed for display, never the risk tier).
+    """
+    tier = classifier_only_tier(prob, clf_threshold)
+    label = _TIER_TO_RISK_LABEL[tier]
+    return label, _RISK_LABEL_TO_ACTION[label]
 
 
 def _parse_snapshot_date(snapshot_date_raw: str) -> pd.Timestamp:
@@ -104,21 +56,17 @@ def _parse_snapshot_date(snapshot_date_raw: str) -> pd.Timestamp:
         )
 
 
-def run_classification(data: dict, clf_model, clf_features: list[str]) -> dict:
-    if not isinstance(clf_features, list):
-        raise HTTPException(status_code=500, detail="clf_features is not a list")
-
-    required_fields = ["snapshot_date"] + clf_features
-    validate_payload_fields(data, required_fields)
-    _parse_snapshot_date(data["snapshot_date"])
+def run_classification(data: dict, clf_model, clf_features: list[str], clf_threshold: float) -> dict:
+    """``clf_model`` is an app.ai.services.lgb_model_adapter.LgbModelBundle."""
+    validate_payload_fields(data, ["snapshot_date"])
+    snapshot_date = _parse_snapshot_date(data["snapshot_date"])
 
     try:
-        x_clf = prepare_input(data, clf_features)
-        x_clf = clean_and_cast_inputs(x_clf, categorical_features=[])
-
-        prob = float(clf_model.predict_proba(x_clf)[0][1])
+        row = {**data, "month": snapshot_date.month, "year": snapshot_date.year}
+        df = clf_model.build_frame([row])
+        prob = float(clf_model.predict_proba_positive(df)[0])
         maintenance_required = int(prob >= 0.6)
-        risk_level, recommended_action = get_risk_and_action(prob)
+        risk_level, recommended_action = get_risk_and_action(prob, clf_threshold)
 
         return {
             "maintenance_probability": round(prob, 4),
@@ -133,33 +81,19 @@ def run_classification(data: dict, clf_model, clf_features: list[str]) -> dict:
 
 
 def run_regression(data: dict, reg_model, reg_features: list[str]) -> dict:
-    if not isinstance(reg_features, list):
-        raise HTTPException(status_code=500, detail="reg_features is not a list")
-
-    required_fields = ["snapshot_date"] + reg_features
-    validate_payload_fields(data, required_fields)
-
+    """``reg_model`` is an app.ai.services.lgb_model_adapter.LgbModelBundle."""
+    validate_payload_fields(data, ["snapshot_date"])
     snapshot_date = _parse_snapshot_date(data["snapshot_date"])
 
     try:
-        x_reg = prepare_input(data, reg_features)
-        x_reg = clean_and_cast_inputs(
-            x_reg,
-            categorical_features=REGRESSION_CATEGORICAL_FEATURES,
-        )
+        row = {**data, "month": snapshot_date.month, "year": snapshot_date.year}
+        df = reg_model.build_frame([row])
 
-        reg_cat_feature_indices = [
-            x_reg.columns.get_loc(col)
-            for col in REGRESSION_CATEGORICAL_FEATURES
-            if col in x_reg.columns
-        ]
-        reg_pool = Pool(x_reg, cat_features=reg_cat_feature_indices)
-
-        pred_days = float(reg_model.predict(reg_pool)[0])
-        pred_days = int(np.clip(round(pred_days), 1, 180))
+        raw_days = float(reg_model.predict(df)[0])
+        pred_days = int(np.clip(round(raw_days), 1, 365))
         predicted_date = snapshot_date + timedelta(days=pred_days)
 
-        top_explanations = get_top_catboost_shap(reg_model, x_reg)
+        top_explanations = reg_model.shap_top_factors(df, top_n=5)[0]
 
         return {
             "predicted_days_until_maintenance": pred_days,
@@ -298,14 +232,15 @@ def run_full_prediction(
     clf_features: list[str],
     reg_model,
     reg_features: list[str],
+    clf_threshold: float,
 ) -> dict:
-    classification = run_classification(data, clf_model, clf_features)
+    classification = run_classification(data, clf_model, clf_features, clf_threshold)
     regression = run_regression(data, reg_model, reg_features)
     health = run_health_score(data)
 
     risk_level, recommended_action = get_risk_and_action(
         classification["maintenance_probability"],
-        regression["predicted_days_until_maintenance"],
+        clf_threshold,
     )
 
     return {

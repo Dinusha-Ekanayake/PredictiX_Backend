@@ -1,5 +1,7 @@
 from sqlalchemy import Column, String, Text, Integer, Boolean, Date, DateTime, ForeignKey, Numeric
 from sqlalchemy.dialects.postgresql import ENUM, UUID, JSONB
+from sqlalchemy import Boolean, Column, Date, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 from app.db import Base
 import uuid
@@ -87,6 +89,9 @@ class Asset(Base):
     manufacture_year = Column(Integer)
     registration_number = Column(Text)
     vin = Column(Text, unique=True)
+    # Warehouse parking bay, "<zone>-<bay>" e.g. "A-012". Unique per warehouse
+    # (partial unique index, see docs/migrations/009_*.sql); NULL = unassigned.
+    parking_slot = Column(Text)
     status = Column(Text, nullable=False, default="active")
     health_band = Column(Text)
     criticality_score = Column(Numeric(5, 2))
@@ -293,8 +298,8 @@ class AssetAssignment(Base):
     __tablename__ = "asset_assignments"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"), nullable=False)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=False)
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"), nullable=False, index=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=False, index=True)
     assigned_by = Column(UUID(as_uuid=True), ForeignKey("profiles.id"))
     assigned_at = Column(DateTime(timezone=True), server_default=func.now())
     unassigned_at = Column(DateTime(timezone=True))
@@ -306,7 +311,7 @@ class AssetStatusHistory(Base):
     __tablename__ = "asset_status_history"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"), nullable=False)
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"), nullable=False, index=True)
     old_status = Column(Text)
     new_status = Column(Text, nullable=False)
     changed_by = Column(UUID(as_uuid=True), ForeignKey("profiles.id"))
@@ -318,7 +323,7 @@ class AssetDocument(Base):
     __tablename__ = "asset_documents"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"), nullable=False)
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"), nullable=False, index=True)
     title = Column(Text, nullable=False)
     file_path = Column(Text, nullable=False)
     mime_type = Column(Text)
@@ -411,7 +416,7 @@ class TicketPrediction(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     run_id = Column(UUID(as_uuid=True), ForeignKey("prediction_runs.id"), unique=True, nullable=False)
-    ticket_id = Column(UUID(as_uuid=True), ForeignKey("tickets.id"), nullable=False)
+    ticket_id = Column(UUID(as_uuid=True), ForeignKey("tickets.id"), nullable=False, index=True)
 
     predicted_category = Column(Text, nullable=True)
     predicted_priority = Column(Text, nullable=True)
@@ -426,8 +431,8 @@ class PredictionExplanation(Base):
     __tablename__ = "prediction_explanations"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    run_id = Column(UUID(as_uuid=True), ForeignKey("prediction_runs.id"), nullable=False)
-    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"))
+    run_id = Column(UUID(as_uuid=True), ForeignKey("prediction_runs.id"), nullable=False, index=True)
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"), index=True)
     explanation_type = Column(Text, nullable=False, default="shap")
     explanation_text = Column(Text)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -498,3 +503,76 @@ class PdmBatchPrediction(Base):
     run_duration_ms = Column(Integer)
     error_message = Column(Text)
     status = Column(Text, nullable=False, default="ok")
+
+    # Auditability — which model generation + exact input produced this row.
+    model_version = Column(Text)
+    feature_snapshot = Column(JSONB, default={})
+
+    # Decision layer (app.ai.services.pdm_decision_service.build_decision).
+    tier = Column(Text)
+    agreement = Column(Boolean)
+    display_mode = Column(Text)
+    horizon_text = Column(Text)
+    recommended_action = Column(Text)
+    horizon_saturated = Column(Boolean, default=False)
+
+
+class PdmPredictionHistory(Base):
+    """Append-only log of every batch prediction run — never upserted or
+    overwritten, unlike PdmBatchPrediction (which only ever holds the latest
+    row per asset).
+
+    Exists so that predictions made today can eventually be checked against
+    what actually happened afterward (a real maintenance_event within N days,
+    an unplanned "repair" event, etc.) — the validation this system currently
+    cannot do because PdmBatchPrediction discards prior predictions on every
+    upsert. One row is inserted per asset per batch run; nothing here is ever
+    updated or deleted by the app itself.
+    """
+    __tablename__ = "pdm_prediction_history"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id", ondelete="CASCADE"), nullable=False)
+
+    failure_probability = Column(Numeric(10, 4))
+    predicted_days_until_maintenance = Column(Integer)
+    predicted_maintenance_date = Column(Date)
+    health_score = Column(Numeric(10, 4))
+    tier = Column(Text)
+    model_version = Column(Text)
+
+    predicted_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class ServiceReminderLog(Base):
+    """One row per service-reminder email send attempt."""
+    __tablename__ = "service_reminder_log"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    asset_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("assets.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("profiles.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+
+    service_date = Column(Date, nullable=False)
+    reminder_offset_days = Column(Integer, nullable=False)
+
+    trigger = Column(String, nullable=False)
+    sent_by = Column(
+        UUID(as_uuid=True),
+        ForeignKey("profiles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    email_to = Column(String, nullable=False)
+    success = Column(Boolean, nullable=False, default=True)
+    error_message = Column(Text, nullable=True)
+
+    sent_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())

@@ -1,32 +1,46 @@
 """
-FRSO survival service — loads the per-component Weibull AFT models and
-serves predictions at request time.
+FRSO survival service (v3) — per-component Weibull AFT on the real v11 schema.
 
-Each component (brake, tire, battery, oil, hydraulic) has its own model that
-answers two questions for a given asset:
-    1. What's the survival curve S(t) over the next N days?
-    2. What's the median predicted failure time (the p50 RUL)?
+Five models (brake, tire, battery, oil, hydraulic) each read ONE latest asset
+snapshot and return a survival curve S(t), the median remaining life, a p10-p90
+band, and — new in v3 — the probability of failing within 7 and 30 days.
 
-Models and feature schemas live in `app/ai/models/survival_analysis/` and are
-loaded lazily on first call (kept in a module-level cache so subsequent calls
-are free). The training script `app/ai/datasets/train_frso_survival.py` writes
-them.
+Design (mirrors the training pipeline in
+`app/ai/models/survival_analysis/train_survival_models.py`):
+  * target learned from the real dataset: duration = days_until_next_maintenance,
+    event = (next_service_type == that component's service).
+  * features are the real snapshot columns; numeric features are z-scored with a
+    scaler stored in each `{component}_features.json`, so inference must apply the
+    SAME transform (see `_design_row`).
+  * servicing just resets `days_since_last_service` — no degradation history is
+    needed, which is why a single snapshot is enough.
 
-Feature extraction reuses the same Asset + SensorReading columns the
-CatBoost service already pulls, then maps them onto the column names the
-survival models were trained with.
+Warehouse reporting (`fleet_survival_summary`) fuses three questions, all
+answered from `pdm_batch_predictions` — the single source of truth for PdM
+output (populated by the daily scheduler + the asset-page "Run AI"
+trigger). asset_failure_predictions / asset_cost_predictions were the old
+on-demand-only tables, superseded by pdm_batch_predictions since the
+v7/decision-layer unification and never written to since — reading from
+them here silently produced an empty/stale critical-asset set and cost
+map regardless of how current the real predictions actually were:
+    PdM   -> WHICH assets are critical      (health_score)
+    this  -> WHICH component, P(fail) in 7 / 30 days
+    cost  -> WHAT the replacement costs     (estimated_cost_lkr)
+and returns the expected replacement spend for the next 7 and 30 days.
 """
 
 from __future__ import annotations
 
 import json
 import pickle
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.ai.services.vehicle_prediction_service import (
@@ -38,223 +52,364 @@ from app.ai.services.vehicle_prediction_service import (
 
 MODEL_DIR = Path(__file__).resolve().parents[1] / "models" / "survival_analysis"
 COMPONENTS = ("brake", "tire", "battery", "oil", "hydraulic")
+HORIZONS = (7, 30)
+
+COMPONENT_HEALTH_COL = {
+    "brake":     "brake_health_pct",
+    "tire":      "tire_health_pct",
+    "battery":   "battery_health_pct",
+    "oil":       "oil_life_pct",
+    "hydraulic": "hydraulic_health_pct",
+}
+
+# Static covariates that live on the Asset row.
+_ASSET_STATIC = [
+    "vehicle_age_years", "payload_capacity_kg",
+    "lifetime_service_count", "lifetime_breakdown_count",
+]
+# Dynamic covariates that live on the latest SensorReading.
+_SENSOR_NUMERIC = [
+    "odometer_km", "engine_hours_total", "vibration_rms_mm_s",
+    "engine_hours_since_last_service", "days_since_last_service",
+    "mileage_since_last_service_km", "active_fault_code_count", "sensor_fault_flag",
+    "payload_utilization_pct", "overload_events_30d", "downtime_hours_last_90d",
+    "start_stop_burden_30d", "engine_temp_avg_c", "coolant_temp_max_c",
+    "ambient_temp_avg_c", "ambient_humidity_avg_pct", "rainfall_mm_30d",
+    "rough_road_pct", "urban_route_pct", "port_route_pct",
+]
+_HEALTH_COLS = list(COMPONENT_HEALTH_COL.values())
+
+# Survival-probability levels behind the reported percentiles:
+#   p10_days -> earliest, "90% sure it still works past this day" -> S(t)=0.90
+#   median  -> S(t)=0.50 ;  p90_days -> latest, S(t)=0.10
+_PCTL = {"p10_days": 0.90, "median_days": 0.50, "p90_days": 0.10}
+
+# Ceiling on any single predicted percentile, grounded in the actual training
+# data: every component's target (days_until_next_maintenance) ranges 24-174
+# days in survival_snapshots_train.csv — the model has no evidence at all
+# beyond that. A Weibull AFT's time-scale is exponential in its covariates,
+# so even a plausible-looking "very healthy" input can extrapolate into
+# multi-YEAR predictions with no real support (observed live: a 100%-health
+# reading — never seen in training, whose max there was 99% — produced a
+# 36-year median for brake). Capped and flagged the same way
+# batch_prediction_service.py's regressor handles its own out-of-training
+# predictions via horizon_saturated.
+MAX_SURVIVAL_HORIZON_DAYS = 180
 
 
-# ── Model loading (cached) ────────────────────────────────────────────────────
+# ── Model + schema loading (cached) ───────────────────────────────────────────
 
-@lru_cache(maxsize=len(COMPONENTS))
-def _load_model(component: str):
-    """Load the .pkl model for one component. Cached for process lifetime."""
-    path = MODEL_DIR / f"{component}_aft.pkl"
+@lru_cache(maxsize=1)
+def _load_bundle() -> dict[str, Any]:
+    path = MODEL_DIR / "survival_bundle.pkl"
     if not path.exists():
         raise FileNotFoundError(
-            f"Survival model not found at {path}. "
-            f"Run `python -m app.ai.datasets.train_frso_survival` first."
+            f"Survival bundle not found at {path}. Train + deploy the v3 models "
+            f"(app/ai/models/survival_analysis/train_survival_models.py)."
         )
     with open(path, "rb") as f:
         return pickle.load(f)
 
+@lru_cache(maxsize=len(COMPONENTS))
+def _load_model(component: str):
+    return _load_bundle()["components"][component]["model"]
 
 @lru_cache(maxsize=len(COMPONENTS))
-def _load_feature_schema(component: str) -> dict[str, Any]:
-    path = MODEL_DIR / f"{component}_features.json"
-    if not path.exists():
-        raise FileNotFoundError(f"Feature schema not found at {path}.")
-    return json.loads(path.read_text())
+def _load_schema(component: str) -> dict[str, Any]:
+    return _load_bundle()["components"][component]["schema"]
 
 
 def warmup_survival_models() -> None:
-    """Eagerly load all per-component models. Called from app/main.py startup."""
+    """Eagerly load all five models + schemas (call from app startup)."""
     for c in COMPONENTS:
         _load_model(c)
-        _load_feature_schema(c)
+        _load_schema(c)
 
 
 # ── Feature extraction from DB rows ───────────────────────────────────────────
 
-def build_asset_feature_dict(db: Session, asset_id: str) -> dict[str, Any]:
-    """
-    Build the feature dict expected by the survival models from the asset's
-    latest SensorReading + Asset metadata.
+@lru_cache(maxsize=1)
+def _v11_snapshots() -> dict[str, Any]:
+    """Canonical v11 snapshot per asset_code — the dataset the PdM + cost models
+    were built on.
 
-    Returns covariates in the schema the training script saw (before one-hot
-    encoding). Categorical strings stay as strings — `_one_hot_align` handles
-    encoding to match the model's training columns.
+    Used as the survival feature source so the report stays coherent with the
+    PdM criticality: in the demo environment the live `sensor_readings` table can
+    drift out of sync with v11 (e.g. refreshed to healthy values while the stored
+    PdM predictions still reflect the degraded v11 state). Scoring the same v11
+    snapshot the rest of the pipeline uses keeps "critical asset → at-risk
+    component" consistent. Falls back to the live reading when an asset is absent.
+    """
+    path = MODEL_DIR / "v11_snapshots.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return {}
+
+
+def _clamp_health_pct(feat: dict[str, Any]) -> dict[str, Any]:
+    """Clamp health-percentage fields to their valid [0, 100] range, in place.
+
+    A small fraction of sensor_readings rows carry out-of-range values (seen
+    live: hydraulic_health_pct as low as -304.66) — a data-generation defect,
+    not a real reading; health percentages were never negative or above 100
+    in training either (observed range ~7-99%, see the module-level range
+    check in this file's tests). Left unclamped, a value like -119 pushes
+    the Weibull AFT's z-scored covariate far outside anything the model was
+    fit on, and — combined with the model's exponential AFT time-scale — can
+    produce wildly unrealistic multi-YEAR RUL predictions for components
+    that clamp to a plausible-looking value elsewhere in the same row.
+    Clamping here fixes both the model's input and the health_pct value
+    reported back to the API (previously shown to the client un-clamped,
+    e.g. "-119.4% health").
+    """
+    for col in _HEALTH_COLS:
+        v = feat.get(col)
+        if v is None:
+            continue
+        try:
+            feat[col] = max(0.0, min(100.0, float(v)))
+        except (TypeError, ValueError):
+            pass
+    return feat
+
+
+def build_asset_feature_dict(db: Session, asset_id: str) -> dict[str, Any]:
+    """Raw covariate dict (pre-transform) for one asset.
+
+    Prefers the canonical v11 snapshot (keyed by asset_code); otherwise builds
+    from the asset's latest SensorReading. Values may be Decimal/None/bool —
+    `_design_row` coerces them and fills any missing numeric with the training
+    mean, so a missing field stays neutral instead of collapsing to zero.
     """
     asset = _get_asset(db, asset_id)
     if not asset:
         raise ValueError("Asset not found")
+
+    snap = _v11_snapshots().get(getattr(asset, "asset_code", None) or "")
+    if snap:
+        feat = dict(snap)
+        feat.setdefault("vehicle_type", asset.vehicle_type or "__missing__")
+        feat.setdefault("vehicle_role", getattr(asset, "vehicle_role", None) or "__missing__")
+        return _clamp_health_pct(feat)
 
     reading = _get_latest_sensor_reading(db, asset_id)
     if not reading:
         raise ValueError("No sensor reading found for asset")
 
-    age_years = _to_float(asset.vehicle_age_years, default=1.0) or 1.0
-    engine_hours_total = _to_float(getattr(reading, "engine_hours_total", None))
-    hours_per_day = engine_hours_total / max(1.0, age_years * 365.0)
+    feat: dict[str, Any] = {}
+    for col in _ASSET_STATIC:
+        feat[col] = getattr(asset, col, None)
+    # vehicle_age fallback from manufacture_year if not stored on the asset
+    if feat.get("vehicle_age_years") in (None, 0):
+        my = getattr(asset, "manufacture_year", None)
+        if my:
+            feat["vehicle_age_years"] = max(0, datetime.utcnow().year - int(my))
+    for col in _SENSOR_NUMERIC + _HEALTH_COLS:
+        feat[col] = getattr(reading, col, None)
+    feat["vehicle_type"] = asset.vehicle_type or "__missing__"
+    feat["vehicle_role"] = getattr(asset, "vehicle_role", None) or "__missing__"
+    return _clamp_health_pct(feat)
 
-    return {
-        # numeric covariates (must match the training column names exactly)
-        "vehicle_age_years":        round(age_years, 2),
-        "engine_hours_total":       round(engine_hours_total, 1),
-        "hours_per_day":            round(hours_per_day, 2),
-        "payload_utilization_pct":  _to_float(getattr(reading, "payload_utilization_pct", None)),
-        "overload_events_30d":      _to_int(getattr(reading, "overload_events_30d", None)),
-        "avg_vibration_rms_mm_s":   _to_float(getattr(reading, "vibration_rms_mm_s", None)),
-        "avg_engine_temp_c":        _to_float(getattr(reading, "engine_temp_avg_c", None)),
-        "ambient_humidity_avg_pct": _to_float(getattr(reading, "ambient_humidity_avg_pct", None)),
-        "rough_road_pct":           _to_float(getattr(reading, "rough_road_pct", None)),
-        "port_route_pct":           _to_float(getattr(reading, "port_route_pct", None)),
-        "days_since_last_service":  _to_int(getattr(reading, "days_since_last_service", None)),
-        # categoricals (one-hot encoded at predict time to match training)
-        "vehicle_type":             asset.vehicle_type or "Other",
-        "vehicle_role":             asset.vehicle_role or asset.vehicle_type or "transport",
+
+def _design_row(feat: dict[str, Any], schema: dict[str, Any]) -> pd.DataFrame:
+    """Single-row design matrix matching training (z-score + one-hot + reindex)."""
+    cols = schema["numeric_cols"] + schema["categorical_cols"]
+    df = pd.DataFrame([{c: feat.get(c) for c in cols}])
+    for col, (mean, std) in schema["scaler"].items():
+        vals = pd.to_numeric(df.get(col), errors="coerce").fillna(mean)
+        df[col] = (vals - mean) / (std if std else 1.0)
+    for col in schema["categorical_cols"]:
+        df[col] = df[col].astype(str).fillna("__missing__")
+    df = pd.get_dummies(df, columns=schema["categorical_cols"], drop_first=True)
+    bool_cols = df.select_dtypes(include="bool").columns
+    df[bool_cols] = df[bool_cols].astype(int)
+    for col in schema["feature_cols"]:
+        if col not in df.columns:
+            df[col] = 0
+    return df[schema["feature_cols"]]
+
+
+# ── Core per-component scoring ────────────────────────────────────────────────
+
+def _score_component(feat: dict[str, Any], component: str,
+                     times: np.ndarray | None = None) -> dict[str, Any]:
+    model = _load_model(component)
+    schema = _load_schema(component)
+    X = _design_row(feat, schema)
+
+    horizon = np.array(HORIZONS, dtype=float)
+    sf_h = model.predict_survival_function(X, times=horizon).iloc[:, 0].values
+    surv = {int(h): float(np.clip(sf_h[i], 0, 1)) for i, h in enumerate(HORIZONS)}
+
+    pct = {}
+    for name, p in _PCTL.items():
+        try:
+            pct[name] = round(float(model.predict_percentile(X, p=p).iloc[0]), 2)
+        except Exception:
+            pct[name] = float("nan")
+
+    # Cap each percentile independently at the trained horizon — see
+    # MAX_SURVIVAL_HORIZON_DAYS above. horizon_capped is set if any of them
+    # needed it, so the caller/UI can flag the prediction as "beyond the
+    # model's reliable range" rather than presenting a fake-precise number.
+    horizon_capped = False
+    for name, value in pct.items():
+        if value == value and value > MAX_SURVIVAL_HORIZON_DAYS:  # value==value filters NaN
+            pct[name] = float(MAX_SURVIVAL_HORIZON_DAYS)
+            horizon_capped = True
+
+    health = feat.get(schema["health_col"])
+    out = {
+        "component":      component,
+        "health_pct":     _to_float(health) if health is not None else None,
+        "survival_7d":    surv[7],
+        "survival_30d":   surv[30],
+        "fail_prob_7d":   round(1.0 - surv[7], 4),
+        "fail_prob_30d":  round(1.0 - surv[30], 4),
+        "median_days":    pct["median_days"],
+        "p10_days":       pct["p10_days"],
+        "p90_days":       pct["p90_days"],
+        "horizon_capped": horizon_capped,
     }
+    if times is not None:
+        curve = model.predict_survival_function(X, times=times).iloc[:, 0].values
+        out["curve"] = [
+            {"day": int(t), "survival_prob": round(float(s), 4)}
+            for t, s in zip(times, curve)
+        ]
+    return out
 
 
-def _one_hot_align(features: dict[str, Any], schema: dict[str, Any]) -> pd.DataFrame:
-    """
-    Convert a feature dict into a single-row DataFrame whose columns exactly
-    match the model's training schema. Missing one-hot columns are filled with 0.
-    """
-    raw = pd.DataFrame([features])
-    one_hot_cols = schema.get("categorical_one_hot", [])
-    encoded = pd.get_dummies(raw, columns=one_hot_cols, drop_first=True)
+# ── Public: single-component curve (asset endpoint — backward compatible) ─────
 
-    # bool columns from pd.get_dummies → int (lifelines wants numeric)
-    bool_cols = encoded.select_dtypes(include="bool").columns
-    encoded[bool_cols] = encoded[bool_cols].astype(int)
-
-    expected = schema["feature_cols"]
-    for col in expected:
-        if col not in encoded.columns:
-            encoded[col] = 0
-    return encoded[expected]
-
-
-# ── Public prediction API ─────────────────────────────────────────────────────
-
-def predict_survival_curve(
-    db: Session,
-    asset_id: str,
-    component: str,
-    horizon_days: int = 180,
-    step_days: int = 7,
-) -> dict[str, Any]:
-    """
-    Predict the survival curve S(t) for one component of one asset over the
-    next `horizon_days` days, sampled every `step_days` days.
-
-    Returns:
-        {
-            "asset_id":     "SLW0001",
-            "component":    "brake",
-            "median_days":  142.3,           # p50 RUL
-            "p10_days":      71.1,           # 90% chance of failing after this
-            "p90_days":     245.7,           # 10% chance of failing after this
-            "curve": [
-                {"day":   0, "survival_prob": 1.000},
-                {"day":   7, "survival_prob": 0.987},
-                ...
-                {"day": 180, "survival_prob": 0.422},
-            ],
-        }
-    """
+def predict_survival_curve(db: Session, asset_id: str, component: str,
+                           horizon_days: int = 180, step_days: int = 7) -> dict[str, Any]:
     if component not in COMPONENTS:
         raise ValueError(f"Unknown component '{component}'. Expected one of {COMPONENTS}.")
-
-    model  = _load_model(component)
-    schema = _load_feature_schema(component)
-
-    features = build_asset_feature_dict(db, asset_id)
-    x_row    = _one_hot_align(features, schema)
-
+    feat = build_asset_feature_dict(db, asset_id)
     times = np.arange(0, horizon_days + 1, step_days, dtype=float)
-    survival = model.predict_survival_function(x_row, times=times)
-    # predict_survival_function returns a DataFrame indexed by time, columns = rows
-    s_curve = survival.iloc[:, 0].values
-
-    p10 = float(model.predict_percentile(x_row, p=0.10).iloc[0])
-    p50 = float(model.predict_percentile(x_row, p=0.50).iloc[0])
-    p90 = float(model.predict_percentile(x_row, p=0.90).iloc[0])
-
-    return {
-        "asset_id":   asset_id,
-        "component":  component,
-        "median_days": round(p50, 2),
-        "p10_days":    round(p10, 2),
-        "p90_days":    round(p90, 2),
-        "curve": [
-            {"day": int(t), "survival_prob": round(float(s), 4)}
-            for t, s in zip(times, s_curve)
-        ],
-    }
+    scored = _score_component(feat, component, times=times)
+    scored["asset_id"] = asset_id
+    return scored
 
 
-def predict_all_components(
-    db: Session,
-    asset_id: str,
-    horizon_days: int = 180,
-    step_days: int = 14,
-) -> dict[str, Any]:
-    """
-    Predict survival curves for all 5 components of one asset in a single call.
+# ── Public: all five components for one asset (asset endpoint — backward compat) ─
 
-    Useful for the asset-detail screen ("show me the RUL for every part") and
-    as the input source for the scheduling optimiser ("which assets are most
-    at risk in the next 2 weeks?").
-    """
+def predict_all_components(db: Session, asset_id: str,
+                           horizon_days: int = 180, step_days: int = 14) -> dict[str, Any]:
     asset = _get_asset(db, asset_id)
     if not asset:
         raise ValueError("Asset not found")
 
+    feat = build_asset_feature_dict(db, asset_id)
+    times = np.arange(0, horizon_days + 1, step_days, dtype=float)
+
     components_out: list[dict[str, Any]] = []
     soonest_median = float("inf")
     soonest_component: str | None = None
-
     for c in COMPONENTS:
         try:
-            result = predict_survival_curve(db, asset_id, c, horizon_days, step_days)
+            res = _score_component(feat, c, times=times)
+            res["asset_id"] = asset_id
         except Exception as e:
             components_out.append({"component": c, "error": str(e)})
             continue
-
-        components_out.append(result)
-        if result["median_days"] < soonest_median:
-            soonest_median   = result["median_days"]
-            soonest_component = c
+        components_out.append(res)
+        md = res["median_days"]
+        if md == md and md < soonest_median:   # md == md filters NaN
+            soonest_median, soonest_component = md, c
 
     return {
-        "asset_id":           asset_id,
-        "horizon_days":       horizon_days,
-        "step_days":          step_days,
-        "soonest_component":  soonest_component,
+        "asset_id":            asset_id,
+        "horizon_days":        horizon_days,
+        "step_days":           step_days,
+        "soonest_component":   soonest_component,
         "soonest_median_days": round(soonest_median, 2) if soonest_component else None,
-        "components":         components_out,
+        "components":          components_out,
     }
 
 
-def fleet_survival_summary(
-    db: Session,
-    max_assets: int = 12,
-    horizon_days: int = 180,
-    asset_codes: list[str] | None = None,
-) -> dict[str, Any]:
-    """
-    Fleet-level survival aggregation over the warehouse's most at-risk assets.
+# ── Warehouse fleet summary (the warehouse report — new in v3) ────────────────
 
-    When `asset_codes` is given, those exact assets are scored (used by the
-    warehouse report so the §4.8 page matches its critical-asset list). Otherwise
-    the `max_assets` lowest-health assets (by latest failure-prediction health
-    score) are picked. For each asset all 5 component models are run and
-    aggregated into:
-      - component_summary: per-component avg median RUL + at-risk (≤30d / ≤90d) counts
-      - watchlist:         each asset's soonest-failing component, sorted by RUL
+def _p_service(fail_probs: list[float]) -> float:
+    """P(at least one of the five components fails within the horizon),
+    under the assumption that the components' *residual* failure risk is
+    independent once conditioned on the shared feature snapshot.
 
-    Drives both the warehouse report's §4.8 page and the
-    GET /survival/warehouse/summary endpoint.
+    This is a weaker assumption than it looks: all five components' hazards
+    are scored from the same `feat` dict (age, mileage, usage intensity,
+    etc. — see build_asset_feature_dict), so the dominant source of
+    correlation between components — an older, harder-used vehicle running
+    elevated risk across the board — is already captured through those
+    shared covariates before this function ever runs. What's assumed
+    independent is only the *leftover* randomness after that conditioning,
+    not the raw component failures.
+
+    That residual independence assumption can still be wrong — e.g. a
+    single event (a crash, a flood) that damages several systems at once
+    isn't in the feature set — and where it is wrong, positive residual
+    correlation makes this formula an overestimate of the true joint
+    probability (see _p_service_bounds for the model-free bounds this
+    point estimate always falls inside, regardless of the true correlation
+    structure). Callers that need the honest range rather than this single
+    number should use _p_service_bounds instead/in addition.
     """
-    from app.models import Asset, AssetFailurePrediction
+    return float(1.0 - np.prod([1.0 - p for p in fail_probs]))
+
+
+def _p_service_bounds(fail_probs: list[float]) -> tuple[float, float]:
+    """Fréchet/Bonferroni bounds on P(at least one component fails) — the
+    range the true joint probability must fall in for ANY correlation
+    structure between components, independent or not. Unlike _p_service,
+    nothing here is an assumption:
+      - lower bound: P(union) can never be less than its largest member
+        (that component failing already puts you in the union).
+      - upper bound: Boole's inequality, P(union) <= sum(P(each)).
+    Useful as an honest uncertainty range around the _p_service point
+    estimate rather than a replacement for it — we don't have real
+    component-failure correlation data to compute the true value.
+    """
+    if not fail_probs:
+        return 0.0, 0.0
+    lower = float(max(fail_probs))
+    upper = float(min(1.0, sum(fail_probs)))
+    return lower, upper
+
+
+def _latest_cost_map(db: Session, codes: list[str]) -> dict[str, float]:
+    """pdm_batch_predictions has exactly one (upserted) row per asset, so —
+    unlike the old asset_cost_predictions table this replaced — there's no
+    "latest of several rows" ambiguity to resolve with DISTINCT ON."""
+    if not codes:
+        return {}
+    from sqlalchemy import bindparam
+    rows = db.execute(text("""
+        SELECT a.asset_code, p.estimated_cost_lkr
+        FROM pdm_batch_predictions p
+        JOIN assets a ON a.id = p.asset_id
+        WHERE a.asset_code IN :codes AND p.status = 'ok'
+    """).bindparams(bindparam("codes", expanding=True)), {"codes": codes}).fetchall()
+    return {r[0]: (float(r[1]) if r[1] is not None else None) for r in rows}
+
+
+def fleet_survival_summary(db: Session, max_assets: int = 25,
+                           horizon_days: int = 180,
+                           asset_codes: list[str] | None = None) -> dict[str, Any]:
+    """Warehouse-level survival + cost aggregation over the critical set.
+
+    * Critical set comes from the PdM pipeline (pdm_batch_predictions) — either
+      the explicit `asset_codes` or the `max_assets` lowest-health assets.
+    * Each asset is scored on all five components for P(fail) in 7 / 30 days.
+    * Replacement cost is read from the same pdm_batch_predictions row, and
+      the expected spend is  P(service within Nd) * cost  summed over the fleet.
+
+    Returns the new warehouse-report structure PLUS the legacy `component_summary`
+    / `watchlist` keys so existing consumers keep working.
+    """
+    from app.models import Asset, PdmBatchPrediction
 
     if asset_codes:
         rows = (
@@ -265,58 +420,141 @@ def fleet_survival_summary(
     else:
         rows = (
             db.query(Asset.asset_code, Asset.id)
-            .join(AssetFailurePrediction, Asset.id == AssetFailurePrediction.asset_id)
-            .filter(AssetFailurePrediction.health_score.isnot(None))
-            .order_by(AssetFailurePrediction.health_score.asc())
+            .join(PdmBatchPrediction, Asset.id == PdmBatchPrediction.asset_id)
+            .filter(PdmBatchPrediction.status == "ok", PdmBatchPrediction.health_score.isnot(None))
+            .order_by(PdmBatchPrediction.health_score.asc())
             .limit(max_assets)
             .all()
         )
 
+    codes = [r[0] for r in rows]
+    cost_map = _latest_cost_map(db, codes)
+
     comp_rul: dict[str, list] = {c: [] for c in COMPONENTS}
-    comp_30 = {c: 0 for c in COMPONENTS}
-    comp_90 = {c: 0 for c in COMPONENTS}
-    watchlist: list = []
+    comp_p7: dict[str, list] = {c: [] for c in COMPONENTS}
+    comp_p30: dict[str, list] = {c: [] for c in COMPONENTS}
+    at_risk_7 = {c: 0 for c in COMPONENTS}
+    at_risk_30 = {c: 0 for c in COMPONENTS}
+    assets_out: list[dict[str, Any]] = []
+    watchlist: list[dict[str, Any]] = []
+    exp_spend_7 = exp_spend_30 = 0.0
     analyzed = 0
 
     for code, aid in rows:
         try:
-            res = predict_all_components(db, str(aid), horizon_days=horizon_days, step_days=14)
+            feat = build_asset_feature_dict(db, str(aid))
+            comps = {c: _score_component(feat, c) for c in COMPONENTS}
         except Exception:
             continue
+
         analyzed += 1
-        for comp in res.get("components", []):
-            if "error" in comp:
-                continue
-            c, md = comp["component"], comp["median_days"]
-            comp_rul[c].append(md)
-            if md <= 30:
-                comp_30[c] += 1
-            if md <= 90:
-                comp_90[c] += 1
-        sc, sm = res.get("soonest_component"), res.get("soonest_median_days")
-        if sc and sm is not None:
+        
+        f7 = [comps[c]["fail_prob_7d"] for c in COMPONENTS]
+        f30 = [comps[c]["fail_prob_30d"] for c in COMPONENTS]
+        ps7, ps30 = _p_service(f7), _p_service(f30)
+        ps7_bounds, ps30_bounds = _p_service_bounds(f7), _p_service_bounds(f30)
+        cost = cost_map.get(code)
+        e7 = ps7 * cost if cost is not None else None
+        e30 = ps30 * cost if cost is not None else None
+        if e7:
+            exp_spend_7 += e7
+        if e30:
+            exp_spend_30 += e30
+
+        # Risk thresholds
+        fp_30 = ps30
+        if fp_30 > 0.6: risk = "Critical"
+        elif fp_30 > 0.3: risk = "High"
+        elif fp_30 > 0.1: risk = "Medium"
+        else: risk = "Low"
+
+        soonest = min(comps.values(),
+                      key=lambda d: (np.inf if d["median_days"] != d["median_days"] else d["median_days"]))
+        for c in COMPONENTS:
+            md = comps[c]["median_days"]
+            if md == md:
+                comp_rul[c].append(md)
+            # for the bar chart
+            comp_p7[c].append(comps[c]["fail_prob_7d"])
+            comp_p30[c].append(comps[c]["fail_prob_30d"])
+            
+        c_soonest = soonest["component"]
+        rul = soonest["median_days"]
+        if rul == rul:
+            if rul <= 7:
+                at_risk_7[c_soonest] += 1
+            if rul <= 30:
+                at_risk_30[c_soonest] += 1
+
+        assets_out.append({
+            "asset":              code,
+            "components":         {c: {"fail_prob_7d": comps[c]["fail_prob_7d"],
+                                       "fail_prob_30d": comps[c]["fail_prob_30d"],
+                                       "median_days": comps[c]["median_days"],
+                                       "health_pct": comps[c]["health_pct"]}
+                                  for c in COMPONENTS},
+            "soonest_component":  soonest["component"],
+            "soonest_median_days": soonest["median_days"],
+            "p_service_7d":       round(ps7, 4),
+            "p_service_30d":      round(ps30, 4),
+            # Model-free bounds (see _p_service_bounds) — the true joint
+            # probability falls in this range regardless of how correlated
+            # the components' failures actually are. p_service_Xd is a
+            # point estimate inside it, not a substitute for it.
+            "p_service_7d_bounds":  [round(ps7_bounds[0], 4), round(ps7_bounds[1], 4)],
+            "p_service_30d_bounds": [round(ps30_bounds[0], 4), round(ps30_bounds[1], 4)],
+            "est_cost_lkr":       cost,
+            "exp_cost_7d_lkr":    round(e7, 2) if e7 is not None else None,
+            "exp_cost_30d_lkr":   round(e30, 2) if e30 is not None else None,
+        })
+        if soonest["median_days"] == soonest["median_days"] and soonest["median_days"] < 30:
             watchlist.append({
-                "asset": code,
-                "component": sc.title(),
-                "rul_days": round(float(sm), 1),
-                "risk": "High" if sm <= 45 else "Medium" if sm <= 90 else "Low",
+                "asset":     code,
+                "component": soonest["component"].title(),
+                "rul_days":  round(float(soonest["median_days"]), 1),
+                "risk":      "High" if ps30 >= 0.5 else "Medium" if ps30 >= 0.2 else "Low",
             })
 
-    component_summary = [
-        {
-            "component": c.title(),
-            "avg_rul_days": round(sum(v) / len(v), 1) if v else None,
-            "at_risk_30d": comp_30[c],
-            "at_risk_90d": comp_90[c],
+    component_summary = []
+    for c, v in comp_rul.items():
+        # 7-day view: only assets where this SPECIFIC component's median_days <= 7
+        assets_7d = [a for a in assets_out if a["components"][c]["median_days"] == a["components"][c]["median_days"] and a["components"][c]["median_days"] <= 7]
+        if assets_7d:
+            c_p7 = [a["components"][c]["fail_prob_7d"] for a in assets_7d]
+            avg_7d = sum(c_p7) / len(c_p7)
+        else:
+            avg_7d = 0.0
+
+        # 30-day view: average across ALL soonest failing assets (all 25 critical assets)
+        if assets_out:
+            c_p30 = [a["components"][c]["fail_prob_30d"] for a in assets_out]
+            avg_30d = sum(c_p30) / len(c_p30)
+        else:
+            avg_30d = 0.0
+
+        component_summary.append({
+            "component":     c.title(),
+            "avg_rul_days":  round(sum(v) / len(v), 1) if v else None,
+            # average failure probability across the at-risk assets
+            "avg_fail_prob_7d":  round(avg_7d, 4),
+            "avg_fail_prob_30d": round(avg_30d, 4),
+            # expected number of failures = sum of ALL per-asset probabilities
+            "expected_failures_7d":  round(sum(comp_p7[c]), 2),
+            "expected_failures_30d": round(sum(comp_p30[c]), 2),
+            "at_risk_7d":    at_risk_7[c],
+            "at_risk_30d":   at_risk_30[c],
             "assets_scored": len(v),
-        }
-        for c, v in comp_rul.items()
-    ]
-    watchlist.sort(key=lambda w: w["rul_days"])
+        })
+    watchlist.sort(key=lambda w: (w["rul_days"] is None, w["rul_days"]))
 
     return {
-        "assets_analyzed": analyzed,
-        "horizon_days": horizon_days,
-        "component_summary": component_summary,
-        "watchlist": watchlist[:15],
+        "assets_analyzed":     analyzed,
+        "horizon_days":        horizon_days,
+        "currency":            "LKR",
+        "expected_spend_7d":   round(exp_spend_7, 2),
+        "expected_spend_30d":  round(exp_spend_30, 2),
+        "component_summary":   component_summary,
+        "assets":              assets_out,      # per-asset 5-component 7/30d + cost
+        "watchlist":           watchlist[:max_assets],
+        "generated_at":        datetime.utcnow().isoformat() + "Z",
     }

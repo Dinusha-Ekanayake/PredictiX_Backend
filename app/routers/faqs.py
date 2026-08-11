@@ -1,10 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
+from sqlalchemy.orm import Session
 
-from app.deps import get_current_user
+from app.deps import get_current_user, is_admin_role, get_db
 from app.db.supabase_client import supabase
+from app.services.notification_service import NotificationService
 
 router = APIRouter(prefix="/faqs", tags=["FAQs"])
 
@@ -42,8 +44,13 @@ def list_faqs():
 
 
 @router.post("/", response_model=FaqOut)
-def create_faq(payload: FaqCreate, current_user: object = Depends(get_current_user)):
-    if getattr(current_user, "role", "") != "admin":
+def create_faq(
+    payload: FaqCreate,
+    background_tasks: BackgroundTasks,
+    current_user: object = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if not is_admin_role(current_user):
         raise HTTPException(status_code=403, detail="Only admins can add FAQs")
 
     response = supabase.from_("faqs").insert({
@@ -55,12 +62,23 @@ def create_faq(payload: FaqCreate, current_user: object = Depends(get_current_us
 
     if not response.data:
         raise HTTPException(status_code=500, detail="Failed to insert FAQ")
+
+    creator_name = getattr(current_user, "full_name", "Administrator")
+    background_tasks.add_task(
+        NotificationService.notify_on_new_faq,
+        db,
+        payload.question.strip(),
+        payload.answer.strip(),
+        payload.category,
+        creator_name
+    )
+
     return response.data
 
 
 @router.put("/{faq_id}", response_model=FaqOut)
 def update_faq(faq_id: str, payload: FaqUpdate, current_user: object = Depends(get_current_user)):
-    if getattr(current_user, "role", "") != "admin":
+    if not is_admin_role(current_user):
         raise HTTPException(status_code=403, detail="Only admins can update FAQs")
 
     updates = {k: v for k, v in payload.model_dump().items() if v is not None}
@@ -80,7 +98,7 @@ def update_faq(faq_id: str, payload: FaqUpdate, current_user: object = Depends(g
 
 @router.delete("/{faq_id}")
 def delete_faq(faq_id: str, current_user: object = Depends(get_current_user)):
-    if getattr(current_user, "role", "") != "admin":
+    if not is_admin_role(current_user):
         raise HTTPException(status_code=403, detail="Only admins can delete FAQs")
 
     supabase.from_("faqs").delete().eq("id", faq_id).execute()

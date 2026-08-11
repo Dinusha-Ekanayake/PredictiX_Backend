@@ -47,6 +47,19 @@ def _normalize_priority(value: Optional[str]) -> Optional[str]:
     return v if v in ALLOWED_PRIORITIES else None
 
 
+def _priority_label(value: object) -> Optional[str]:
+    """Accept both the current string priority output and older dict shapes."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return (
+            value.get("predicted_label")
+            or value.get("priority")
+            or value.get("label")
+        )
+    return None
+
+
 def _normalize_category(value: Optional[str]) -> Optional[str]:
     if not value:
         return None
@@ -97,10 +110,16 @@ def get_owned_ticket_or_none(
     )
 
 
-def user_can_view_ticket(ticket: Ticket, user_id: UUID) -> bool:
-    """A user may only view tickets they created — not others' tickets,
-    even if assigned to them."""
-    return ticket.created_by == user_id
+def user_can_view_ticket(
+    ticket: Ticket, user_id: UUID, warehouse_id: Optional[UUID] = None
+) -> bool:
+    """A user may view (and comment on) a ticket they created, are assigned
+    to, or that belongs to their own warehouse — matches the visibility
+    rule in app.routers.tickets.get_ticket. Editing stays owner-only, see
+    get_owned_ticket_or_none."""
+    if warehouse_id is not None and ticket.warehouse_id == warehouse_id:
+        return True
+    return ticket.created_by == user_id or ticket.assigned_to == user_id
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +139,7 @@ def build_user_tickets_query(
     db: Session,
     *,
     user_id: UUID,
+    warehouse_id: Optional[UUID] = None,
     status: Optional[str] = None,
     priority: Optional[str] = None,
     asset_id: Optional[UUID] = None,
@@ -129,10 +149,13 @@ def build_user_tickets_query(
     sort_by: str = "created_at",
     sort_dir: str = "desc",
 ):
-    """Build a SQLAlchemy query scoped to the tickets the user CREATED.
-    A user only sees their own tickets — never tickets created by others,
-    even if assigned to them."""
-    q = db.query(Ticket).filter(Ticket.created_by == user_id)
+    """Build a SQLAlchemy query scoped to tickets the user can see: ones
+    they created or are assigned to, plus every ticket in their own
+    warehouse (matches user_can_view_ticket / app.routers.tickets.list_tickets)."""
+    visibility = [Ticket.created_by == user_id, Ticket.assigned_to == user_id]
+    if warehouse_id is not None:
+        visibility.append(Ticket.warehouse_id == warehouse_id)
+    q = db.query(Ticket).filter(or_(*visibility))
 
     if status:
         q = q.filter(Ticket.status == status)
@@ -228,7 +251,7 @@ def _safe_log(prefix: str, exc: Exception) -> None:
     print(f"[USER-TICKETS][{prefix}] {type(exc).__name__}: {exc}", flush=True)
 
 
-def predict_priority_safely(title: str, description: str) -> Optional[dict]:
+def predict_priority_safely(title: str, description: str) -> Optional[object]:
     """Run the priority classifier. Returns None on any failure."""
     try:
         from app.ai.services.ticket_priority_service import predict_ticket_priority
@@ -313,8 +336,9 @@ def preview_user_ticket(
 
     try:
         from app.ai.services.ticket_priority_service import predict_ticket_priority
+        # predict_ticket_priority returns a plain string ("High"/"Medium"/"Low").
         result = predict_ticket_priority(title=title, description=description)
-        out["predicted_priority"] = _normalize_priority(result["predicted_label"])
+        out["predicted_priority"] = _normalize_priority(result)
     except Exception as exc:  # noqa: BLE001
         _safe_log("preview.priority", exc)
         out["errors"]["priority"] = str(exc)
@@ -381,7 +405,8 @@ def create_user_ticket(
     if use_ai:
         priority_result = predict_priority_safely(title, description)
         if priority_result:
-            predicted_priority = _normalize_priority(priority_result["predicted_label"])
+            # predict_priority_safely returns a plain string ("High"/"Medium"/"Low").
+            predicted_priority = _normalize_priority(priority_result)
 
         category_result = predict_category_safely(title, description)
         if category_result:

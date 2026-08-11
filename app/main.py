@@ -1,17 +1,29 @@
 """PredictiX API — FastAPI application entry point."""
 from __future__ import annotations
 
-import joblib
-import logging
 import os
-import pickle
-import warnings
+
+# Force HuggingFace libraries offline BEFORE any of them can be imported, so no
+# model weights are ever downloaded/loaded from the Hub at runtime. Only the
+# online Gradio Space (plain HTTP) and the local PdM/cost/survival .pkl models
+# (loaded via joblib/pickle, not the Hub) are used. These are hard defaults;
+# they can still be overridden by an explicit environment value if ever needed.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
+import json
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from fastapi import FastAPI
+from apscheduler.triggers.cron import CronTrigger
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from sqlalchemy.exc import InterfaceError, OperationalError
 from fastapi.middleware.cors import CORSMiddleware
+
+from app.core.config import allowed_frontend_origins
 
 # ─── Routers ──────────────────────────────────────────────────────────────────
 from .routers.admin_dashboard import admin_dashboard_router
@@ -21,6 +33,8 @@ from .routers.asset_assignments import router as asset_assignments_router
 from .routers.asset_documents import router as asset_documents_router
 from .routers.asset_status_history import router as asset_status_history_router
 from .routers.asset_summaries import router as asset_summaries_router
+from .routers.ticket_summaries import router as ticket_summaries_router
+from .routers.asset_component_rul import router as asset_component_rul_router
 from .routers.assets import router as assets_router
 from .routers.auth import router as auth_router
 from .routers.db_debug import router as db_debug_router
@@ -32,7 +46,6 @@ from .routers.prediction_explanations import router as prediction_explanations_r
 from .routers.predictions import router as predictions_router
 from .routers.profile import router as profiles_router
 from .routers.report_sources import router as report_sources_router
-from .routers.reports import router as reports_router
 from .routers.sensor_readings import router as sensor_readings_router
 from .routers.ticket_attachments import router as ticket_attachments_router
 from .routers.ticket_comments import router as ticket_comments_router
@@ -45,7 +58,8 @@ from .routers.warehouse_dashboard import warehouse_dashboard_router
 from .routers.warehouses import router as warehouses_router
 from .routers.batch_predictions import router as batch_predictions_router
 from .routers.websockets import router as websockets_router
-from .routers.asset_reports import router as asset_reports_router 
+from .routers.asset_reports import router as asset_reports_router, reports_router
+from .routers.warmup import router as warmup_router
 
 # Sharada — user-role self-service profile (/user-profile)
 from .routers.user_profile import router as user_profile_router
@@ -55,39 +69,160 @@ from .routers.user_tickets import router as user_tickets_router
 from .routers.survival_predictions import router as survival_predictions_router
 
 # ─── ML warmup ────────────────────────────────────────────────────────────────
-from app.ai.services.asset_summary_service import warmup_asset_summary_model
+# Asset & ticket summaries run on HF Spaces (online) — nothing to warm up here.
 from app.ai.services.ticket_categorization_service import warmup_ticket_categorizer
 from app.ai.services.ticket_priority_service import warmup_ticket_priority
+
+# ─── Cost model ───────────────────────────────────────────────────────────────
+from app.ai.models.cost_estimation_model.breakdown_cost_model import load_breakdown_bundle
 
 log = logging.getLogger("predictix")
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_DIR = BASE_DIR / "ai" / "models"
 
-CLF_MODEL_PATH    = MODEL_DIR / "pdm_classifier_model" / "predictix_xgboost_classifier_v6.pkl"
-CLF_FEATURES_PATH = MODEL_DIR / "pdm_classifier_model" / "maintenance_classifier_features.pkl"
-REG_MODEL_PATH    = MODEL_DIR / "pdm_regressor_model"  / "predictix_pm_model_v5.pkl"
-REG_FEATURES_PATH = MODEL_DIR / "pdm_regressor_model"  / "regression_selected_features.pkl"
+# v7 LightGBM boosters (current). Old v5/v6 CatBoost/XGBoost bundles are kept
+# on disk under each model folder's old/ subdirectory as an archive — not
+# loaded anywhere in the app.
+CLF_MODEL_PATH = MODEL_DIR / "pdm_classifier_model" / "predictix_pdm_classifier_v7.txt"
+REG_MODEL_PATH = MODEL_DIR / "pdm_regressor_model"  / "predictix_pdm_regressor_v7.txt"
+CLF_DECISION_LOG_PATH = MODEL_DIR / "pdm_classifier_model" / "classifier_v7_decision_log.json"
+REG_DECISION_LOG_PATH = MODEL_DIR / "pdm_regressor_model"  / "regressor_v7_decision_log.json"
 
-clf_model = None
+# Cost-estimation (breakdown_cost_model.py's own MODEL_PATH) and survival
+# analysis (survival_service.py's MODEL_DIR / "survival_bundle.pkl") each
+# have a real decision-log/training-report on disk already, same as
+# classifier/regressor — they just weren't being registered into
+# model_registry, so there was no single queryable place recording which
+# version of *every* PdM model family is actually live at once.
+COST_MODEL_PATH = MODEL_DIR / "cost_estimation_model" / "predictix_breakdown_cost_model_v5.pkl"
+COST_DECISION_LOG_PATH = MODEL_DIR / "cost_estimation_model" / "predictix_breakdown_cost_model_v5_log.json"
+SURVIVAL_MODEL_PATH = MODEL_DIR / "survival_analysis" / "survival_bundle.pkl"
+SURVIVAL_DECISION_LOG_PATH = MODEL_DIR / "survival_analysis" / "training_report.json"
+
+# Same names used as the model_registry.model_name keys throughout the app —
+# kept in sync with app.ai.services.vehicle_prediction_service.
+CLASSIFIER_MODEL_NAME = "pdm_classifier_model"
+REGRESSOR_MODEL_NAME = "pdm_regressor_model"
+COST_MODEL_NAME = "cost_estimation_model"
+SURVIVAL_MODEL_NAME = "survival_analysis_model"
+
+clf_model = None            # LgbModelBundle
 clf_features: list = []
 clf_threshold: float = 0.5
 clf_categorical_cols: list = []
-reg_model = None
+reg_model = None            # LgbModelBundle
 reg_features: list = []
+reg_categorical_cols: list = []
+
+# ─── Cost model global ────────────────────────────────────────────────────────
+breakdown_cost_bundle: dict | None = None
 
 scheduler: BackgroundScheduler | None = None
 _model_load_lock = __import__('threading').Lock()
 
 
-def _load_pickle(path: Path):
-    with open(path, "rb") as fh:
-        return pickle.load(fh)
+def _load_decision_log(path: Path) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+def _json_safe(value):
+    """Recursively replace NaN/Infinity floats with None. Postgres's
+    json/jsonb columns reject literal NaN ("invalid input syntax for type
+    json") even though Python's json module happily reads/writes it —
+    training_report.json's weibull_rho is NaN for every component, which
+    would otherwise break every metrics upsert for the survival model."""
+    if isinstance(value, float):
+        return None if (value != value or value in (float("inf"), float("-inf"))) else value
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    return value
+
+
+def _upsert_model_registry(
+    db, model_name: str, model_type: str, version: str, artifact_path: Path,
+    metrics: dict, framework: str = "lightgbm",
+) -> None:
+    from app.models import ModelRegistry
+
+    metrics = _json_safe(metrics)
+    existing = (
+        db.query(ModelRegistry)
+        .filter(ModelRegistry.model_name == model_name, ModelRegistry.version == version)
+        .first()
+    )
+    if existing:
+        existing.framework = framework
+        existing.artifact_path = str(artifact_path)
+        existing.metrics = metrics
+        existing.is_active = True
+    else:
+        db.add(ModelRegistry(
+            model_name=model_name,
+            model_type=model_type,
+            version=version,
+            framework=framework,
+            artifact_path=str(artifact_path),
+            metrics=metrics,
+            is_active=True,
+        ))
+    # Deactivate any other version of this model so is_active always points
+    # at exactly the model generation currently loaded in memory.
+    db.query(ModelRegistry).filter(
+        ModelRegistry.model_name == model_name, ModelRegistry.version != version
+    ).update({"is_active": False})
+
+
+def _register_active_models() -> None:
+    from app.db.session import SessionLocal
+
+    clf_log = _load_decision_log(CLF_DECISION_LOG_PATH)
+    reg_log = _load_decision_log(REG_DECISION_LOG_PATH)
+    cost_log = _load_decision_log(COST_DECISION_LOG_PATH)
+    survival_log = _load_decision_log(SURVIVAL_DECISION_LOG_PATH)
+
+    db = SessionLocal()
+    try:
+        if clf_log:
+            _upsert_model_registry(
+                db, CLASSIFIER_MODEL_NAME, "failure_classification",
+                str(clf_log.get("version", "unknown")), CLF_MODEL_PATH, clf_log,
+            )
+        if reg_log:
+            _upsert_model_registry(
+                db, REGRESSOR_MODEL_NAME, "maintenance_regression",
+                str(reg_log.get("version", "unknown")), REG_MODEL_PATH, reg_log,
+            )
+        if cost_log:
+            _upsert_model_registry(
+                db, COST_MODEL_NAME, "cost_estimation",
+                str(cost_log.get("version", "unknown")), COST_MODEL_PATH, cost_log,
+                framework=str(cost_log.get("predictor", "catboost")).lower(),
+            )
+        if survival_log:
+            _upsert_model_registry(
+                db, SURVIVAL_MODEL_NAME, "component_survival_analysis",
+                str(survival_log.get("version", "unknown")), SURVIVAL_MODEL_PATH, survival_log,
+                framework="lifelines-weibull-aft",
+            )
+        db.commit()
+    except Exception:
+        db.rollback()
+        log.exception("Failed to register active PdM models in model_registry")
+    finally:
+        db.close()
 
 
 def _load_pdm_models():
     """Lazily load heavy PdM models (thread-safe, idempotent)."""
-    global clf_model, clf_features, clf_threshold, clf_categorical_cols, reg_model, reg_features
+    global clf_model, clf_features, clf_threshold, clf_categorical_cols, \
+           reg_model, reg_features, reg_categorical_cols
     if clf_model is not None and reg_model is not None:
         return
 
@@ -95,20 +230,28 @@ def _load_pdm_models():
         if clf_model is not None and reg_model is not None:
             return
         try:
-            clf_model    = _load_pickle(CLF_MODEL_PATH)
-            clf_features = _load_pickle(CLF_FEATURES_PATH)
-            if getattr(clf_model, "feature_names_", None):
-                clf_features = list(clf_model.feature_names_)
+            from app.ai.services.lgb_model_adapter import LgbModelBundle
 
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                reg_model = _load_pickle(REG_MODEL_PATH)
-            reg_features = _load_pickle(REG_FEATURES_PATH)
-            if getattr(reg_model, "feature_names_", None):
-                reg_features = list(reg_model.feature_names_)
+            clf_model = LgbModelBundle(CLF_MODEL_PATH)
+            clf_features = clf_model.feature_names
+            clf_categorical_cols = clf_model.categorical_cols
 
-            log.info("PdM models loaded — clf: %d features, reg: %d features",
-                     len(clf_features or []), len(reg_features or []))
+            reg_model = LgbModelBundle(REG_MODEL_PATH)
+            reg_features = reg_model.feature_names
+            reg_categorical_cols = reg_model.categorical_cols
+
+            clf_log = _load_decision_log(CLF_DECISION_LOG_PATH)
+            clf_threshold = float(clf_log.get("threshold_max_f1", 0.5))
+
+            log.info(
+                "PdM v7 LightGBM models loaded — clf: %d features (threshold=%.3f), reg: %d features",
+                len(clf_features), clf_threshold, len(reg_features),
+            )
+
+            try:
+                _register_active_models()
+            except Exception:
+                log.exception("model_registry upsert failed (non-fatal)")
         except Exception as exc:
             log.warning("Local PdM model loading failed (non-fatal): %s", exc)
 
@@ -130,9 +273,25 @@ def _run_scheduled_batch() -> None:
             clf_categorical_cols=clf_categorical_cols,
             reg_model=reg_model,
             reg_features=reg_features,
+            reg_categorical_cols=reg_categorical_cols,
+            breakdown_cost_bundle=breakdown_cost_bundle,
         )
     except Exception:
         log.exception("Batch prediction run failed")
+    finally:
+        db.close()
+
+
+def _run_service_reminder_job() -> None:
+    """Scheduled job — daily sweep for assets due within reminder windows."""
+    from app.db import SessionLocal
+    from app.services.service_reminder_service import run_auto_reminder_sweep
+
+    db = SessionLocal()
+    try:
+        run_auto_reminder_sweep(db)
+    except Exception:
+        log.exception("Service reminder sweep failed")
     finally:
         db.close()
 
@@ -162,8 +321,8 @@ def _ping_hf_models() -> None:
         try:
             call_hf_inference(repo, "keep_warm_ping", timeout=30, max_cold_start_wait=20)
             log.debug("Pinged %s to keep warm.", repo)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("HF keep-warm ping failed for %s (non-fatal): %s", repo, exc)
 
 
 @asynccontextmanager
@@ -172,6 +331,17 @@ async def lifespan(_: FastAPI):
     global scheduler
 
     _load_pdm_models()
+
+    # ─── Breakdown cost estimation model (v5 — CatBoost) ─────────────────────
+    global breakdown_cost_bundle
+    try:
+        breakdown_cost_bundle = load_breakdown_bundle()
+        log.info("Breakdown cost model bundle loaded successfully.")
+    except Exception as exc:
+        log.error(
+            "Breakdown cost model loading FAILED — /predictions/cost/* will "
+            "503 until this is fixed: %s", exc, exc_info=True,
+        )
 
     if os.getenv("DISABLE_HF_MODELS", "false").lower() != "true":
         try:
@@ -186,23 +356,19 @@ async def lifespan(_: FastAPI):
         except Exception as exc:
             log.warning("Ticket priority warmup failed (non-fatal): %s", exc)
 
-        try:
-            warmup_asset_summary_model()
-            log.info("Asset summary model warmed up.")
-        except Exception as exc:
-            log.warning("Asset summary warmup failed (non-fatal): %s", exc)
+        # Asset & ticket summaries run online on HF Spaces — no local warmup.
     else:
         log.info("HuggingFace models disabled (DISABLE_HF_MODELS=true). Skipping warmup.")
 
-    # ── Hourly batch PDM scheduler ─────────────────────────────────────────────
-    batch_interval_hours = int(os.getenv("BATCH_INTERVAL_HOURS", "1"))
+    # ── Batch PDM scheduler ─────────────────────────────────────────────────────
+    batch_interval_hours = int(os.getenv("BATCH_INTERVAL_HOURS", "24"))
     scheduler = BackgroundScheduler(daemon=True)
     scheduler.add_job(
         _run_scheduled_batch,
         trigger="interval",
         hours=batch_interval_hours,
         id="pdm_batch",
-        name="PDM hourly batch prediction",
+        name=f"PDM batch prediction (every {batch_interval_hours}h)",
         replace_existing=True,
     )
 
@@ -217,6 +383,30 @@ async def lifespan(_: FastAPI):
             replace_existing=True,
         )
         log.info("HF Inference Warmer enabled (4-10 min intervals).")
+
+    # ── Daily service reminder email sweep ─────────────────────────────────────
+    reminder_hour = int(os.getenv("SERVICE_REMINDER_HOUR", "9"))
+    reminder_tz = os.getenv("SERVICE_REMINDER_TZ", "Asia/Colombo")
+    scheduler.add_job(
+        _run_service_reminder_job,
+        trigger=CronTrigger(hour=reminder_hour, minute=0, timezone=reminder_tz),
+        id="service_reminder_check",
+        name="Daily service reminder email sweep",
+        replace_existing=True,
+    )
+    log.info(
+        "Service reminder scheduler registered — daily at %d:00 %s",
+        reminder_hour, reminder_tz,
+    )
+
+    if os.getenv("SERVICE_REMINDER_RUN_ON_STARTUP", "false").lower() == "true":
+        import threading
+        threading.Thread(
+            target=_run_service_reminder_job,
+            daemon=True,
+            name="service_reminder_startup",
+        ).start()
+        log.info("Service reminder startup run queued")
 
     scheduler.start()
     log.info("PDM batch scheduler started — interval=%dh", batch_interval_hours)
@@ -238,29 +428,49 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="PredictiX API", version="1.0", lifespan=lifespan)
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
-_default_origins = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:3001",
-    "http://127.0.0.1:3001",
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://192.168.56.1:3000",
-    "http://192.168.56.1:3001",
-    "https://predicti-x-frontend.vercel.app",
-    "https://predicti-x-frontend-dinusha-ekanayakes-projects.vercel.app",
-]
-_env_origins = os.getenv("ALLOWED_ORIGINS", "")
-_extra_origins = [o.strip() for o in _env_origins.split(",") if o.strip()]
-_allowed_origins = list(set(_default_origins + _extra_origins))
-
+# allowed_frontend_origins() is the single source of truth for "which
+# frontend origins does this API trust" — also reused by the server-side PDF
+# renderer's network allowlist (see app/routers/asset_reports.py).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_allowed_origins,
+    allow_origins=allowed_frontend_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ── Error handlers ────────────────────────────────────────────────────────────
+# Starlette's middleware stack is:
+#     ServerErrorMiddleware -> CORSMiddleware -> ExceptionMiddleware -> routes
+# An exception that reaches ServerErrorMiddleware (i.e. one with no registered
+# handler) is turned into a bare 500 *outside* CORSMiddleware, so that response
+# carries no Access-Control-Allow-Origin header. The browser then reports it as
+# "blocked by CORS policy / Failed to fetch" and the real cause — usually a DB
+# connection failure — is completely hidden from the Network tab and the
+# console. Handlers registered here run inside ExceptionMiddleware, so their
+# responses travel back out through CORSMiddleware and DO get CORS headers.
+@app.exception_handler(OperationalError)
+@app.exception_handler(InterfaceError)
+async def _db_unavailable_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Connection-level DB failures (pooler at max clients, connect timeout,
+    server closed the connection) -> honest 503 instead of an opaque CORS error.
+
+    Only connection-class errors map to 503; ProgrammingError/IntegrityError and
+    friends are real bugs and must keep bubbling up rather than being disguised
+    as a transient outage.
+
+    NOTE: a handler registered for bare `Exception` would NOT help here —
+    Starlette routes that one to ServerErrorMiddleware, which sits *outside*
+    CORSMiddleware, so its response still ends up without CORS headers. Only
+    handlers for specific exception types run inside ExceptionMiddleware and
+    get the headers, which is why these are registered per-type.
+    """
+    log.error("[DB] %s on %s %s: %s", type(exc).__name__, request.method, request.url.path, exc)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Database temporarily unavailable. Please try again shortly."},
+    )
 
 # ─── Router registration ──────────────────────────────────────────────────────
 # Auth, users & profiles
@@ -288,6 +498,8 @@ app.include_router(ticket_comments_router)
 app.include_router(ticket_attachments_router)
 app.include_router(ticket_status_history_router)
 app.include_router(user_tickets_router)
+app.include_router(ticket_summaries_router)
+app.include_router(asset_component_rul_router)
 
 # Predictions & ML
 app.include_router(predictions_router)
@@ -304,7 +516,7 @@ app.include_router(notifications_router)
 app.include_router(notification_preferences_router)
 app.include_router(reports_router)
 app.include_router(report_sources_router)
-app.include_router(asset_reports_router)          # Asset PDF report generation
+app.include_router(asset_reports_router)
 
 # Chatbot
 app.include_router(chatbot_router)
@@ -313,10 +525,15 @@ app.include_router(chatbot_router)
 app.include_router(faqs_router)
 
 # Diagnostics
-app.include_router(db_debug_router)
+if os.getenv("ENABLE_DEBUG_ROUTES", "false").strip().lower() == "true":
+    app.include_router(db_debug_router)
+    log.info("Debug routes enabled (ENABLE_DEBUG_ROUTES=true).")
 
 # WebSockets
 app.include_router(websockets_router)
+
+# Public warmup ping
+app.include_router(warmup_router)
 
 
 @app.get("/", tags=["Health"])
@@ -326,6 +543,7 @@ def root():
         "models_loaded": all(
             x is not None for x in (clf_model, clf_features, reg_model, reg_features)
         ),
+        "cost_model_loaded": breakdown_cost_bundle is not None,
     }
 
 

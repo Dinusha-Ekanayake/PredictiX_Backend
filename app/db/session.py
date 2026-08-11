@@ -20,7 +20,10 @@ _project_ref = os.getenv("PROJECT_REF")
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    f"postgresql+psycopg2://postgres.{_project_ref}:{_password}@aws-1-ap-southeast-2.pooler.supabase.com:6543/postgres"
+    # Port 5432 = Supabase's session-mode pooler. Transaction-mode (6543)
+    # doesn't guarantee a stable backend connection per pool slot, which made
+    # nearly every request pay a multi-second "cold connection" penalty.
+    f"postgresql+psycopg2://postgres.{_project_ref}:{_password}@aws-1-ap-southeast-2.pooler.supabase.com:5432/postgres"
     if _password and _project_ref else None,
 )
 
@@ -34,6 +37,17 @@ engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,
     connect_args={"connect_timeout": 10},
+    # Supabase's session-mode pooler on this project tier caps total clients
+    # at 15. SQLAlchemy's default (pool_size=5 + max_overflow=10 = 15) lets a
+    # single worker alone hit that ceiling, so any overlap with a second
+    # worker (e.g. the old process during a --reload restart) triggers
+    # "FATAL: max clients reached in session mode" — surfaced to the browser
+    # as an opaque CORS/"Failed to fetch" error since a raised
+    # OperationalError never gets CORS headers attached.
+    pool_size=5,
+    max_overflow=3,
+    pool_timeout=10,
+    pool_recycle=1800,
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
