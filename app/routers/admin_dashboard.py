@@ -32,6 +32,12 @@ from ..models import (
     Warehouse,
 )
 from ..services.dashboard_cache import DashboardCache
+from ..services.health_bands import (
+    CRITICAL_THRESHOLD,
+    HEALTH_BAND_NAMES,
+    band_count_sql,
+)
+from ..services.maintenance_classification import planned_value, unplanned_value
 
 admin_dashboard_router = APIRouter(
     prefix="/admin-dashboard",
@@ -112,15 +118,13 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
     pred_agg = db.execute(text(f"""
         SELECT
             COUNT(*)                                                        AS total_preds,
-            COUNT(*) FILTER (WHERE health_score < 40)                       AS critical_alerts,
+            COUNT(*) FILTER (WHERE health_score < {CRITICAL_THRESHOLD})     AS critical_alerts,
             ROUND(AVG(health_score)::numeric, 2)                            AS avg_health,
             COUNT(*) FILTER (WHERE failure_probability >= 0.5)              AS predicted_failures,
-            -- health distribution bands (Excellent/Good/Moderate/Poor/Critical)
-            COUNT(*) FILTER (WHERE health_score >= 90)                      AS h_excellent,
-            COUNT(*) FILTER (WHERE health_score >= 75 AND health_score < 90) AS h_good,
-            COUNT(*) FILTER (WHERE health_score >= 60 AND health_score < 75) AS h_moderate,
-            COUNT(*) FILTER (WHERE health_score >= 40 AND health_score < 60) AS h_poor,
-            COUNT(*) FILTER (WHERE health_score < 40)                       AS h_critical
+            -- Bands generated from app.services.health_bands, the single
+            -- definition shared with assets.health_band, so the same fleet
+            -- can never be reported two different ways on two screens.
+            {band_count_sql()}
         FROM pdm_batch_predictions
         WHERE status = 'ok' AND health_score IS NOT NULL AND {_assets_in}
     """), _wh).fetchone()
@@ -135,12 +139,11 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
     # this flag lets the frontend show a distinct "no predictions yet"
     # empty state instead of a false alarm.
     has_prediction_data = total_preds > 0
+    # Bands come back in the same best->worst order band_count_sql() emitted,
+    # starting at index 4 (after total/critical/avg/predicted_failures).
     health_distribution = [
-        {"name": "Excellent", "count": int(pred_agg[4] or 0)},
-        {"name": "Good",      "count": int(pred_agg[5] or 0)},
-        {"name": "Moderate",  "count": int(pred_agg[6] or 0)},
-        {"name": "Poor",      "count": int(pred_agg[7] or 0)},
-        {"name": "Critical",  "count": int(pred_agg[8] or 0)},
+        {"name": name.capitalize(), "count": int(pred_agg[4 + i] or 0)}
+        for i, name in enumerate(HEALTH_BAND_NAMES)
     ]
 
     # ── Query 2: all ticket aggregates + anchors in one pass ──────────────────
@@ -292,20 +295,22 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
             "resolved":   int(b["resolved"]),
         })
 
-    # ── Query 5: cost trend grouped by month (total + preventive) ────────────
+    # ── Query 5: cost trend grouped by month (planned vs unplanned spend) ────
+    # Previously this reported "estimated" (only event_type='preventive') vs
+    # "actual" (every event). Two problems: 'preventive' is used by no row in
+    # this database, so the estimated series was a flat zero line; and the pair
+    # was mislabelled — both numbers are money already spent, so "estimated vs
+    # actual" described a budget-vs-outturn comparison the data cannot support
+    # (no budget is stored anywhere).
+    #
+    # Now it splits real spend by whether the work was planned, using the same
+    # classification as the downtime chart below so the two agree. Reactive
+    # spend is the figure a maintenance operation is actually managed against.
     _cost_q = (
         db.query(
             func.to_char(MaintenanceEvent.performed_at, "YYYY-MM").label("ym"),
-            func.sum(MaintenanceEvent.cost_amount).label("total"),
-            func.sum(
-                func.coalesce(
-                    text(
-                        "CASE WHEN maintenance_events.event_type = 'preventive' "
-                        "THEN maintenance_events.cost_amount ELSE 0 END"
-                    ),
-                    0,
-                )
-            ).label("planned"),
+            func.sum(planned_value(MaintenanceEvent.cost_amount)).label("planned"),
+            func.sum(unplanned_value(MaintenanceEvent.cost_amount)).label("unplanned"),
         )
         .filter(MaintenanceEvent.performed_at.isnot(None))
     )
@@ -314,15 +319,18 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
             Asset.warehouse_id == warehouse_id
         )
     cost_rows = _cost_q.group_by("ym").all()
-    cost_by_ym = {ym: (planned, total) for ym, total, planned in cost_rows}
-    current_ym = f"{now.year:04d}-{now.month:02d}"
+    cost_by_ym = {ym: (planned, unplanned) for ym, planned, unplanned in cost_rows}
     cost_trend = []
     for y, m, abbr in cost_months:
-        ym = f"{y:04d}-{m:02d}"
-        planned, total = cost_by_ym.get(ym, (None, None))
-        estimated = int(planned) if planned else 0
-        actual = None if ym == current_ym else (int(total) if total else 0)
-        cost_trend.append({"month": abbr, "estimated": estimated, "actual": actual})
+        planned, unplanned = cost_by_ym.get(f"{y:04d}-{m:02d}", (None, None))
+        # Both series are the same kind of measure, so the current (partial)
+        # month is shown for both rather than blanking one of them — nulling
+        # only one made the newest month look like a collapse in spend.
+        cost_trend.append({
+            "month":     abbr,
+            "planned":   int(planned or 0),
+            "unplanned": int(unplanned or 0),
+        })
 
     # ── Query 6: downtime planned vs unplanned ───────────────────────────────
     # Unscoped (fleet view): grouped BY WAREHOUSE so warehouses can be compared.
@@ -334,8 +342,8 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
         _dt_q = (
             db.query(
                 func.to_char(MaintenanceEvent.performed_at, "YYYY-MM").label("ym"),
-                MaintenanceEvent.event_type,
-                func.sum(MaintenanceEvent.downtime_hours),
+                func.sum(planned_value(MaintenanceEvent.downtime_hours)).label("planned"),
+                func.sum(unplanned_value(MaintenanceEvent.downtime_hours)).label("unplanned"),
             )
             .join(Asset, MaintenanceEvent.asset_id == Asset.id)
             .filter(
@@ -343,15 +351,12 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
                 MaintenanceEvent.performed_at.isnot(None),
                 Asset.warehouse_id == warehouse_id,
             )
-            .group_by("ym", MaintenanceEvent.event_type)
+            .group_by("ym")
         )
-        dt_by_key: dict[str, dict[str, float]] = {}
-        for ym, etype, hours in _dt_q.all():
-            bucket = dt_by_key.setdefault(ym, {"planned": 0.0, "unplanned": 0.0})
-            if etype == "preventive":
-                bucket["planned"] += float(hours or 0)
-            else:
-                bucket["unplanned"] += float(hours or 0)
+        dt_by_key: dict[str, dict[str, float]] = {
+            ym: {"planned": float(planned or 0), "unplanned": float(unplanned or 0)}
+            for ym, planned, unplanned in _dt_q.all()
+        }
         # Emit the trailing 6 months in order, labelled by month abbreviation.
         downtime_by_warehouse = []
         for y, m, abbr in _months_ending_at(maint_anchor_dt, 6):
@@ -364,24 +369,21 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
         _dt_q = (
             db.query(
                 Warehouse.name,
-                MaintenanceEvent.event_type,
-                func.sum(MaintenanceEvent.downtime_hours),
+                func.sum(planned_value(MaintenanceEvent.downtime_hours)).label("planned"),
+                func.sum(unplanned_value(MaintenanceEvent.downtime_hours)).label("unplanned"),
             )
             .join(Asset, MaintenanceEvent.asset_id == Asset.id)
             .join(Warehouse, Asset.warehouse_id == Warehouse.id)
             .filter(MaintenanceEvent.downtime_hours.isnot(None))
-            .group_by(Warehouse.name, MaintenanceEvent.event_type)
+            .group_by(Warehouse.name)
         )
-        dt_by_wh: dict[str, dict[str, float]] = {}
-        for name, etype, hours in _dt_q.all():
-            wh = dt_by_wh.setdefault(name or "Unknown", {"planned": 0.0, "unplanned": 0.0})
-            if etype == "preventive":
-                wh["planned"] += float(hours or 0)
-            else:
-                wh["unplanned"] += float(hours or 0)
         downtime_by_warehouse = [
-            {"warehouse": name, "planned": round(v["planned"]), "unplanned": round(v["unplanned"])}
-            for name, v in dt_by_wh.items()
+            {
+                "warehouse": name or "Unknown",
+                "planned":   round(float(planned or 0)),
+                "unplanned": round(float(unplanned or 0)),
+            }
+            for name, planned, unplanned in _dt_q.all()
         ]
         downtime_scope = "warehouse"
 
@@ -458,11 +460,27 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
             .outerjoin(Warehouse, Asset.warehouse_id == Warehouse.id)
         )
         if warehouse_id:
-            # Keep this warehouse's asset-linked alerts plus system/fleet-wide alerts
-            # that aren't tied to any asset (so system notices still show).
+            # Two ways an alert belongs on this warehouse's dashboard:
+            #   * it is about an asset here, or
+            #   * it is not about any asset, but was addressed to someone who
+            #     works here (or to a global super admin, who has no warehouse).
+            #
+            # The second clause used to be just `related_asset_id IS NULL`,
+            # which let every asset-less notification through no matter whose
+            # warehouse the recipient belonged to. Because these are ordered
+            # newest-first and capped at 5, one warehouse's recent activity
+            # filled all five slots on every other warehouse's dashboard —
+            # verified: Colombo and Badulla were each showing 5 of 5 alerts
+            # addressed to Galle staff, hiding their own.
             _notif_q = _notif_q.filter(
                 (Asset.warehouse_id == warehouse_id)
-                | (Notification.related_asset_id.is_(None))
+                | (
+                    Notification.related_asset_id.is_(None)
+                    & (
+                        (Profile.warehouse_id == warehouse_id)
+                        | Profile.warehouse_id.is_(None)
+                    )
+                )
             )
         notif_rows = _notif_q.order_by(Notification.created_at.desc()).limit(5).all()
         recent_alerts = [
@@ -527,7 +545,10 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
             {
                 "tone": "critical",
                 "title": "Critical assets need attention",
-                "body": f"{critical_alerts} assets are below 40% health and should be prioritised for inspection.",
+                "body": (
+                    f"{critical_alerts} assets are below {CRITICAL_THRESHOLD:g}% health "
+                    f"and should be prioritised for inspection."
+                ),
             }
         )
     if high_priority_tickets > 0:

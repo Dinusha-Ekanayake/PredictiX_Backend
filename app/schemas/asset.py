@@ -18,6 +18,7 @@ class AssetCreate(BaseModel):
     manufacture_year: Optional[int] = None
     registration_number: Optional[str] = None
     vin: Optional[str] = None
+    parking_slot: Optional[str] = None
     status: str = "active"
     health_band: Optional[str] = None
     criticality_score: Optional[Decimal] = None
@@ -49,6 +50,7 @@ class AssetUpdate(BaseModel):
     manufacture_year: Optional[int] = None
     registration_number: Optional[str] = None
     vin: Optional[str] = None
+    parking_slot: Optional[str] = None
     status: Optional[str] = None
     health_band: Optional[str] = None
     criticality_score: Optional[Decimal] = None
@@ -84,6 +86,7 @@ class AssetOut(BaseModel):
     manufacture_year: Optional[int] = None
     registration_number: Optional[str] = None
     vin: Optional[str] = None
+    parking_slot: Optional[str] = None
     status: str
     health_band: Optional[str] = None
     criticality_score: Optional[Decimal] = None

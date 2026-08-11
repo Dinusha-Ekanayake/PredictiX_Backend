@@ -32,6 +32,7 @@ import numpy as np
 from sqlalchemy import String, cast, text
 from sqlalchemy.orm import Session
 
+from app.services.health_bands import band_case_sql
 from app.models import Asset, PdmBatchPrediction
 from app.ai.services.pdm_decision_service import build_decision
 from app.services.in_app_notification_service import InAppNotificationService
@@ -168,6 +169,27 @@ def _to_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _clamp_health_pct(value: float) -> float:
+    """Clamp a health-percentage reading to its valid [0, 100] range. NaN
+    (see _to_float_or_nan) passes through unchanged — a genuinely missing
+    reading is not a range violation.
+
+    A small fraction of sensor_readings rows carry out-of-range values (seen
+    live: as low as -304.66%) — a data-generation defect, not a real
+    reading. Left unclamped, it flows straight into _compute_health_score's
+    plain average (which, unlike the tree-based classifier/regressor, has
+    no built-in resistance to an outlier's magnitude) and dominates both the
+    health score and its own contributing-factors breakdown — e.g. a single
+    -265.66 reading alone accounted for -53 of a 100-point scale, enough by
+    itself to swing an otherwise-100%-healthy-looking asset into "Critical."
+    Same fix as the one already applied on the survival-model side
+    (app.ai.services.survival_service._clamp_health_pct).
+    """
+    if value != value:  # NaN
+        return value
+    return max(0.0, min(100.0, value))
+
+
 def _json_safe_fd(fd: dict[str, Any]) -> dict[str, Any]:
     """Feature dicts can hold NaN for genuinely-missing sensor readings
     (see _to_float_or_nan). json.dumps() happily emits the literal token
@@ -266,7 +288,8 @@ def _build_feature_dict(asset: Asset, reading, snapshot_date: date | None = None
     fd["lifetime_breakdown_count"] = _to_int(asset.lifetime_breakdown_count)
 
     for col in _SENSOR_FLOAT_COLS:
-        fd[col] = _to_float_or_nan(getattr(reading, col, None))
+        v = _to_float_or_nan(getattr(reading, col, None))
+        fd[col] = _clamp_health_pct(v) if col in _HEALTH_COMPONENT_COLS else v
     for col in _SENSOR_INT_COLS:
         fd[col] = _to_int(getattr(reading, col, None))
     for col in _SENSOR_BOOL_COLS:
@@ -706,6 +729,55 @@ def _upsert_batch_predictions(db: Session, rows: list[dict]) -> None:
         _upsert_batch_predictions_chunk(db, rows[start:start + _UPSERT_CHUNK_SIZE])
 
 
+def sync_asset_health_bands(db: Session, asset_ids: list[str] | None = None) -> int:
+    """Refresh ``assets.health_band`` from the score this run just wrote.
+
+    ``health_band`` previously had no writer anywhere in the backend — it was
+    populated once at seed time and only read afterwards, so it drifted further
+    from reality with every batch run. That is why the assets list and the admin
+    dashboard disagreed about the same fleet (13 "critical" against 161): two
+    numbers derived from different vintages of different measures, both labelled
+    critical.
+
+    Banding here uses app.services.health_bands, the same definition the
+    dashboard's distribution chart is generated from, so the two agree by
+    construction. Set-based and idempotent: one statement for the whole fleet,
+    and rows already carrying the right band are left untouched (``IS DISTINCT
+    FROM``) so updated_at only moves when the band genuinely changed.
+
+    Returns the number of assets whose band changed.
+    """
+    case_sql = band_case_sql("p.health_score")
+    where_ids = ""
+    params: dict[str, Any] = {}
+    if asset_ids:
+        where_ids = " AND a.id = ANY(CAST(:asset_ids AS uuid[]))"
+        params["asset_ids"] = list(asset_ids)
+
+    try:
+        result = db.execute(text(f"""
+            UPDATE assets AS a
+               SET health_band = ({case_sql})::asset_health_band,
+                   updated_at  = now()
+              FROM pdm_batch_predictions AS p
+             WHERE p.asset_id = a.id
+               AND p.status = 'ok'
+               AND p.health_score IS NOT NULL
+               AND a.health_band IS DISTINCT FROM ({case_sql})::asset_health_band
+               {where_ids}
+        """), params)
+        changed = result.rowcount or 0
+        db.commit()
+        if changed:
+            log.info("[batch] health_band updated for %d assets", changed)
+        return changed
+    except Exception:
+        # Denormalised convenience column — never fail a prediction run over it.
+        db.rollback()
+        log.warning("[batch] health_band sync failed (non-fatal)", exc_info=True)
+        return 0
+
+
 _UPSERT_COLUMNS = [
     "failure_probability", "maintenance_required", "risk_level",
     "predicted_days_until_maintenance", "predicted_maintenance_date",
@@ -933,6 +1005,9 @@ def run_batch_for_asset(
             "horizon_saturated": decision["horizon_saturated"],
         })
         db.commit()
+        # Same sync as the fleet run, scoped to this asset, so a single
+        # "Run AI" from the asset page also refreshes its band.
+        sync_asset_health_bands(db, [asset_id_str])
         _log_prediction_history(db, [{
             "asset_id": asset_id_str,
             "failure_probability": failure_probability,
@@ -1188,6 +1263,10 @@ def run_batch_for_all_assets(
             upsert_rows = [r for r in upsert_rows if r["asset_id"] not in {str(a.id) for a in scored_assets}]
 
     _upsert_batch_predictions(db, upsert_rows)
+
+    # Keep the denormalised assets.health_band in step with the scores just
+    # written, so the assets list and the dashboard describe the same fleet.
+    sync_asset_health_bands(db)
 
     _notify_newly_critical_assets(db, newly_critical_assets)
 

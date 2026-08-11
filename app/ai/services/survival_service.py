@@ -84,6 +84,18 @@ _HEALTH_COLS = list(COMPONENT_HEALTH_COL.values())
 #   median  -> S(t)=0.50 ;  p90_days -> latest, S(t)=0.10
 _PCTL = {"p10_days": 0.90, "median_days": 0.50, "p90_days": 0.10}
 
+# Ceiling on any single predicted percentile, grounded in the actual training
+# data: every component's target (days_until_next_maintenance) ranges 24-174
+# days in survival_snapshots_train.csv — the model has no evidence at all
+# beyond that. A Weibull AFT's time-scale is exponential in its covariates,
+# so even a plausible-looking "very healthy" input can extrapolate into
+# multi-YEAR predictions with no real support (observed live: a 100%-health
+# reading — never seen in training, whose max there was 99% — produced a
+# 36-year median for brake). Capped and flagged the same way
+# batch_prediction_service.py's regressor handles its own out-of-training
+# predictions via horizon_saturated.
+MAX_SURVIVAL_HORIZON_DAYS = 180
+
 
 # ── Model + schema loading (cached) ───────────────────────────────────────────
 
@@ -137,6 +149,33 @@ def _v11_snapshots() -> dict[str, Any]:
         return {}
 
 
+def _clamp_health_pct(feat: dict[str, Any]) -> dict[str, Any]:
+    """Clamp health-percentage fields to their valid [0, 100] range, in place.
+
+    A small fraction of sensor_readings rows carry out-of-range values (seen
+    live: hydraulic_health_pct as low as -304.66) — a data-generation defect,
+    not a real reading; health percentages were never negative or above 100
+    in training either (observed range ~7-99%, see the module-level range
+    check in this file's tests). Left unclamped, a value like -119 pushes
+    the Weibull AFT's z-scored covariate far outside anything the model was
+    fit on, and — combined with the model's exponential AFT time-scale — can
+    produce wildly unrealistic multi-YEAR RUL predictions for components
+    that clamp to a plausible-looking value elsewhere in the same row.
+    Clamping here fixes both the model's input and the health_pct value
+    reported back to the API (previously shown to the client un-clamped,
+    e.g. "-119.4% health").
+    """
+    for col in _HEALTH_COLS:
+        v = feat.get(col)
+        if v is None:
+            continue
+        try:
+            feat[col] = max(0.0, min(100.0, float(v)))
+        except (TypeError, ValueError):
+            pass
+    return feat
+
+
 def build_asset_feature_dict(db: Session, asset_id: str) -> dict[str, Any]:
     """Raw covariate dict (pre-transform) for one asset.
 
@@ -154,7 +193,7 @@ def build_asset_feature_dict(db: Session, asset_id: str) -> dict[str, Any]:
         feat = dict(snap)
         feat.setdefault("vehicle_type", asset.vehicle_type or "__missing__")
         feat.setdefault("vehicle_role", getattr(asset, "vehicle_role", None) or "__missing__")
-        return feat
+        return _clamp_health_pct(feat)
 
     reading = _get_latest_sensor_reading(db, asset_id)
     if not reading:
@@ -172,7 +211,7 @@ def build_asset_feature_dict(db: Session, asset_id: str) -> dict[str, Any]:
         feat[col] = getattr(reading, col, None)
     feat["vehicle_type"] = asset.vehicle_type or "__missing__"
     feat["vehicle_role"] = getattr(asset, "vehicle_role", None) or "__missing__"
-    return feat
+    return _clamp_health_pct(feat)
 
 
 def _design_row(feat: dict[str, Any], schema: dict[str, Any]) -> pd.DataFrame:
@@ -212,17 +251,28 @@ def _score_component(feat: dict[str, Any], component: str,
         except Exception:
             pct[name] = float("nan")
 
+    # Cap each percentile independently at the trained horizon — see
+    # MAX_SURVIVAL_HORIZON_DAYS above. horizon_capped is set if any of them
+    # needed it, so the caller/UI can flag the prediction as "beyond the
+    # model's reliable range" rather than presenting a fake-precise number.
+    horizon_capped = False
+    for name, value in pct.items():
+        if value == value and value > MAX_SURVIVAL_HORIZON_DAYS:  # value==value filters NaN
+            pct[name] = float(MAX_SURVIVAL_HORIZON_DAYS)
+            horizon_capped = True
+
     health = feat.get(schema["health_col"])
     out = {
-        "component":     component,
-        "health_pct":    _to_float(health) if health is not None else None,
-        "survival_7d":   surv[7],
-        "survival_30d":  surv[30],
-        "fail_prob_7d":  round(1.0 - surv[7], 4),
-        "fail_prob_30d": round(1.0 - surv[30], 4),
-        "median_days":   pct["median_days"],
-        "p10_days":      pct["p10_days"],
-        "p90_days":      pct["p90_days"],
+        "component":      component,
+        "health_pct":     _to_float(health) if health is not None else None,
+        "survival_7d":    surv[7],
+        "survival_30d":   surv[30],
+        "fail_prob_7d":   round(1.0 - surv[7], 4),
+        "fail_prob_30d":  round(1.0 - surv[30], 4),
+        "median_days":    pct["median_days"],
+        "p10_days":       pct["p10_days"],
+        "p90_days":       pct["p90_days"],
+        "horizon_capped": horizon_capped,
     }
     if times is not None:
         curve = model.predict_survival_function(X, times=times).iloc[:, 0].values
