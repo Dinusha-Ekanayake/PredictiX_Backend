@@ -360,22 +360,46 @@ def get_my_stats(
 
 @router.get("/me/colleagues")
 def get_my_colleagues(
+    limit: int | None = Query(default=None, ge=1, le=1000,
+                              description="Cap the number of colleagues returned. "
+                                          "Omit for the full department (the team "
+                                          "directory needs all of them to search over)."),
+    offset: int = Query(default=0, ge=0),
     current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    real_user = db.query(Profile).filter(Profile.email == current_user.email).first()
-    if not real_user or not real_user.department_id:
+    """Colleagues in the caller's department.
+
+    Departments are per-warehouse rows, so filtering on ``department_id``
+    already scopes this to the caller's own site.
+
+    ``limit`` exists because the dashboard's "My Team" card renders eight
+    people: unbounded, this returned the entire department — measured at 519
+    colleagues / 140 KB for one Colombo driver, ~98% of it discarded, and the
+    slowest of that page's four parallel calls. The team directory still omits
+    the parameter and receives everyone, because it filters client-side.
+    """
+    # current_user is already the caller's Profile row, carrying department_id.
+    # This used to re-query it by email — an extra Supabase round-trip (~150-800ms)
+    # on every call, and matching on a mutable field rather than the primary key.
+    if not current_user.department_id:
         return []
 
-    colleagues = (
+    q = (
         db.query(Profile)
-        .filter(Profile.department_id == real_user.department_id, Profile.id != real_user.id)
-        .all()
+        .filter(Profile.department_id == current_user.department_id,
+                Profile.id != current_user.id)
+        .order_by(Profile.full_name)
     )
+    if offset:
+        q = q.offset(offset)
+    if limit is not None:
+        q = q.limit(limit)
+    colleagues = q.all()
 
-    # All colleagues share real_user.department_id — resolve the name once
+    # All colleagues share the same department — resolve the name once
     # instead of one Department query per colleague (removes the N+1).
-    dept = db.query(Department).filter(Department.id == real_user.department_id).first()
+    dept = db.query(Department).filter(Department.id == current_user.department_id).first()
     dept_name = dept.name if dept else "Unknown"
 
     result = []
