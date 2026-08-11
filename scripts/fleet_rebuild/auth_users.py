@@ -1,15 +1,33 @@
 """Supabase Auth account management for the fleet rebuild.
 
-Accounts go through the GoTrue Admin API rather than being written straight
-into ``auth.users``. Direct inserts have to reproduce GoTrue's exact password
-hashing and identity rows, and getting either subtly wrong produces accounts
-that exist but cannot sign in — which you only discover at the login screen.
-The API is slower but is the only route that is guaranteed login-correct.
+**Creating an account here is not enough to log in.** This project has two
+separate credential stores, and the application's own login path does not
+consult this one:
+
+* ``auth.users`` (managed here, via the GoTrue Admin API) backs
+  ``profiles.id`` — which is a foreign key to it, so the row must exist — and
+  any Supabase-side flow.
+* ``profiles.meta['password_hash']`` (a bcrypt hash written by
+  ``load.set_password_hashes``) is what ``POST /auth/login`` actually verifies
+  — see ``app/routers/auth.py::_authenticate_profile``. With no hash stored it
+  falls back to the single global ``DEFAULT_PASSWORD``, so the intended
+  password is silently rejected.
+
+An account created through this module alone therefore signs in fine against
+Supabase directly and still fails at the application's login screen. Always
+follow account creation with ``set_password_hashes`` for the same people, and
+verify with ``app.routers.auth.post_login`` rather than
+:func:`verify_login` below — the latter tests Supabase, which is the store
+that is *not* used.
+
+Accounts go through the Admin API rather than being written straight into
+``auth.users`` because direct inserts have to reproduce GoTrue's identity rows
+exactly, and getting that subtly wrong breaks Supabase-side flows.
 
 Creating a user fires the ``on_auth_user_created`` trigger, which inserts a
 bare ``public.profiles`` row (id, email, full_name, role='user',
-status='active'). Profile enrichment is therefore an UPDATE, handled in
-``load.py`` — never an INSERT.
+status='active'). That row cannot be relied on to survive the wipe, so profile
+writes in ``load.py`` are an UPSERT rather than an UPDATE.
 """
 
 from __future__ import annotations
@@ -136,7 +154,15 @@ def delete_users_except(
 
 
 def verify_login(email: str, password: str) -> tuple[bool, str]:
-    """Sign in with the anon key exactly as the frontend would."""
+    """Sign in against **Supabase Auth** with the anon key.
+
+    This proves the ``auth.users`` credential is correct. It does **not** prove
+    the account can log into the application: ``POST /auth/login`` checks
+    ``profiles.meta['password_hash']`` instead and never calls Supabase. A
+    PASS here with no stored hash is exactly the false positive that ships a
+    broken demo account — use ``app.routers.auth.post_login`` to check the
+    real path.
+    """
     env = load_env()
     anon = create_client(env["SUPABASE_URL"], env["SUPABASE_KEY"])
     try:
