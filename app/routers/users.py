@@ -200,11 +200,27 @@ def _fetch_asset_counts() -> dict:
         }
 
 
-def _fetch_users(scoped_wh: str | None, limit: int, offset: int) -> list[Profile]:
+def _fetch_users(
+    scoped_wh: str | None, limit: int, offset: int, include_unassigned: bool = True
+) -> list[Profile]:
+    """Profiles for the user directory, scoped to one warehouse.
+
+    ``include_unassigned`` controls the ``warehouse_id IS NULL`` arm. Admins
+    need it: that is how a newly-created account with no site yet shows up so
+    it can be assigned one. Regular users do not — for them it only leaked the
+    global super-admin accounts (which carry no warehouse) into what is
+    presented as their warehouse team directory, exposing those names, emails
+    and phone numbers to all 1,255 staff across all three sites.
+    """
     with SessionLocal() as s:
         q = s.query(Profile)
         if scoped_wh:
-            q = q.filter((Profile.warehouse_id == scoped_wh) | (Profile.warehouse_id.is_(None)))
+            if include_unassigned:
+                q = q.filter(
+                    (Profile.warehouse_id == scoped_wh) | (Profile.warehouse_id.is_(None))
+                )
+            else:
+                q = q.filter(Profile.warehouse_id == scoped_wh)
         users = q.order_by(Profile.full_name).offset(offset).limit(limit).all()
         s.expunge_all()  # detach so attributes stay readable after the session closes
         return users
@@ -222,11 +238,15 @@ def list_users(
     # Supabase region — sequentially that summed to ~1.5-2.5s; concurrently it's
     # roughly the slowest single query.
     scoped_wh = active_warehouse_id(current_user)
+    # Only staff who manage accounts need to see profiles with no warehouse yet.
+    manages_accounts = (current_user.role or "").strip().lower() in ("admin", "super_admin")
     with ThreadPoolExecutor(max_workers=4) as executor:
         dept_future = executor.submit(get_department_names)
         wh_future = executor.submit(get_warehouse_names)
         assets_future = executor.submit(_fetch_asset_counts)
-        users_future = executor.submit(_fetch_users, scoped_wh, limit, offset)
+        users_future = executor.submit(
+            _fetch_users, scoped_wh, limit, offset, manages_accounts
+        )
 
         dept_names = dept_future.result()
         warehouse_names = wh_future.result()
