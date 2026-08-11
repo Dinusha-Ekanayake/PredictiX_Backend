@@ -182,6 +182,11 @@ HEADCOUNT = {
 EMAIL_DOMAIN = "lankalogix.com"
 
 SUPER_ADMINS = [
+    # Shown on the login screen as the demo super-admin, so it is deliberately
+    # generic — the login page should not advertise a real person's address.
+    # On the company domain like every other demo account; the gmail addresses
+    # below belong to real people.
+    {"email": "demosuperadmin@" + EMAIL_DOMAIN, "full_name": "Demo Super Admin"},
     {"email": "dinushatemp@gmail.com",          "full_name": "Dinusha Ekanayake"},
     {"email": "neuromindspredictix@gmail.com",  "full_name": "NeuroMinds PredictiX"},
     {"email": "aroshnimantha386@gmail.com",     "full_name": "Aroshan Nimantha"},
