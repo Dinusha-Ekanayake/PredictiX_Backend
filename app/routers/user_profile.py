@@ -21,10 +21,25 @@ logger = logging.getLogger(__name__)
 # Valid token required for all endpoints. The /me* endpoints resolve the caller
 # themselves; the user-management endpoints (list/create/update any user) add
 # require_admin individually below.
+#
+# Deprecated: every endpoint here is a second implementation of one that
+# app/routers/profile.py (prefix /profiles) or app/routers/users.py (prefix
+# /users) already serves — /me, /me/assets, /me/stats, /me/colleagues and the
+# user-management routes. The frontend calls the /profiles/* versions in six
+# places and this prefix in none, so these ~500 lines are unreferenced by the
+# product while still being publicly routed, and will drift from the copies
+# that are actually maintained.
+#
+# Marked deprecated rather than deleted, matching how
+# app/routers/asset_component_rul.py was retired: it stays functional for any
+# caller outside this repo, disappears from the OpenAPI docs as a recommended
+# route, and can be removed outright once nothing external is observed hitting
+# it. Fixes belong in /profiles and /users, not here.
 router = APIRouter(
     prefix="/user-profile",
-    tags=["User Profile"],
+    tags=["User Profile (deprecated)"],
     dependencies=[Depends(require_user)],
+    deprecated=True,
 )
 
 @router.get("/me")
