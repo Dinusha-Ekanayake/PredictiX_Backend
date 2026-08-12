@@ -25,7 +25,7 @@ import os
 from app.core.security import hash_password
 from app.db.session import SessionLocal
 from app.deps import get_db, get_current_user, require_admin, require_user, active_warehouse_id
-from app.models import Asset, Department, Profile, Warehouse
+from app.models import Asset, Department, PdmBatchPrediction, Profile, Warehouse
 from app.services.reference_data_cache import get_department_names, get_warehouse_names
 from app.schemas.user_profile import (
     UserAssignedAssetOut,
@@ -422,8 +422,26 @@ def list_user_assets(user_id: str, db: Session = Depends(get_db)):
         for w in db.query(Warehouse.id, Warehouse.name).filter(Warehouse.id.in_(warehouse_ids)).all()
     } if warehouse_ids else {}
 
+    # Real health, batched into one query. This was asset.criticality_score —
+    # how important the asset is, not how healthy — which the UI renders
+    # directly as a coloured health bar. See the same fix in profile.py's
+    # /me/assets for the measured divergence.
+    asset_ids = [a.id for a in assets]
+    health_by_asset: dict = {}
+    if asset_ids:
+        health_by_asset = {
+            row.asset_id: row.health_score
+            for row in db.query(
+                PdmBatchPrediction.asset_id, PdmBatchPrediction.health_score
+            ).filter(
+                PdmBatchPrediction.asset_id.in_(asset_ids),
+                PdmBatchPrediction.status == "ok",
+            ).all()
+        }
+
     result = []
     for asset in assets:
+        health = health_by_asset.get(asset.id)
         result.append(UserAssignedAssetOut(
             assignment_id=str(asset.id),
             asset_id=str(asset.id),
@@ -433,7 +451,7 @@ def list_user_assets(user_id: str, db: Session = Depends(get_db)):
             category=asset.category,
             location=warehouse_names.get(asset.warehouse_id, "Unknown"),
             status=asset.status or "active",
-            healthPercent=float(asset.criticality_score or 100),
+            healthPercent=float(health) if health is not None else None,
             nextServiceDate=asset.next_service_date.isoformat() if asset.next_service_date else None,
         ))
     return result

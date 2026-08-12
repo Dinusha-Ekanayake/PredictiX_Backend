@@ -32,7 +32,7 @@ import numpy as np
 from sqlalchemy import String, cast, text
 from sqlalchemy.orm import Session
 
-from app.services.health_bands import band_case_sql
+from app.services.health_bands import band_case_sql, band_for
 from app.models import Asset, PdmBatchPrediction
 from app.ai.services.pdm_decision_service import build_decision
 from app.services.in_app_notification_service import InAppNotificationService
@@ -487,16 +487,17 @@ def _compute_health_score(fd: dict, failure_probability: float, days_until: floa
     penalty = (failure_probability * 35.0) + max(0.0, (30.0 - min(days_until, 30.0))) * 0.5
     score = round(max(0.0, min(100.0, base - penalty)), 2)
 
-    if score >= 85:
-        status = "Healthy"
-    elif score >= 70:
-        status = "Good"
-    elif score >= 50:
-        status = "Moderate"
-    elif score >= 30:
-        status = "Poor"
-    else:
-        status = "Critical"
+    # Band from the one shared definition. This block used to carry its own
+    # cut-offs (85/70/50/30 with a "Healthy" label that exists nowhere else in
+    # the system), which disagreed with health_bands.py for 602 of 850 assets —
+    # an asset stored as "Poor" here showed as moderate on the dashboard, and
+    # the chatbot quoted this column while the UI quoted the other. The
+    # asset_health_band Postgres enum is the schema-level authority and matches
+    # health_bands.py exactly, so that is what this now returns.
+    #
+    # The old top band was also unreachable: it needed score >= 85, and the
+    # highest score the fleet produces is 79.
+    status = band_for(score)
 
     return score, status
 
@@ -561,42 +562,55 @@ def _estimate_cost(
     days_until: float,
     asset: Asset | None = None,
     breakdown_cost_bundle: dict | None = None,
-) -> tuple[float, float, float]:
-    """Estimate maintenance cost.
+) -> tuple[float | None, float | None, float | None]:
+    """Estimate maintenance cost with the trained cost model.
 
-    If breakdown_cost_bundle is provided, uses the v4 XGBoost model for an
-    accurate data-driven estimate. Falls back to the heuristic formula if the
-    model is unavailable or raises an exception — so existing behaviour is
-    100% preserved when the bundle is not loaded.
+    Returns ``(None, None, None)`` when the model cannot produce a number —
+    the bundle failed to load, or prediction raised for this asset.
+
+    There used to be a heuristic fallback here: a hand-written formula
+    (base + vibration*1200 + faults*2500 + ...) that ran whenever the model
+    was unavailable. It wrote into the same ``estimated_cost_lkr`` column the
+    model writes to, with the same ``status="ok"``, so nothing downstream —
+    dashboards, reports, the LLM agent — could tell a model prediction from a
+    guess. That is worse than having no number at all: a fabricated cost still
+    gets summed into fleet spend totals and cited in generated reports.
+
+    A NULL is honest and every read path already handles it. Callers must not
+    substitute a default; surface "estimate unavailable" instead.
     """
-    if breakdown_cost_bundle is not None and asset is not None:
-        try:
-            from app.ai.models.cost_estimation_model.breakdown_cost_model import predict_breakdown_cost
-            cost_input = _build_cost_input_from_fd(asset, fd)
-            result = predict_breakdown_cost(cost_input, breakdown_cost_bundle, top_k=5)
-            estimated = result["predicted_cost_lkr"]
-            min_cost  = result["pi_80_lower_lkr"]
-            max_cost  = result["pi_80_upper_lkr"]
-            return round(estimated, 2), round(min_cost, 2), round(max_cost, 2)
-        except Exception as exc:
-            log.warning(
-                "_estimate_cost: breakdown cost model failed for asset %s, "
-                "falling back to heuristic: %s",
-                str(getattr(asset, "id", "?"))[:8], exc,
-            )
+    if breakdown_cost_bundle is None:
+        log.warning(
+            "_estimate_cost: cost model bundle not loaded — storing NULL cost "
+            "for asset %s rather than a fabricated estimate",
+            str(getattr(asset, "id", "?"))[:8],
+        )
+        return None, None, None
 
-    # ── Heuristic fallback (original formula — unchanged) ─────────────────────
-    base = 15_000.0
-    vibration_factor  = _fd_float(fd, "vibration_rms_mm_s", 0.0) * 1_200.0
-    fault_factor      = _to_int(fd.get("active_fault_code_count")) * 2_500.0
-    downtime_factor   = _fd_float(fd, "downtime_hours_last_90d", 0.0) * 300.0
-    urgency_factor    = max(0.0, (30.0 - min(days_until, 30.0))) * 250.0
-    probability_factor = failure_probability * 22_000.0
+    if asset is None:
+        log.warning("_estimate_cost: no asset supplied — cannot build cost model input")
+        return None, None, None
 
-    estimate = base + vibration_factor + fault_factor + downtime_factor + urgency_factor + probability_factor
-    min_cost = max(5_000.0, estimate * 0.85)
-    max_cost = estimate * 1.20
-    return round(estimate, 2), round(min_cost, 2), round(max_cost, 2)
+    try:
+        from app.ai.models.cost_estimation_model.breakdown_cost_model import predict_breakdown_cost
+        cost_input = _build_cost_input_from_fd(asset, fd)
+        result = predict_breakdown_cost(cost_input, breakdown_cost_bundle, top_k=5)
+        estimated = result["predicted_cost_lkr"]
+        min_cost  = result["pi_80_lower_lkr"]
+        max_cost  = result["pi_80_upper_lkr"]
+        return round(estimated, 2), round(min_cost, 2), round(max_cost, 2)
+    except Exception as exc:
+        log.warning(
+            "_estimate_cost: breakdown cost model failed for asset %s — storing "
+            "NULL cost rather than a fabricated estimate: %s",
+            str(getattr(asset, "id", "?"))[:8], exc,
+        )
+        return None, None, None
+
+
+def _fmt_cost(value: float | None) -> str:
+    """Cost for log lines. None is a real outcome now, so %.0f would raise."""
+    return "n/a" if value is None else f"{value:.0f}"
 
 
 # pdm_decision_service.build_decision's tier is the authoritative
@@ -1019,13 +1033,13 @@ def run_batch_for_asset(
         }])
 
         log.info(
-            "[batch] asset %s (%s) — prob=%.3f days=%d health=%.1f cost=%.0f tier=%s [%dms]",
+            "[batch] asset %s (%s) — prob=%.3f days=%d health=%.1f cost=%s tier=%s [%dms]",
             asset_id_str[:8],
             asset.asset_code or "?",
             failure_probability,
             days_until,
             health_score,
-            estimated_cost,
+            _fmt_cost(estimated_cost),
             decision["tier"],
             elapsed,
         )
@@ -1228,9 +1242,10 @@ def run_batch_for_all_assets(
                 })
 
                 log.info(
-                    "[batch] asset %s (%s) — prob=%.3f days=%d health=%.1f cost=%.0f tier=%s",
+                    "[batch] asset %s (%s) — prob=%.3f days=%d health=%.1f cost=%s tier=%s",
                     asset_id_str[:8], asset.asset_code or "?",
-                    failure_probability, days_until, health_score, estimated_cost, decision["tier"],
+                    failure_probability, days_until, health_score,
+                    _fmt_cost(estimated_cost), decision["tier"],
                 )
         except Exception as exc:  # noqa: BLE001
             error_msg = str(exc)[:500]

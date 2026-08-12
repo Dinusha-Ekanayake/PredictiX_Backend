@@ -5,6 +5,7 @@ import pandas as pd
 from fastapi import HTTPException
 
 from app.ai.services.pdm_decision_service import classifier_only_tier
+from app.services.health_bands import band_for
 
 _TIER_TO_RISK_LABEL = {"urgent": "High", "watch": "Medium", "healthy": "Low"}
 _RISK_LABEL_TO_ACTION = {
@@ -15,7 +16,20 @@ _RISK_LABEL_TO_ACTION = {
 
 
 def validate_payload_fields(data: dict, required_fields: list[str]) -> None:
-    missing_fields = [field for field in required_fields if field not in data]
+    """422 if any required field is absent *or* None.
+
+    The None check matters: callers pass ``PredictionRequest.model_dump()``,
+    and because every field on that model is Optional with a ``None`` default,
+    the dict always contains all keys. A pure ``not in`` test therefore never
+    fired, and an empty ``{}`` request body sailed past this guard to die
+    inside the model as a 500 ("float() argument must be ... not 'NoneType'").
+    A missing input is a client error, so it must surface as a 422 naming the
+    fields rather than as a server error.
+    """
+    missing_fields = [
+        field for field in required_fields
+        if field not in data or data[field] is None
+    ]
 
     if missing_fields:
         raise HTTPException(
@@ -202,14 +216,12 @@ def run_health_score(data: dict) -> dict:
 
         health_score = float(np.clip(round(base_score - total_penalty, 2), 0, 100))
 
-        if health_score >= 80:
-            health_status = "Healthy"
-        elif health_score >= 60:
-            health_status = "Moderate"
-        elif health_score >= 40:
-            health_status = "Poor"
-        else:
-            health_status = "Critical"
+        # Same shared band definition the batch pipeline and the dashboard use,
+        # so this endpoint cannot describe an asset differently from the rest of
+        # the system. The previous local scale (>=80 "Healthy" / >=60 / >=40)
+        # had an unreachable top band — health scores on this scale top out
+        # around 79 — so nothing could ever come back healthy.
+        health_status = band_for(health_score)
 
         all_factors = contributions + penalties
         top_factors = sorted(all_factors, key=lambda x: abs(x["impact"]), reverse=True)[:8]

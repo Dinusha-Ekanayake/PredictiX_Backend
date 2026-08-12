@@ -8,6 +8,7 @@ from app.deps import (
     get_db,
     get_current_user,
     require_user,
+    require_admin,
     assert_asset_in_scope,
     is_admin_role,
     active_warehouse_id,
@@ -238,7 +239,13 @@ def debug_features():
     }
 
 
-@router.post("/classification", response_model=ClassificationResponse)
+# The four raw-inference endpoints below take a feature payload rather than an
+# asset id, so they leak no data — but they run model inference on demand, and
+# any of the ~1,300 accounts could call them in a loop. Nothing in the frontend
+# uses them (they exist for model testing and ops), so restricting them to
+# admins closes the abuse vector at no functional cost.
+@router.post("/classification", response_model=ClassificationResponse,
+             dependencies=[Depends(require_admin)])
 def classification(payload: PredictionRequest):
     from app.main import clf_model, clf_features, clf_threshold
 
@@ -247,7 +254,8 @@ def classification(payload: PredictionRequest):
     return run_classification(payload.model_dump(), clf_model, clf_features, clf_threshold)
 
 
-@router.post("/regression", response_model=RegressionResponse)
+@router.post("/regression", response_model=RegressionResponse,
+             dependencies=[Depends(require_admin)])
 def regression(payload: PredictionRequest):
     from app.main import reg_model, reg_features
 
@@ -256,12 +264,14 @@ def regression(payload: PredictionRequest):
     return run_regression(payload.model_dump(), reg_model, reg_features)
 
 
-@router.post("/health-score", response_model=HealthScoreResponse)
+@router.post("/health-score", response_model=HealthScoreResponse,
+             dependencies=[Depends(require_admin)])
 def health_score(payload: PredictionRequest):
     return run_health_score(payload.model_dump())
 
 
-@router.post("/full", response_model=FullPredictionResponse)
+@router.post("/full", response_model=FullPredictionResponse,
+             dependencies=[Depends(require_admin)])
 def full_prediction(payload: PredictionRequest):
     from app.main import clf_model, clf_features, reg_model, reg_features, clf_threshold
 

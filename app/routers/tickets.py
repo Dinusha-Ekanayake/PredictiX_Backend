@@ -642,10 +642,16 @@ def preview_ticket(payload: TicketPreviewRequest, _: object = Depends(get_curren
     )
 
 
+# Admin-gated, not user-gated: this forwards free text straight to a Hugging
+# Face Space, so any account could use it as an unmetered proxy to that Space
+# and exhaust it for the ticket-creation path that actually needs it. Ticket
+# creation is unaffected — it calls categorize_ticket_text() directly (see
+# create_ticket above) rather than going through this route, and no frontend
+# code calls this endpoint at all.
 @router.post(
     "/categorize",
     response_model=TicketCategorizationResponse,
-    dependencies=[Depends(require_user)],
+    dependencies=[Depends(require_admin)],
 )
 def categorize_ticket_endpoint(payload: TicketCategorizationRequest):
     try:
@@ -665,7 +671,7 @@ def categorize_ticket_endpoint(payload: TicketCategorizationRequest):
         "Sends ticket text to the AroshN/priority_classif_xgb XGBoost model on Hugging Face "
         "and returns a single priority label (e.g. Low, Medium, High, Critical)."
     ),
-    dependencies=[Depends(require_user)],
+    dependencies=[Depends(require_admin)],
 )
 def prioritize_ticket_endpoint(payload: TicketPriorityRequest):
     try:

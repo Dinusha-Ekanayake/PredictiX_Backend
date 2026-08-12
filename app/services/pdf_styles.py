@@ -46,6 +46,28 @@ def risk_color(level: str) -> colors.Color:
     return mapping.get((level or "").lower(), COLORS.TEXT_MUTED)
 
 
+def health_band_color(band: str | None) -> colors.Color:
+    """Colour for a health band from app/services/health_bands.py.
+
+    The health bar previously coloured itself from raw thresholds written
+    inline (``health >= 80 ? LOW : health >= 60 ? MEDIUM : CRITICAL``). Those
+    cut-offs belonged to no shared definition and the top one was unreachable —
+    fleet health scores peak at 79 — so every asset report rendered an amber or
+    red bar and none could ever be green.
+
+    Five bands against four risk colours, so ``good`` borrows the mid-teal:
+    it reads as positive without being the same green as ``excellent``.
+    """
+    mapping = {
+        "excellent": COLORS.LOW,
+        "good":      COLORS.TEAL_MID,
+        "moderate":  COLORS.MEDIUM,
+        "poor":      COLORS.HIGH,
+        "critical":  COLORS.CRITICAL,
+    }
+    return mapping.get((band or "").lower(), COLORS.TEXT_MUTED)
+
+
 def risk_style_key(level: str) -> str:
     mapping = {
         "critical": "risk_critical",

@@ -90,7 +90,6 @@ def handle_action(question: str, ctx: ToolContext) -> dict:
                 {"role": "system", "content": ACTION_PROMPT},
                 {"role": "user", "content": question}
             ],
-            model="llama-3.1-8b-instant",
             max_tokens=200,
             temperature=0.1
         )

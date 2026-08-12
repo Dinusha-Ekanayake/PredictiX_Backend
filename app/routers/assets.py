@@ -140,10 +140,20 @@ class ServiceReminderRequest(BaseModel):
 def list_assets_dropdown(
     search: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    limit: int = Query(default=2000, ge=1, le=5000),
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
-    """Returns only id, asset_code, asset_name, asset_type, warehouse_id — fast for populating dropdowns."""
+    """Returns only id, asset_code, asset_name, asset_type, warehouse_id — fast for populating dropdowns.
+
+    The result is bounded. Both callers (the admin and user New Ticket dialogs)
+    fetch this once on mount with no search term and filter client-side, so the
+    bound must stay above the real fleet size or assets would silently vanish
+    from the picker — the default of 2000 is well clear of the current ~850 and
+    exists to stop the response growing without limit as the fleet does. The
+    ``search`` parameter is already server-side, so the path to a smaller
+    payload is to send it rather than to lower this number.
+    """
     q = db.query(Asset.id, Asset.asset_code, Asset.asset_name, Asset.asset_type, Asset.warehouse_id)
     if is_admin_role(current_user):
         scoped_wh = _enforced_warehouse(current_user)
@@ -159,7 +169,7 @@ def list_assets_dropdown(
         ))
     if status:
         q = q.filter(Asset.status == status)
-    rows = q.order_by(Asset.asset_name.asc()).all()
+    rows = q.order_by(Asset.asset_name.asc()).limit(limit).all()
     return [
         {
             "id": str(r.id),

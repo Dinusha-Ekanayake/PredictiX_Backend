@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.deps import get_db, get_current_user, require_admin, require_user, active_warehouse_id
-from app.models import Profile, Warehouse, Department, Asset, AssetAssignment, AssetFailurePrediction
+from app.models import Profile, Warehouse, Department, Asset, AssetAssignment, AssetFailurePrediction, PdmBatchPrediction
 from app.schemas.user_profile import (
     UserProfileOut,
     UserProfileUpdate,
@@ -188,13 +188,16 @@ def get_my_assets(
         rows = db.execute(sql_text("""
             SELECT
                 a.id, a.asset_code, a.asset_name, a.asset_type, a.vehicle_type,
-                a.category, a.status, a.criticality_score, a.next_service_date,
+                a.category, a.status, a.next_service_date,
                 a.make, a.model,
                 w.name AS wh_name, w.city AS wh_city,
+                p.health_score,
                 sr.tire_health_pct, sr.brake_health_pct,
                 sr.battery_health_pct, sr.oil_life_pct, sr.hydraulic_health_pct
             FROM assets a
             LEFT JOIN warehouses w ON w.id = a.warehouse_id
+            LEFT JOIN pdm_batch_predictions p
+                   ON p.asset_id = a.id AND p.status = 'ok'
             LEFT JOIN LATERAL (
                 SELECT tire_health_pct, brake_health_pct, battery_health_pct,
                        oil_life_pct, hydraulic_health_pct
@@ -214,7 +217,12 @@ def get_my_assets(
             loc = r.wh_name or ""
             if r.wh_city:
                 loc += f" - {r.wh_city}"
-            health = float(r.criticality_score) if r.criticality_score else 100.0
+            # Real health score, not criticality_score (how *important* the
+            # asset is), and None rather than a fabricated 100.0 when nothing
+            # has scored it. Same fix as profile.py / users.py — this router is
+            # deprecated but still mounted, so it could otherwise keep serving
+            # the wrong number to anything that called it directly.
+            health = float(r.health_score) if r.health_score is not None else None
             result.append({
                 "assignment_id": str(r.id),
                 "asset_id": str(r.id),
@@ -226,7 +234,7 @@ def get_my_assets(
                 "model": r.model or "",
                 "location": loc,
                 "status": r.status or "active",
-                "healthPercent": round(health, 1),
+                "healthPercent": round(health, 1) if health is not None else None,
                 "nextServiceDate": r.next_service_date.isoformat() if r.next_service_date else None,
                 "sensorHealth": {
                     "tire": round(float(r.tire_health_pct), 1) if r.tire_health_pct else None,
@@ -401,11 +409,32 @@ def get_user_assets(user_id: str, db: Session = Depends(get_db)):
         extra_assets = db.query(Asset).filter(Asset.id.in_(extra_ids)).all() if extra_ids else []
         assets = direct_assets + extra_assets
         
+        # Warehouse names and health scores resolved in one query each. The
+        # warehouse lookup used to sit inside the loop below — one round-trip
+        # per asset, against a database in another region.
+        wh_ids = {a.warehouse_id for a in assets if a.warehouse_id is not None}
+        wh_names = {
+            w.id: w.name
+            for w in db.query(Warehouse.id, Warehouse.name).filter(Warehouse.id.in_(wh_ids)).all()
+        } if wh_ids else {}
+
+        asset_ids = [a.id for a in assets]
+        health_by_asset = {
+            row.asset_id: row.health_score
+            for row in db.query(
+                PdmBatchPrediction.asset_id, PdmBatchPrediction.health_score
+            ).filter(
+                PdmBatchPrediction.asset_id.in_(asset_ids),
+                PdmBatchPrediction.status == "ok",
+            ).all()
+        } if asset_ids else {}
+
         result = []
         for asset in assets:
-            wh = db.query(Warehouse).filter(Warehouse.id == asset.warehouse_id).first()
-            loc = wh.name if wh else "Unknown"
-            
+            loc = wh_names.get(asset.warehouse_id, "Unknown")
+            # Real health, not criticality_score, and None when unscored.
+            health = health_by_asset.get(asset.id)
+
             result.append(UserAssignedAssetOut(
                 assignment_id=str(asset.id),
                 asset_id=str(asset.id),
@@ -415,7 +444,7 @@ def get_user_assets(user_id: str, db: Session = Depends(get_db)):
                 category=asset.category,
                 location=loc,
                 status=asset.status or "active",
-                healthPercent=float(asset.criticality_score or 100),
+                healthPercent=float(health) if health is not None else None,
                 nextServiceDate=asset.next_service_date.isoformat() if asset.next_service_date else None
             ))
         return result

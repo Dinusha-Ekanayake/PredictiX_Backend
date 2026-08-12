@@ -228,7 +228,6 @@ def handle_faq(question: str, ctx: ToolContext) -> dict:
                     ),
                 },
             ],
-            model="llama-3.1-8b-instant",
             max_tokens=400,
             temperature=0.1,
         )
@@ -274,7 +273,6 @@ def handle_knowledge(question: str, ctx: ToolContext) -> dict:
                 },
                 {"role": "user", "content": f"Question: {question}\n\nKnowledge Base:\n{context_str}"},
             ],
-            model="llama-3.1-8b-instant",
             max_tokens=300,
             temperature=0.4,
         )
@@ -306,17 +304,25 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                     },
                     {"role": "user", "content": question}
                 ],
-                model="llama-3.1-8b-instant",
                 max_tokens=300,
                 temperature=0.3,
             )
             if ans:
                 return {"answer": fb + str(ans), "action_buttons": []}
-        except Exception:
-            pass
-            
+        except Exception as exc:
+            # Swallowed on purpose — the caller still gets the contact-admin
+            # reply below — but never silently: a persistently failing LLM here
+            # is invisible otherwise, since the user just sees a polite message.
+            log.warning("Generic chatbot fallback could not reach the LLM: %s", exc)
+
         return {
-            "answer": "Please reach out to our admins at **neuromindspredictix@gmail.com** and they'll get back to you as soon as possible. *(Debug: Generic fallback hit)*",
+            # The trailing "(Debug: Generic fallback hit)" that used to be here
+            # was shipped verbatim to end users in the chat window.
+            "answer": (
+                "I couldn't find an answer to that in your fleet data. "
+                "Please reach out to our admins at **neuromindspredictix@gmail.com** "
+                "and they'll get back to you as soon as possible."
+            ),
             "action_buttons": [{"label": "Copy Admin Email", "path": "copy:neuromindspredictix@gmail.com"}],
         }
 
@@ -339,7 +345,6 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                         },
                         {"role": "user", "content": question}
                     ],
-                    model="llama-3.1-8b-instant",
                     max_tokens=300,
                     temperature=0.3,
                 )
@@ -528,7 +533,6 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
         try:
             raw_tables, fb = call_groq(
                 messages=[{"role": "user", "content": selector_prompt}],
-                model="llama-3.1-8b-instant",
                 max_tokens=60,
                 temperature=0.1,
             )
@@ -730,7 +734,6 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
     try:
         summary, fb = call_groq(
             messages=[{"role": "user", "content": summarizer_prompt}],
-            model="llama-3.1-8b-instant",
             max_tokens=400,
             temperature=0.2,
         )
