@@ -184,12 +184,22 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
              WHERE {_assets_in})                                      AS max_maint_at,
             (SELECT COALESCE(SUM(estimated_cost_lkr), 0)
              FROM pdm_batch_predictions
-             WHERE status = 'ok' AND {_assets_in})                    AS est_cost
+             WHERE status = 'ok' AND {_assets_in})                    AS est_cost,
+            -- SUM skips NULLs, and estimated_cost_lkr is NULL whenever the cost
+            -- model could not score an asset (it no longer substitutes a
+            -- heuristic guess). Without a coverage count a broken cost model
+            -- would just look like a cheaper fleet, so report how many assets
+            -- the total actually covers and let the UI qualify it.
+            (SELECT COUNT(*)
+             FROM pdm_batch_predictions
+             WHERE status = 'ok' AND estimated_cost_lkr IS NOT NULL
+               AND {_assets_in})                                      AS costed_assets
     """), _wh).fetchone()
 
     total_assets          = int(misc_agg[0] or 0)
     maint_anchor_dt       = misc_agg[1] or now
     est_maintenance_cost  = int(misc_agg[2] or 0)
+    costed_assets         = int(misc_agg[3] or 0)
 
     # health_distribution's 5 bands only cover assets with a completed
     # ('ok', non-null health_score) prediction — an asset with a failed
@@ -211,6 +221,9 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
         "fleetHealth":        fleet_health,
         "predictedFailures":  predicted_failures,
         "estMaintenanceCost": est_maintenance_cost,
+        # How many assets the figure above is actually built from. When this is
+        # below totalAssets the total is partial, not a lower fleet spend.
+        "estMaintenanceCostAssetCount": costed_assets,
         "hasPredictionData":  has_prediction_data,
     }
     footer_stats = {
@@ -599,12 +612,27 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
     # once a day inside the existing scheduled batch job (one Groq call per
     # warehouse per day) and persist it, rather than any live cache.
     ai_summary_is_generated = False
+
+    # The cost sentence has to survive a cost model that scored none or only
+    # some of the fleet. Stating a partial sum as "the" estimated cost would
+    # under-report fleet spend with nothing to indicate why, so the sentence
+    # says what it covers — or says the estimate is unavailable and stops.
+    if costed_assets == 0:
+        cost_sentence = "Estimated maintenance cost is unavailable — the cost model has not scored any assets."
+    elif costed_assets < total_assets:
+        cost_sentence = (
+            f"Estimated maintenance cost is Rs.{est_maintenance_cost:,} across the "
+            f"{costed_assets} of {int(total_assets)} assets the cost model could score."
+        )
+    else:
+        cost_sentence = f"Estimated maintenance cost is Rs.{est_maintenance_cost:,}."
+
     ai_summary = (
         f"Fleet health averages {fleet_health}% across {int(total_assets)} assets. "
         f"{int(critical_alerts)} assets are at risk and {int(predicted_failures)} are "
         f"predicted to fail within the maintenance horizon. "
         f"{int(open_tickets)} tickets are open ({int(high_priority_tickets)} high priority). "
-        f"Estimated maintenance cost is Rs.{est_maintenance_cost:,}."
+        f"{cost_sentence}"
     )
 
     return {

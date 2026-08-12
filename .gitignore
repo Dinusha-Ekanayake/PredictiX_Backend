@@ -1,4 +1,7 @@
+# `.env` alone only matches that exact name — a `.env.bak` left by an edit, or
+# a `.env.production`, was still committable with every secret in it.
 .env
+.env.*
 .venv/
 
 __pycache__/

@@ -30,8 +30,6 @@ from .routers.admin_dashboard import admin_dashboard_router
 from .routers.chatbot import router as chatbot_router
 from .routers.faqs import router as faqs_router
 from .routers.asset_assignments import router as asset_assignments_router
-from .routers.asset_documents import router as asset_documents_router
-from .routers.asset_status_history import router as asset_status_history_router
 from .routers.asset_summaries import router as asset_summaries_router
 from .routers.ticket_summaries import router as ticket_summaries_router
 from .routers.asset_component_rul import router as asset_component_rul_router
@@ -40,12 +38,9 @@ from .routers.auth import router as auth_router
 from .routers.db_debug import router as db_debug_router
 from .routers.departments import router as departments_router
 from .routers.maintenance import router as maintenance_router
-from .routers.model_registry import router as model_registry_router
 from .routers.notifications import router as notifications_router
-from .routers.prediction_explanations import router as prediction_explanations_router
 from .routers.predictions import router as predictions_router
 from .routers.profile import router as profiles_router
-from .routers.report_sources import router as report_sources_router
 from .routers.sensor_readings import router as sensor_readings_router
 from .routers.ticket_attachments import router as ticket_attachments_router
 from .routers.ticket_comments import router as ticket_comments_router
@@ -123,10 +118,20 @@ _model_load_lock = __import__('threading').Lock()
 
 
 def _load_decision_log(path: Path) -> dict:
+    """Load a model's decision-log sidecar. Absent is normal; corrupt is not.
+
+    Both used to collapse into a silent ``{}``, so a malformed log looked
+    exactly like a model that never shipped one.
+    """
+    if not path.exists():
+        return {}
     try:
         with open(path, "r", encoding="utf-8") as fh:
             return json.load(fh)
-    except Exception:
+    except (OSError, json.JSONDecodeError) as exc:
+        logging.getLogger("predictix").warning(
+            "Could not read decision log %s: %s", path.name, exc
+        )
         return {}
 
 
@@ -486,8 +491,6 @@ app.include_router(departments_router)
 # Assets & maintenance
 app.include_router(assets_router)
 app.include_router(asset_assignments_router)
-app.include_router(asset_status_history_router)
-app.include_router(asset_documents_router)
 app.include_router(asset_summaries_router)
 app.include_router(maintenance_router)
 app.include_router(sensor_readings_router)
@@ -505,8 +508,6 @@ app.include_router(asset_component_rul_router)
 app.include_router(predictions_router)
 app.include_router(vehicle_predictions_router)
 app.include_router(batch_predictions_router)
-app.include_router(prediction_explanations_router)
-app.include_router(model_registry_router)
 app.include_router(warehouse_dashboard_router)
 app.include_router(survival_predictions_router)
 app.include_router(admin_dashboard_router)
@@ -515,7 +516,6 @@ app.include_router(admin_dashboard_router)
 app.include_router(notifications_router)
 app.include_router(notification_preferences_router)
 app.include_router(reports_router)
-app.include_router(report_sources_router)
 app.include_router(asset_reports_router)
 
 # Chatbot

@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from app.deps import get_db, require_user, get_current_user, is_admin_role
+from app.deps import get_db, require_admin, require_user, get_current_user, is_admin_role
 from app.models import Profile, Ticket, TicketStatusHistory
 from app.schemas.misc import TicketStatusHistoryCreate, TicketStatusHistoryOut
 
@@ -23,7 +23,12 @@ def _can_view_ticket(ticket: Ticket, current_user: Profile) -> bool:
     return str(ticket.created_by) == uid or str(ticket.assigned_to) == uid
 
 
-@router.post("/", response_model=TicketStatusHistoryOut)
+# Status history is an audit trail. This endpoint took no caller identity, so
+# any authenticated user could append arbitrary transitions to any ticket —
+# including ones they cannot even view — and attribute them to whoever they
+# liked. The application writes history itself when a ticket actually changes
+# (see the ticket services), so nothing in the product posts here.
+@router.post("/", response_model=TicketStatusHistoryOut, dependencies=[Depends(require_admin)])
 def create_ticket_status_history(payload: TicketStatusHistoryCreate, db: Session = Depends(get_db)):
     ticket = db.query(Ticket).filter(Ticket.id == payload.ticket_id).first()
     if not ticket:

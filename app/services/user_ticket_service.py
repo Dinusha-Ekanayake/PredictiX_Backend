@@ -113,12 +113,29 @@ def get_owned_ticket_or_none(
 def user_can_view_ticket(
     ticket: Ticket, user_id: UUID, warehouse_id: Optional[UUID] = None
 ) -> bool:
-    """A user may view (and comment on) a ticket they created, are assigned
-    to, or that belongs to their own warehouse — matches the visibility
-    rule in app.routers.tickets.get_ticket. Editing stays owner-only, see
-    get_owned_ticket_or_none."""
-    if warehouse_id is not None and ticket.warehouse_id == warehouse_id:
-        return True
+    """Whether a user may view (and comment on) a ticket.
+
+    The warehouse is a hard boundary: a user sees tickets belonging to their
+    own warehouse, and nothing outside it. Being the creator or assignee no
+    longer grants access across that boundary — previously it did, so a ticket
+    raised before someone transferred sites, or one moved to another warehouse,
+    stayed readable from the wrong site indefinitely.
+
+    Within the caller's own warehouse every ticket is viewable, which is what
+    makes colleagues able to pick up and comment on each other's work. What the
+    *list* surfaces is a separate, narrower question — see
+    :func:`build_user_tickets_query`, which returns only the caller's own.
+
+    ``warehouse_id`` may be ``None`` when the caller's warehouse is unknown
+    (a profile with no site, or a caller that does not pass one). There is no
+    boundary to enforce in that case, so it falls back to ownership rather than
+    denying outright, which would lock a user out of a ticket that is
+    demonstrably theirs.
+
+    Editing remains owner-only regardless — see :func:`get_owned_ticket_or_none`.
+    """
+    if warehouse_id is not None:
+        return ticket.warehouse_id == warehouse_id
     return ticket.created_by == user_id or ticket.assigned_to == user_id
 
 
@@ -149,13 +166,29 @@ def build_user_tickets_query(
     sort_by: str = "created_at",
     sort_dir: str = "desc",
 ):
-    """Build a SQLAlchemy query scoped to tickets the user can see: ones
-    they created or are assigned to, plus every ticket in their own
-    warehouse (matches user_can_view_ticket / app.routers.tickets.list_tickets)."""
-    visibility = [Ticket.created_by == user_id, Ticket.assigned_to == user_id]
-    if warehouse_id is not None:
-        visibility.append(Ticket.warehouse_id == warehouse_id)
-    q = db.query(Ticket).filter(or_(*visibility))
+    """Build a SQLAlchemy query for the tickets that belong to this user —
+    ones they created or are assigned to.
+
+    This previously also ORed in every ticket in the user's warehouse, which
+    put the list at odds with everything around it: the page is titled "My
+    Tickets", the endpoints are ``list_my_tickets`` / ``my_ticket_stats``, and
+    the KPI cards above the list come from
+    :func:`get_user_ticket_status_counts`, which has always been owner-scoped.
+    A user who had never raised or been assigned a ticket saw cards reading 0
+    above a list of 436 — the same screen disagreeing with itself.
+
+    ``warehouse_id`` is retained in the signature (callers still pass it, and
+    it stays useful for a future "all warehouse tickets" view) but no longer
+    widens visibility here.
+
+    Note this governs the *list* only. :func:`user_can_view_ticket` still
+    permits opening any ticket in your own warehouse by id, which is a
+    deliberately separate question from what the list shows you. Editing
+    remains owner-only via :func:`get_owned_ticket_or_none`.
+    """
+    q = db.query(Ticket).filter(
+        or_(Ticket.created_by == user_id, Ticket.assigned_to == user_id)
+    )
 
     if status:
         q = q.filter(Ticket.status == status)
@@ -191,10 +224,19 @@ def build_user_tickets_query(
 def get_user_ticket_status_counts(db: Session, user_id: UUID) -> dict[str, int]:
     """Authoritative status counts for the user's OWN tickets, computed directly
     in Postgres (GROUP BY status) and independent of any list filter/pagination.
-    These are the numbers the KPI cards should display."""
+    These are the numbers the KPI cards should display.
+
+    "Own" must mean the same thing here as in :func:`build_user_tickets_query`
+    — created **or** assigned. This previously counted only ``created_by``,
+    which was invisible while the list was warehouse-wide but wrong for anyone
+    who is assigned work without raising it themselves: a mechanic with nine
+    assigned tickets saw nine rows under cards reading zero. Drivers raise
+    tickets and technicians receive them, so that describes most of the
+    maintenance staff.
+    """
     rows = (
         db.query(Ticket.status, func.count(Ticket.id))
-        .filter(Ticket.created_by == user_id)
+        .filter(or_(Ticket.created_by == user_id, Ticket.assigned_to == user_id))
         .group_by(Ticket.status)
         .all()
     )

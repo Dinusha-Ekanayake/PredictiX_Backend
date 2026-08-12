@@ -11,9 +11,19 @@ from app.ai.agent.agent_service import run_agent
 from app.ai.agent.tools import ToolContext
 from app.ai.services.knowledge_service import search_knowledge
 from app.ai.services.llm_service import ask_llm
-from app.deps import get_current_user, get_db
+from app.deps import get_current_user, get_db, require_user
 
-router = APIRouter(prefix="/chatbot", tags=["Chatbot"])
+# Every endpoint here spends Groq quota on the caller's behalf, so a valid token
+# is required at the router level. /ask previously had no auth dependency at
+# all: an anonymous POST to the public URL returned a real model answer, and
+# with no rate limiting anywhere in the application that is an open tap on a
+# paid API. The frontend already sends a token on the endpoint it actually uses
+# (/agent), so this closes the hole without changing any working call.
+router = APIRouter(
+    prefix="/chatbot",
+    tags=["Chatbot"],
+    dependencies=[Depends(require_user)],
+)
 
 
 # ─── Models ───────────────────────────────────────────────────────────────────
@@ -60,10 +70,15 @@ class AgentResponse(BaseModel):
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
 
-@router.post("/ask", response_model=ChatResponse)
+@router.post("/ask", response_model=ChatResponse, deprecated=True)
 def ask_question(request: ChatRequest):
     """Legacy RAG endpoint — kept for backwards compatibility only.
     The main chatbot should use /chatbot/agent instead.
+
+    Marked deprecated to match reality: the only frontend helper that targets
+    this path (askChatbot in lib/apiClient.ts) is not called by any component,
+    and it sends no Authorization header — so it would now fail. Every chat
+    surface in the product goes through /chatbot/agent.
     """
     results = search_knowledge(request.question)
     context = (

@@ -148,36 +148,43 @@ SHAP_KB_MAP: dict[str, dict] = {
 # Mapped to asset_health_band ENUM from DB schema
 # ═══════════════════════════════════════════════════════════════
 
+# Ranges are the canonical bands from app/services/health_bands.py, which are
+# also the asset_health_band Postgres enum. They were previously a separate
+# 90/80/70/60/50 scale whose db_enum column claimed, for example, that
+# "90–100%" was excellent and "Below 50%" was critical.
+#
+# health_score is the mean component health *minus* a failure-probability and
+# urgency penalty, so it peaks at 79 across the real fleet. On the old scale the
+# top two bands were unreachable, "excellent" and "good" were always 0, and 621
+# of 850 assets landed in "critical" — an alert covering three-quarters of a
+# normally-worn fleet. The bands below are calibrated so each one is reachable
+# and means the same thing here as on the dashboard and the assets list.
 HEALTH_BAND_KB: list[dict] = [
     {
-        "band": "90–100%",
+        "band": "60–100%",
         "db_enum": "excellent",
         "kb_interpretation": "Optimal — maintain current schedule",
     },
     {
-        "band": "80–89%",
+        "band": "50–59%",
         "db_enum": "good",
         "kb_interpretation": "Good — monitor; preventive care on-track",
     },
     {
-        "band": "70–79%",
+        "band": "38–49%",
         "db_enum": "moderate",
         "kb_interpretation": "Moderate — schedule service within 2 weeks",
     },
     {
-        "band": "60–69%",
+        "band": "25–37%",
         "db_enum": "poor",
         "kb_interpretation": "At-Risk — schedule service within 14 days",
     },
     {
-        "band": "50–59%",
-        "db_enum": "poor",
-        "kb_interpretation": "High Risk — service within 7 days",
-    },
-    {
-        # Canonical "Critical" cutoff for the whole report: health < 50%.
-        # Matches the §1/§7 Critical-Assets KPI and the benchmark narrative.
-        "band": "Below 50%",
+        # Canonical "Critical" cutoff for the whole report: health < 25%.
+        # Matches the §1/§7 Critical-Assets KPI, the dashboard's Critical
+        # Alerts count, and assets.health_band = 'critical'.
+        "band": "Below 25%",
         "db_enum": "critical",
         "kb_interpretation": "Critical — immediate intervention required",
     },
