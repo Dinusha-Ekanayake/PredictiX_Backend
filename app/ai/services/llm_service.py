@@ -32,16 +32,32 @@ log = logging.getLogger("predictix.llm")
 # kept as a fallback: a key with broader access would use it, and on this key it
 # is simply never reached. Re-probe before trusting these notes — the point of
 # the cascade is that Groq retires models faster than this file gets edited.
-MODEL_CASCADE = [
+MODEL_COMPOUND = "groq/compound"
+MODEL_COMPOUND_MINI = "groq/compound-mini"
+
+FAST_MODELS = [
+    "groq/compound-mini",
+    "groq/compound",
     "llama-3.3-70b-versatile",
+    "qwen/qwen3.6-27b",
 ]
 
-# The model every caller starts from unless it asks for a specific one. Callers
-# used to hardcode "llama-3.1-8b-instant" individually, which meant each one
-# spent a 403 before the cascade rescued it — and each was a separate place to
-# edit when Groq retired a model. Pointing them at the head of the cascade keeps
-# that decision in exactly one place.
-DEFAULT_MODEL = MODEL_CASCADE[0]
+HEAVY_MODELS = [
+    "groq/compound",
+    "groq/compound-mini",
+    "llama-3.3-70b-versatile",
+    "openai/gpt-oss-120b",
+]
+
+MODEL_CASCADE = [
+    "groq/compound-mini",
+    "groq/compound",
+    "llama-3.3-70b-versatile",
+    "qwen/qwen3.6-27b",
+    "openai/gpt-oss-120b",
+]
+
+DEFAULT_MODEL = MODEL_COMPOUND_MINI
 
 
 def _client() -> Groq:
@@ -116,7 +132,10 @@ def call_groq(
             )
 
             if is_model_blocked:
-                next_model = next((m for m in MODEL_CASCADE if m not in tried), None)
+                pool = HEAVY_MODELS if current_model in HEAVY_MODELS else FAST_MODELS
+                next_model = next((m for m in pool if m not in tried), None)
+                if not next_model:
+                    next_model = next((m for m in MODEL_CASCADE if m not in tried), None)
                 if next_model:
                     log.warning(
                         "Model %s blocked. Falling back to %s.",
