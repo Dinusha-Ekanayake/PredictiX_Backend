@@ -106,7 +106,7 @@ def call_groq(
                     log.warning("Model %s blocked/decommissioned. Falling back to %s.", current_model, next_model)
                     current_model = next_model
                     kwargs["model"] = current_model
-                    fallback_message = f"💡 Switching to backup model for best results."
+                    fallback_message = ""
                     continue
 
             if attempt < retries:
