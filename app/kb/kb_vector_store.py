@@ -2,46 +2,80 @@
 PredictiX KB Vector Store
 ===========================
 TF-IDF based vector store using sklearn (already in .venv — zero new installs).
-Loads KB_DOCUMENTS from kb_documents.py and enables semantic retrieval.
+Loads KB_DOCUMENTS dynamically from the Supabase Postgres database.
 
-Why TF-IDF instead of dense embeddings:
-- sklearn is already installed in the venv
-- KB is small (~15 documents) — TF-IDF is accurate at this scale
-- No model download, no GPU, instant startup
-- The pgvector extension exists in Supabase DB (for future dense embedding upgrade)
+Features lazy loading so it doesn't run blocking network requests during module import
+or FastAPI app startup.
 """
 
 from __future__ import annotations
 
+import logging
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+from app.db.supabase_client import supabase
 
-from .kb_documents import KB_DOCUMENTS
+log = logging.getLogger("predictix.kb_vector_store")
 
 
 class KBVectorStore:
     """
     Lightweight in-memory vector store using TF-IDF + cosine similarity.
-    Built on existing sklearn installation — no new dependencies required.
+    Loads articles dynamically from the Supabase database.
     """
 
     def __init__(self) -> None:
-        self._docs = KB_DOCUMENTS
+        self._docs = None
+        self._ids = []
+        self._texts = []
+        self._tags = []
+        self._vectorizer = None
+        self._matrix = None
+
+    def _ensure_loaded(self) -> None:
+        """Lazy load documents and fit the TF-IDF index if not loaded yet."""
+        if self._docs is not None:
+            return
+
+        try:
+            log.info("Lazy-loading knowledge base documents from Supabase...")
+            # Query active articles from database
+            response = supabase.from_("knowledge_base").select("id, title, content, category, tags, source").eq("is_active", True).execute()
+            docs = []
+            for r in (response.data or []):
+                docs.append({
+                    "id": r["id"],
+                    "section": f"{r.get('category') or 'General'}: {r['title']}",
+                    "text": r["content"],
+                    "tags": r.get("tags") or [],
+                    "source": r.get("source") or ""
+                })
+            
+            self._docs = docs
+            log.info("Loaded %d active articles from database.", len(docs))
+        except Exception as e:
+            log.error("Failed to load knowledge base articles from database: %s", e)
+            self._docs = []
+
         self._ids   = [d["id"]   for d in self._docs]
         self._texts = [d["text"] for d in self._docs]
         self._tags  = [d.get("tags", []) for d in self._docs]
 
-        # Build TF-IDF matrix over all KB document texts
-        self._vectorizer = TfidfVectorizer(
-            strip_accents="unicode",
-            lowercase=True,
-            stop_words="english",
-            ngram_range=(1, 2),          # unigrams + bigrams for better recall
-            max_features=2000,
-            sublinear_tf=True,           # log-normalization for length robustness
-        )
-        self._matrix = self._vectorizer.fit_transform(self._texts)
+        # Fit TF-IDF matrix if we have documents
+        if self._texts:
+            self._vectorizer = TfidfVectorizer(
+                strip_accents="unicode",
+                lowercase=True,
+                stop_words="english",
+                ngram_range=(1, 2),
+                max_features=2000,
+                sublinear_tf=True,
+            )
+            self._matrix = self._vectorizer.fit_transform(self._texts)
+        else:
+            self._vectorizer = None
+            self._matrix = None
 
     # ── Public API ───────────────────────────────────────────────
 
@@ -50,6 +84,10 @@ class KBVectorStore:
         Retrieve top_k most relevant KB chunks for a query string.
         Returns list of dicts with: id, section, text, score.
         """
+        self._ensure_loaded()
+        if not self._matrix or not self._vectorizer:
+            return []
+
         q_vec  = self._vectorizer.transform([query])
         scores = cosine_similarity(q_vec, self._matrix)[0]
         top_idx = np.argsort(scores)[::-1][:top_k]
@@ -58,8 +96,8 @@ class KBVectorStore:
                 **self._docs[i],
                 "score": float(scores[i]),
             }
-            for i in top_idx
-            if scores[i] >= min_score
+              for i in top_idx
+              if scores[i] >= min_score
         ]
 
     def retrieve_by_tags(self, tags: list[str], top_k: int = 6) -> list[dict]:
@@ -67,6 +105,7 @@ class KBVectorStore:
         Retrieve documents matching any of the provided tags (exact match).
         Useful for deterministic section-scoped retrieval.
         """
+        self._ensure_loaded()
         results = []
         for doc in self._docs:
             doc_tags = set(doc.get("tags", []))
@@ -92,10 +131,9 @@ class KBVectorStore:
     def build_full_kb_context(self) -> str:
         """
         Return ALL KB documents as a structured, source-grouped string for
-        full-context LLM injection. Preferred for the complete warehouse report:
-        the curated corpus is small enough to inject in full, guaranteeing no
-        relevant standard is dropped by top-k retrieval.
+        full-context LLM injection. Preferred for the complete warehouse report.
         """
+        self._ensure_loaded()
         lines = [
             "=" * 64,
             "PREDICTIX KNOWLEDGE BASE — MAINTENANCE STANDARDS & SOURCES",
