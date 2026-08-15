@@ -60,7 +60,7 @@ from .routers.warmup import router as warmup_router
 from .routers.user_tickets import router as user_tickets_router
 # Sharada — FRSO warehouse-level survival predictions (/survival/*)
 from .routers.survival_predictions import router as survival_predictions_router
-from .routers.knowledge_base import router as knowledge_base_router
+from .chatbot.knowledge_base import router as knowledge_base_router
 
 # ─── ML warmup ────────────────────────────────────────────────────────────────
 # Asset & ticket summaries run on HF Spaces (online) — nothing to warm up here.

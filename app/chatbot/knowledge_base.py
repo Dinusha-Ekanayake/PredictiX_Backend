@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.deps import get_current_user, is_admin_role, get_db
 from app.db.supabase_client import supabase
-from app.ai.services.knowledge_service import embed_text
+from app.chatbot.knowledge_service import embed_text
 
 log = logging.getLogger("predictix.knowledge_base")
 

@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.ai.agent.agent_service import run_agent
 from app.ai.agent.tools import ToolContext
-from app.ai.services.knowledge_service import search_knowledge
+from app.chatbot.knowledge_service import search_knowledge
 from app.ai.services.llm_service import ask_llm
 from app.deps import get_current_user, get_db, require_user
 

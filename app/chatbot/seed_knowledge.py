@@ -18,7 +18,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from app.db import SessionLocal
 from sqlalchemy import text
-from app.ai.services.knowledge_service import embed_text
+from app.chatbot.knowledge_service import embed_text
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("seed_knowledge")

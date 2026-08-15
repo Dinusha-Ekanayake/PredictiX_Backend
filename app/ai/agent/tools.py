@@ -249,7 +249,7 @@ def handle_faq(question: str, ctx: ToolContext) -> dict:
 def handle_knowledge(question: str, ctx: ToolContext) -> dict:
     """Semantic search on knowledge base, then summarize with fast model."""
     from app.ai.services.llm_service import call_groq
-    from app.ai.services.knowledge_service import search_knowledge
+    from app.chatbot.knowledge_service import search_knowledge
 
     results = search_knowledge(question, match_count=4)
     if not results:
