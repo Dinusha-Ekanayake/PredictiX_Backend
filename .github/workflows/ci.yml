@@ -56,17 +56,22 @@ jobs:
 
       - name: No obvious hardcoded credentials
         run: |
-          # Provider-shaped tokens in source. Narrow on purpose: a check that
-          # cries wolf gets ignored, which is worse than no check at all.
-          # Placeholders in help text (gsk_xxxxxxxx, "your-key-here") are not
-          # findings, so they are filtered out rather than failing the build.
-          MATCHES=$(grep -rInE \
-            '(gsk_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|eyJhbGciOi[A-Za-z0-9]{20,})' \
-            --include='*.py' app scripts \
-            | grep -viE 'x{6,}|your[-_ ]?(api[-_ ])?key|placeholder|example|<[a-z_]+>' || true)
+          # Scans every tracked text file, not just app/ and scripts/. A
+          # previous version checked only those two directories and therefore
+          # missed two root-level scripts that carried a live database URL.
+          #
+          # Narrow patterns on purpose: a check that cries wolf gets ignored,
+          # which is worse than no check. Placeholders (gsk_xxxxxxxx,
+          # "<project-ref>", "your-api-key") are filtered out rather than
+          # failing the build.
+          FILES=$(git ls-files | grep -vE '\.(pkl|csv|pdf|ipynb|png|jpg|svg|lock)$' || true)
+          MATCHES=$(echo "$FILES" | xargs -r grep -InE \
+            'postgres(ql)?(\+psycopg2)?://[^:]+:[^@]{6,}@|gsk_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|eyJhbGciOi[A-Za-z0-9]{20,}' \
+            2>/dev/null \
+            | grep -viE 'x{6,}|your[-_ ]?(api[-_ ])?key|placeholder|example|<[a-z_-]+>|\$\{' || true)
           if [[ -n "$MATCHES" ]]; then
-            echo "::error::A credential-shaped literal is present in source."
-            echo "$MATCHES"
+            echo "::error::A credential-shaped literal is present in a tracked file."
+            echo "$MATCHES" | sed -E 's#:[^:@]{6,}@#:****@#'
             exit 1
           fi
           echo "No credential-shaped literals found."
