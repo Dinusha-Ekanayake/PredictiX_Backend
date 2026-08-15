@@ -1,4 +1,7 @@
+# `.env` alone only matches that exact name — a `.env.bak` left by an edit, or
+# a `.env.production`, was still committable with every secret in it.
 .env
+.env.*
 .venv/
 
 __pycache__/
@@ -34,6 +37,21 @@ _temp_readme.md
 test_out.txt
 test_results.json
 
+# Fleet-rebuild intermediate caches (regenerable; hold account id mappings)
+scripts/.fleet_cache.pkl
+scripts/.superadmin_ids.pkl
+scripts/.account_ids.pkl
+
+# Scratch JWTs written while testing endpoints by hand. These are live
+# credentials — never commit them.
+scripts/.tok*.txt
+*.token.txt
+
+# Pre-rebuild database backup — contains auth password hashes, real user
+# emails and full table data. Never commit; keep local only.
+old-database/
+
 # Local debug scratch scripts
 _dbg_*.py
 .claude/settings.local.json
+CLAUDE.md

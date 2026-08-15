@@ -1,0 +1,1 @@
+id,asset_id,user_id,service_date,reminder_offset_days,trigger,sent_by,email_to,success,error_message,sent_at

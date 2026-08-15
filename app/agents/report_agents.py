@@ -30,10 +30,19 @@ from sqlalchemy import func, text
 from datetime import datetime, timedelta
 
 from app.models import (
-    Asset, AssetFailurePrediction, AssetCostPrediction,
+    Asset, AssetFailurePrediction,
     MaintenanceEvent, Ticket, Profile, Warehouse,
-    Department, PredictionFeatureImportance, PredictionExplanation,
+    Department,
 )
+
+# ── Health bands ─────────────────────────────────────────────────
+# Named locally so the count expressions below stay readable, but the values
+# come from the one shared definition rather than being restated here.
+from app.services.health_bands import HEALTH_BAND_THRESHOLDS as _HB
+_BAND_EXCELLENT = _HB[0][1]   # >= 60
+_BAND_GOOD      = _HB[1][1]   # >= 50  — "healthy" for reporting purposes
+_BAND_MODERATE  = _HB[2][1]   # >= 38
+_BAND_CRITICAL  = _HB[3][1]   # <  25 is critical
 
 # ── KB Integration ───────────────────────────────────────────────
 from app.kb.kb_vector_store import get_kb_store
@@ -212,15 +221,19 @@ def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
     avg_vehicle_age = db.query(func.avg(Asset.vehicle_age_years)).scalar() or 0
 
     # ── HEALTH & FAILURE PREDICTIONS ─────────────────────
-    # Deduplicate to the LATEST prediction per asset (one row per asset_id) so every
-    # health metric is derived from ONE consistent set. Assets accrue multiple
-    # prediction runs over time; counting all rows previously over-counted the fleet
-    # (health bands summed to more than the asset total).
+    # pdm_batch_predictions is the single source of truth for PdM output —
+    # upserted with exactly one row per asset, so unlike the old
+    # asset_failure_predictions history table this replaced (which needed a
+    # DISTINCT ON to dedupe multiple prediction runs per asset), every
+    # health metric here is already derived from one consistent set with no
+    # extra dedup step. asset_failure_predictions was superseded since the
+    # v7/decision-layer unification and never written to since — reading
+    # from it here silently produced a stale/empty risk breakdown.
     latest_preds = db.execute(text("""
-        SELECT DISTINCT ON (asset_id)
-            asset_id, health_score, failure_probability, risk_level, days_until_maintenance
-        FROM asset_failure_predictions
-        ORDER BY asset_id, created_at DESC
+        SELECT
+            asset_id, health_score, failure_probability, risk_level, predicted_days_until_maintenance
+        FROM pdm_batch_predictions
+        WHERE status = 'ok'
     """)).fetchall()
 
     health_vals = [float(r[1]) for r in latest_preds if r[1] is not None]
@@ -229,22 +242,27 @@ def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
     avg_health = (sum(health_vals) / scored_assets) if scored_assets else 0
     avg_health_pct = int(avg_health)
 
-    # Canonical health-band counts (single source of truth; see health_buckets below).
-    # "Critical" = health < 50 across the ENTIRE report (matches the §1/§7 KPI card).
-    # at_risk_count (<60) is retained only to describe the wider danger zone in prose.
-    healthy_count  = sum(1 for h in health_vals if h >= 80)
-    moderate_count = sum(1 for h in health_vals if 60 <= h < 80)
-    at_risk_count  = sum(1 for h in health_vals if h < 60)
-    critical_count = sum(1 for h in health_vals if h < 50)
+    # Health-band counts, taken from the shared band definition in
+    # app/services/health_bands.py so the report cannot describe a fleet
+    # differently from the dashboard or the assets list.
+    #
+    # These were a local 80/60/50 scale. Because health_score peaks at 79,
+    # "healthy" (>= 80) was structurally zero on every report ever generated,
+    # and "critical" (< 50) captured 621 of 850 assets. The bands below are the
+    # canonical ones: healthy = good or better, at-risk = poor or critical.
+    healthy_count  = sum(1 for h in health_vals if h >= _BAND_GOOD)
+    moderate_count = sum(1 for h in health_vals if _BAND_MODERATE <= h < _BAND_GOOD)
+    at_risk_count  = sum(1 for h in health_vals if h < _BAND_MODERATE)
+    critical_count = sum(1 for h in health_vals if h < _BAND_CRITICAL)
 
     # Count of assets with no prediction yet (model-coverage gap, surfaced in report).
     unscored_assets = max(int(total_assets) - scored_assets, 0)
 
     # ── Health-aware status distribution (report display) ──────────────────
     # The raw assets.status column carries its own 'critical' value that differs
-    # from the predictive health band (<50%). To keep "Critical" identical to the
+    # from the predictive health band (<25%). To keep "Critical" identical to the
     # KPI cards on EVERY page, the report's status distribution uses the health-band
-    # Critical (<50%); every non-critical, in-service asset counts as Active. This
+    # Critical (<25%); every non-critical, in-service asset counts as Active. This
     # makes the §2.2 chart, the "Active" counts, and the LLM prompt all consistent
     # with the Critical Assets KPI. (Trade-off: "Active" becomes the in-service,
     # health≥50 remainder rather than the raw status='active' count.)
@@ -282,76 +300,82 @@ def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
     soon_maintenance   = sum(1 for d in days_vals if d <= 30)
     avg_days_to_maintenance = int(sum(days_vals) / len(days_vals)) if days_vals else None
 
-    # SHAP top features from prediction explanations table
-    top_explanations_raw = (
-        db.query(PredictionFeatureImportance.feature_name, func.count(PredictionFeatureImportance.id))
-        .join(PredictionExplanation, PredictionFeatureImportance.explanation_id == PredictionExplanation.id)
-        .filter(PredictionFeatureImportance.rank_order <= 3)
-        .group_by(PredictionFeatureImportance.feature_name)
-        .order_by(func.count(PredictionFeatureImportance.id).desc())
-        .limit(8)
-        .all()
-    )
-    top_shap_features = [(name, count) for name, count in top_explanations_raw]
+    # SHAP top features, sourced from the top_explanations JSONB on
+    # pdm_batch_predictions (one current row per asset already), handling
+    # the v7 model shapes: {"top_factors": [{"feature": ...}]} or a bare
+    # list [{"feature": ...}].
+    #
+    # This used to try PredictionExplanation/PredictionFeatureImportance
+    # first and only fall back to pdm_batch_predictions when that query
+    # came back empty. In practice it always came back empty: nothing in
+    # the real classifier/regressor/batch pipeline ever writes to those
+    # two tables — the only writer is the admin-only manual annotation
+    # endpoint in prediction_explanations.py, which nothing calls as part
+    # of actually generating a prediction. That made the "primary" query
+    # a dead extra round-trip on every single report generation, always
+    # falling through to what was really the only working path — so this
+    # is that path directly, not a fallback.
+    rows = db.execute(text("""
+        SELECT top_explanations
+        FROM pdm_batch_predictions
+        WHERE status = 'ok' AND health_score < 60
+        LIMIT 50
+    """)).fetchall()
+    feat_counts: dict[str, int] = {}
+    for (explanations,) in rows:
+        if isinstance(explanations, str):
+            try:
+                explanations = json.loads(explanations)
+            except (ValueError, TypeError):
+                explanations = {}
+        factors = (
+            explanations.get("top_factors")
+            if isinstance(explanations, dict) else explanations
+        )
+        if not isinstance(factors, list):
+            factors = []
+        for feat in factors[:3]:
+            name = feat.get("feature") if isinstance(feat, dict) else None
+            if name:
+                feat_counts[name] = feat_counts.get(name, 0) + 1
+    top_shap_features = sorted(feat_counts.items(), key=lambda x: -x[1])[:8]
 
-    # Fallback: pull SHAP drivers from the top_explanations JSONB on the LATEST
-    # prediction per asset (append-only history), handling the v7 model shapes:
-    # {"top_factors": [{"feature": ...}]} or a bare list [{"feature": ...}].
-    if not top_shap_features:
-        rows = db.execute(text("""
-            SELECT top_explanations FROM (
-                SELECT DISTINCT ON (asset_id) asset_id, health_score, top_explanations
-                FROM asset_failure_predictions
-                ORDER BY asset_id, created_at DESC
-            ) latest
-            WHERE latest.health_score < 60
-            LIMIT 50
-        """)).fetchall()
-        feat_counts: dict[str, int] = {}
-        for (explanations,) in rows:
-            if isinstance(explanations, str):
-                try:
-                    explanations = json.loads(explanations)
-                except (ValueError, TypeError):
-                    explanations = {}
-            factors = (
-                explanations.get("top_factors")
-                if isinstance(explanations, dict) else explanations
-            )
-            if not isinstance(factors, list):
-                factors = []
-            for feat in factors[:3]:
-                name = feat.get("feature") if isinstance(feat, dict) else None
-                if name:
-                    feat_counts[name] = feat_counts.get(name, 0) + 1
-        top_shap_features = sorted(feat_counts.items(), key=lambda x: -x[1])[:8]
-
-    # Health score distribution buckets — derived from the SAME deduped per-asset set,
-    # so the bands always sum to scored_assets. "Below 60%" is split into "50–59%"
-    # (high-risk) and "Below 50%" (canonical Critical = the §1/§7 KPI count).
-    health_buckets = {"90-100%": 0, "80-89%": 0, "70-79%": 0, "60-69%": 0, "50-59%": 0, "Below 50%": 0}
+    # Health score distribution buckets — derived from the SAME deduped per-asset
+    # set, so the bands always sum to scored_assets. One bucket per canonical
+    # band, in the same order as HEALTH_BAND_KB.
+    #
+    # The old buckets were 90/80/70/60/50 splits: the top two could never be
+    # populated (health_score maxes out at 79) so every report carried two
+    # permanently empty bands, while "Below 50%" swallowed 621 of 850 assets.
+    #
+    # The "N-M%" / "Below N%" label shape is load-bearing and must be kept: the
+    # PDF export filters these client-side with parseFloat(bucket) and
+    # bucket.includes('Below'), and kb_annotator matches them against
+    # HEALTH_BAND_KB's band strings.
+    health_buckets = {"60-100%": 0, "50-59%": 0, "38-49%": 0, "25-37%": 0, "Below 25%": 0}
     for score in health_vals:
-        if score >= 90:   health_buckets["90-100%"] += 1
-        elif score >= 80: health_buckets["80-89%"] += 1
-        elif score >= 70: health_buckets["70-79%"] += 1
-        elif score >= 60: health_buckets["60-69%"] += 1
-        elif score >= 50: health_buckets["50-59%"] += 1
-        else:             health_buckets["Below 50%"] += 1
+        if score >= _BAND_EXCELLENT:  health_buckets["60-100%"] += 1
+        elif score >= _BAND_GOOD:     health_buckets["50-59%"] += 1
+        elif score >= _BAND_MODERATE: health_buckets["38-49%"] += 1
+        elif score >= _BAND_CRITICAL: health_buckets["25-37%"] += 1
+        else:                         health_buckets["Below 25%"] += 1
 
-    # Worst assets by LATEST health score (deduped per asset). A watch list of the
-    # lowest-health units (<60), not the Critical count — so an asset cannot appear
-    # twice from multiple prediction runs.
+    # Worst assets by health score. pdm_batch_predictions already holds
+    # exactly one (current) row per asset, so no per-asset dedup is needed.
+    # failure_probability / risk_level / days_until_maintenance /
+    # top_explanations were previously hardcoded placeholders (100.0,
+    # 'critical', 0, '[]') instead of this same row's real columns — every
+    # asset in this list showed an identical fabricated 100% failure
+    # probability and "critical" label regardless of its actual prediction.
     critical_rows = db.execute(text("""
-        SELECT * FROM (
-            SELECT DISTINCT ON (p.asset_id)
-                a.asset_code, a.asset_name, a.model, a.make, a.vehicle_type, a.status,
-                p.health_score, 100.0 as failure_probability, 'critical' as risk_level, 0 as days_until_maintenance,
-                '[]' as top_explanations
-            FROM pdm_batch_predictions p
-            JOIN assets a ON a.id = p.asset_id
-            ORDER BY p.asset_id, p.predicted_at DESC
-        ) latest
-        ORDER BY CASE WHEN latest.asset_code LIKE 'SIM-%' THEN 0 ELSE 1 END, latest.health_score ASC
+        SELECT
+            a.asset_code, a.asset_name, a.model, a.make, a.vehicle_type, a.status,
+            p.health_score, p.failure_probability, p.risk_level, p.predicted_days_until_maintenance,
+            p.top_explanations
+        FROM pdm_batch_predictions p
+        JOIN assets a ON a.id = p.asset_id
+        WHERE p.status = 'ok'
+        ORDER BY CASE WHEN a.asset_code LIKE 'SIM-%' THEN 0 ELSE 1 END, p.health_score ASC
         LIMIT 25
     """)).fetchall()
     def _fp_pct(v) -> str:
@@ -376,28 +400,25 @@ def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
     ]
 
     # ── COST PREDICTIONS ──────────────────────────────────
-    # Cost predictions are append-only (one row per asset per batch run), so
-    # aggregate over only the LATEST prediction per asset — otherwise totals
-    # inflate as runs accumulate.
+    # pdm_batch_predictions already holds exactly one (current) row per
+    # asset, so — unlike the old asset_cost_predictions history table this
+    # replaced — no "latest per asset" dedup is needed here. Currency isn't
+    # a column on pdm_batch_predictions (LKR is the only currency this
+    # pipeline ever produces), so it's a fixed literal rather than MAX(...).
     cost_row = db.execute(text("""
         SELECT
-            COALESCE(SUM(estimated_cost), 0) AS total_cost,
-            COALESCE(AVG(estimated_cost), 0) AS avg_cost,
-            COALESCE(MIN(min_cost), 0)       AS min_cost,
-            COALESCE(MAX(max_cost), 0)       AS max_cost,
-            MAX(currency)                    AS currency
-        FROM (
-            SELECT DISTINCT ON (asset_id)
-                estimated_cost, min_cost, max_cost, currency
-            FROM asset_cost_predictions
-            ORDER BY asset_id, created_at DESC
-        ) latest_costs
+            COALESCE(SUM(estimated_cost_lkr), 0) AS total_cost,
+            COALESCE(AVG(estimated_cost_lkr), 0) AS avg_cost,
+            COALESCE(MIN(min_cost_lkr), 0)       AS min_cost,
+            COALESCE(MAX(max_cost_lkr), 0)       AS max_cost
+        FROM pdm_batch_predictions
+        WHERE status = 'ok'
     """)).fetchone()
     total_estimated_cost = float(cost_row[0] or 0)
     avg_cost_per_asset   = float(cost_row[1] or 0)
     min_cost_estimate    = float(cost_row[2] or 0)
     max_cost_estimate    = float(cost_row[3] or 0)
-    currency             = cost_row[4] or "LKR"
+    currency             = "LKR"
 
     # ── MAINTENANCE EVENTS ────────────────────────────────
     # Reporting window = the THREE CALENDAR MONTHS ending with the most RECENT activity
@@ -685,7 +706,7 @@ def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
         "under_maintenance_assets": under_maintenance,
         "retired_assets": retired_assets,
         "asset_type_breakdown": asset_type_breakdown,
-        "asset_status_breakdown": status_display_breakdown,  # health-band Critical (<50%) for cross-page consistency
+        "asset_status_breakdown": status_display_breakdown,  # health-band Critical (<25%) for cross-page consistency
         "asset_category_breakdown": asset_category_breakdown,
         "avg_vehicle_age_years": round(float(avg_vehicle_age), 1),
 
@@ -809,8 +830,8 @@ def _context_to_prompt_text(ctx: dict) -> str:
 ▶ HEALTH & PREDICTIVE ANALYTICS
   Average Fleet Health Score: {ctx['avg_health_pct']}%
   Average Failure Probability: {ctx['avg_failure_prob_pct']}%
-  Health Distribution: Healthy (≥80%): {ctx['healthy_count']} | Moderate (60-79%): {ctx['moderate_count']} | At-Risk (<60%): {ctx['at_risk_count']} | Critical (<50%): {ctx['critical_count']}
-  Critical Rate: {ctx['critical_rate_pct']}% ({ctx['critical_count']} of {ctx['total_assets']} assets, <50% health) | At-Risk Rate: {ctx['at_risk_rate_pct']}% (<60% health)
+  Health Distribution: Healthy (≥50%): {ctx['healthy_count']} | Moderate (38-49%): {ctx['moderate_count']} | At-Risk (<38%): {ctx['at_risk_count']} | Critical (<25%): {ctx['critical_count']}
+  Critical Rate: {ctx['critical_rate_pct']}% ({ctx['critical_count']} of {ctx['total_assets']} assets, <25% health) | At-Risk Rate: {ctx['at_risk_rate_pct']}% (<38% health)
   (Use these EXACT pre-computed rates when stating critical/at-risk percentages — do not recompute.)
   Risk Level Distribution: {kv(ctx['risk_breakdown'])}
   Assets Needing Urgent Service (≤7 days): {ctx['urgent_maintenance_count']}
@@ -917,7 +938,7 @@ Section instructions (each must be 4-6 sentences, professional analytical tone):
 5. conclusion:
    Write a comprehensive 3-month warehouse summary. Note the PM ratio strength (use the provided "PM Ratio"
    value verbatim) and fleet health trajectory. When referring to "critical" assets, use the provided
-   Critical (<50% health) count and Critical Rate verbatim — do not introduce a different figure.
+   Critical (<25% health) count and Critical Rate verbatim — do not introduce a different figure.
    Reference the split operational profile (strong PM culture vs high critical asset rate).
    If you mention the estimated-vs-actual cost difference, describe it neutrally as a forecast-vs-actual
    variance (possible causes: cost-model conservatism OR deferred maintenance) — do NOT label it "underspend"
@@ -932,8 +953,8 @@ STRICT RULES:
 - Do NOT compute, derive, or estimate any percentage, ratio, or delta yourself. Only state a
   percentage/ratio if it is explicitly present in the data context. If one is not provided, describe
   the underlying counts instead (e.g. "318 of 1,156 assets" rather than an invented percentage).
-- "Critical" assets means the Critical band (<50% health) count ONLY. Do NOT merge it with the
-  At-Risk (<60% health) count or report a blended figure — they are distinct numbers.
+- "Critical" assets means the Critical band (<25% health) count ONLY. Do NOT merge it with the
+  At-Risk (<38% health) count or report a blended figure — they are distinct numbers.
 - A ratio of a part to a whole can never exceed 100%. Never state a coverage/ratio above 100%.
 - Reference KB standards (ISO 55000, SMRP) naturally when the data warrants it.
 - Do NOT include markdown, backticks, bullet points, or extra text outside the JSON.

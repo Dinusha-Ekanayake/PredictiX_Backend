@@ -88,28 +88,46 @@ class PredictionRequest(BaseModel):
     downtime_hours_last_90d: Optional[float] = None
 
 
+# These four response models had drifted away from what the services actually
+# return: they declared predicted_class / predicted_label / confidence /
+# health_band, none of which prediction_service produces. Because the fields
+# were declared required, FastAPI raised ResponseValidationError while
+# serialising every successful call — so all four endpoints returned 500 no
+# matter what was sent, which is why nothing in the product used them. The
+# models below are the real shapes, captured from the services' own output.
+
+
 class ClassificationResponse(BaseModel):
-    predicted_class: int
-    predicted_label: str
-    confidence: float
+    maintenance_probability: float
+    maintenance_required_next_30d: int
+    risk_level: str
+    recommended_action: str
 
 
 class RegressionResponse(BaseModel):
-    predicted_days_until_maintenance: float
+    predicted_days_until_maintenance: int
+    predicted_maintenance_date: str
+    top_explanations: list[Any] = []
 
 
 class HealthScoreResponse(BaseModel):
     health_score: float
-    health_band: str
+    #: Canonical band from app/services/health_bands.py (excellent..critical).
+    health_status: str
+    contributing_factors: list[Any] = []
 
 
 class FullPredictionResponse(BaseModel):
-    predicted_class: int
-    predicted_label: str
-    confidence: float
-    predicted_days_until_maintenance: float
+    maintenance_probability: float
+    maintenance_required_next_30d: int
+    predicted_days_until_maintenance: int
+    predicted_maintenance_date: str
+    risk_level: str
+    recommended_action: str
     health_score: float
-    health_band: str
+    health_status: str
+    top_explanations: list[Any] = []
+    contributing_factors: list[Any] = []
 
 
 class HealthResponse(BaseModel):

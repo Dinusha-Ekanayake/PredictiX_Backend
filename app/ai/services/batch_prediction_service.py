@@ -32,8 +32,10 @@ import numpy as np
 from sqlalchemy import String, cast, text
 from sqlalchemy.orm import Session
 
+from app.services.health_bands import band_case_sql, band_for
 from app.models import Asset, PdmBatchPrediction
 from app.ai.services.pdm_decision_service import build_decision
+from app.services.in_app_notification_service import InAppNotificationService
 
 # v7 regressor was trained on days_until_next_maintenance up to 365 (see
 # regressor_v7_decision_log.json) — the old 180-day clamp was arbitrary and
@@ -114,6 +116,50 @@ def _to_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _to_float_or_nan(value: Any) -> float:
+    """Like _to_float, but a genuinely missing reading becomes NaN, not 0.
+
+    lgb_model_adapter.build_frame() is explicitly designed so missing
+    values reach LightGBM as NaN, which the model was trained to handle
+    natively — but _build_feature_dict previously called _to_float(...)
+    (default 0.0) for every sensor column, so a NULL reading (e.g. a
+    component with no data yet) reached the model as "0%", i.e. "component
+    totally failed", instead of "unknown". The same zero then fed directly
+    into _compute_health_score's average, dragging a genuinely healthy
+    asset toward a false Critical band purely because one field wasn't
+    populated yet.
+    """
+    if value is None:
+        return float("nan")
+    if isinstance(value, Decimal):
+        return float(value)
+    try:
+        return float(value)
+    except Exception:
+        return float("nan")
+
+
+def _fd_float(fd: dict, key: str, default: float) -> float:
+    """Read a float feature out of a feature dict built by
+    _build_feature_dict, treating a NaN value (its marker for "reading
+    genuinely missing" — see _to_float_or_nan) the same as the key being
+    absent: falls back to `default` either way.
+
+    Needed because every _SENSOR_FLOAT_COLS key is now always present in
+    fd (NaN when missing, never omitted) — plain ``fd.get(key, default)``
+    can no longer fall back to `default` for a missing reading, since the
+    key is never actually absent. Without this, downstream consumers that
+    need a real number (the breakdown cost model, the heuristic cost
+    formula) would receive NaN and silently produce a NaN cost estimate.
+    """
+    value = fd.get(key)
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return default
+    return default if f != f else f  # f != f is true only for NaN
+
+
 def _to_int(value: Any, default: int = 0) -> int:
     if value is None:
         return default
@@ -121,6 +167,38 @@ def _to_int(value: Any, default: int = 0) -> int:
         return int(value)
     except Exception:
         return default
+
+
+def _clamp_health_pct(value: float) -> float:
+    """Clamp a health-percentage reading to its valid [0, 100] range. NaN
+    (see _to_float_or_nan) passes through unchanged — a genuinely missing
+    reading is not a range violation.
+
+    A small fraction of sensor_readings rows carry out-of-range values (seen
+    live: as low as -304.66%) — a data-generation defect, not a real
+    reading. Left unclamped, it flows straight into _compute_health_score's
+    plain average (which, unlike the tree-based classifier/regressor, has
+    no built-in resistance to an outlier's magnitude) and dominates both the
+    health score and its own contributing-factors breakdown — e.g. a single
+    -265.66 reading alone accounted for -53 of a 100-point scale, enough by
+    itself to swing an otherwise-100%-healthy-looking asset into "Critical."
+    Same fix as the one already applied on the survival-model side
+    (app.ai.services.survival_service._clamp_health_pct).
+    """
+    if value != value:  # NaN
+        return value
+    return max(0.0, min(100.0, value))
+
+
+def _json_safe_fd(fd: dict[str, Any]) -> dict[str, Any]:
+    """Feature dicts can hold NaN for genuinely-missing sensor readings
+    (see _to_float_or_nan). json.dumps() happily emits the literal token
+    ``NaN`` for those by default, which is not valid JSON — Postgres's
+    json/jsonb columns reject it outright ("invalid input syntax for type
+    json"), which broke every feature_snapshot write for an asset with
+    any missing reading. NaN -> None here so it round-trips as JSON
+    ``null`` instead."""
+    return {k: (None if isinstance(v, float) and v != v else v) for k, v in fd.items()}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -210,7 +288,8 @@ def _build_feature_dict(asset: Asset, reading, snapshot_date: date | None = None
     fd["lifetime_breakdown_count"] = _to_int(asset.lifetime_breakdown_count)
 
     for col in _SENSOR_FLOAT_COLS:
-        fd[col] = _to_float(getattr(reading, col, None))
+        v = _to_float_or_nan(getattr(reading, col, None))
+        fd[col] = _clamp_health_pct(v) if col in _HEALTH_COMPONENT_COLS else v
     for col in _SENSOR_INT_COLS:
         fd[col] = _to_int(getattr(reading, col, None))
     for col in _SENSOR_BOOL_COLS:
@@ -245,46 +324,46 @@ def _build_cost_input_from_fd(asset: Asset, fd: dict[str, Any]) -> dict[str, Any
         # Usage
         "vehicle_age_years"               : _to_float(asset.vehicle_age_years),
         "payload_capacity_kg"             : _to_float(asset.payload_capacity_kg),
-        "odometer_km"                     : _to_float(fd.get("odometer_km", 0)),
-        "engine_hours_total"              : _to_float(fd.get("engine_hours_total", 0)),
+        "odometer_km"                     : _fd_float(fd, "odometer_km", 0),
+        "engine_hours_total"              : _fd_float(fd, "engine_hours_total", 0),
         "lifetime_service_count"          : _to_int(asset.lifetime_service_count),
         "lifetime_breakdown_count"        : _to_int(asset.lifetime_breakdown_count),
         # Health signals (from sensor reading via fd)
-        "oil_life_pct"                    : _to_float(fd.get("oil_life_pct", 50)),
-        "brake_health_pct"                : _to_float(fd.get("brake_health_pct", 50)),
-        "tire_health_pct"                 : _to_float(fd.get("tire_health_pct", 50)),
-        "battery_health_pct"              : _to_float(fd.get("battery_health_pct", 50)),
-        "hydraulic_health_pct"            : _to_float(fd.get("hydraulic_health_pct", 50)),
+        "oil_life_pct"                    : _fd_float(fd, "oil_life_pct", 50),
+        "brake_health_pct"                : _fd_float(fd, "brake_health_pct", 50),
+        "tire_health_pct"                 : _fd_float(fd, "tire_health_pct", 50),
+        "battery_health_pct"              : _fd_float(fd, "battery_health_pct", 50),
+        "hydraulic_health_pct"            : _fd_float(fd, "hydraulic_health_pct", 50),
         "active_fault_code_count"         : _to_int(fd.get("active_fault_code_count", 0)),
         "sensor_fault_flag"               : int(bool(fd.get("sensor_fault_flag", False))),
         # Operational
-        "fuel_price_lkr_per_l"            : _to_float(fd.get("fuel_price_lkr_per_l", 310.0)),
-        "downtime_hours_last_90d"         : _to_float(fd.get("downtime_hours_last_90d", 0)),
-        "payload_utilization_pct"         : _to_float(fd.get("payload_utilization_pct", 50)),
-        "engine_hours_since_last_service" : _to_float(fd.get("engine_hours_since_last_service", 0)),
+        "fuel_price_lkr_per_l"            : _fd_float(fd, "fuel_price_lkr_per_l", 310.0),
+        "downtime_hours_last_90d"         : _fd_float(fd, "downtime_hours_last_90d", 0),
+        "payload_utilization_pct"         : _fd_float(fd, "payload_utilization_pct", 50),
+        "engine_hours_since_last_service" : _fd_float(fd, "engine_hours_since_last_service", 0),
         "days_since_last_service"         : _to_int(fd.get("days_since_last_service", 0)),
-        "mileage_since_last_service_km"   : _to_float(fd.get("mileage_since_last_service_km", 0)),
-        "avg_payload_kg"                  : _to_float(fd.get("avg_payload_kg", 0)),
+        "mileage_since_last_service_km"   : _fd_float(fd, "mileage_since_last_service_km", 0),
+        "avg_payload_kg"                  : _fd_float(fd, "avg_payload_kg", 0),
         "overload_events_30d"             : _to_int(fd.get("overload_events_30d", 0)),
-        "distance_last_30d_km"            : _to_float(fd.get("distance_last_30d_km", 0)),
-        "operating_hours_last_30d"        : _to_float(fd.get("operating_hours_last_30d", 0)),
-        "idle_hours_last_30d"             : _to_float(fd.get("idle_hours_last_30d", 0)),
+        "distance_last_30d_km"            : _fd_float(fd, "distance_last_30d_km", 0),
+        "operating_hours_last_30d"        : _fd_float(fd, "operating_hours_last_30d", 0),
+        "idle_hours_last_30d"             : _fd_float(fd, "idle_hours_last_30d", 0),
         "trip_count_30d"                  : _to_int(fd.get("trip_count_30d", 0)),
-        "avg_trip_distance_km"            : _to_float(fd.get("avg_trip_distance_km", 0)),
+        "avg_trip_distance_km"            : _fd_float(fd, "avg_trip_distance_km", 0),
         "start_stop_burden_30d"           : _to_int(fd.get("start_stop_burden_30d", 0)),
-        "rough_road_pct"                  : _to_float(fd.get("rough_road_pct", 20)),
-        "urban_route_pct"                 : _to_float(fd.get("urban_route_pct", 50)),
-        "port_route_pct"                  : _to_float(fd.get("port_route_pct", 0)),
-        "fuel_rate_lph"                   : _to_float(fd.get("fuel_rate_lph", 0)),
-        "fuel_efficiency_km_per_l"        : _to_float(fd.get("fuel_efficiency_km_per_l", 0)),
-        "engine_temp_avg_c"               : _to_float(fd.get("engine_temp_avg_c", 85)),
-        "coolant_temp_max_c"              : _to_float(fd.get("coolant_temp_max_c", 95)),
-        "vibration_rms_mm_s"              : _to_float(fd.get("vibration_rms_mm_s", 2.0)),
-        "tire_pressure_psi"               : _to_float(fd.get("tire_pressure_psi", 72)),
-        "battery_voltage_v"               : _to_float(fd.get("battery_voltage_v", 12.5)),
-        "ambient_temp_avg_c"              : _to_float(fd.get("ambient_temp_avg_c", 30)),
-        "ambient_humidity_avg_pct"        : _to_float(fd.get("ambient_humidity_avg_pct", 75)),
-        "rainfall_mm_30d"                 : _to_float(fd.get("rainfall_mm_30d", 100)),
+        "rough_road_pct"                  : _fd_float(fd, "rough_road_pct", 20),
+        "urban_route_pct"                 : _fd_float(fd, "urban_route_pct", 50),
+        "port_route_pct"                  : _fd_float(fd, "port_route_pct", 0),
+        "fuel_rate_lph"                   : _fd_float(fd, "fuel_rate_lph", 0),
+        "fuel_efficiency_km_per_l"        : _fd_float(fd, "fuel_efficiency_km_per_l", 0),
+        "engine_temp_avg_c"               : _fd_float(fd, "engine_temp_avg_c", 85),
+        "coolant_temp_max_c"              : _fd_float(fd, "coolant_temp_max_c", 95),
+        "vibration_rms_mm_s"              : _fd_float(fd, "vibration_rms_mm_s", 2.0),
+        "tire_pressure_psi"               : _fd_float(fd, "tire_pressure_psi", 72),
+        "battery_voltage_v"               : _fd_float(fd, "battery_voltage_v", 12.5),
+        "ambient_temp_avg_c"              : _fd_float(fd, "ambient_temp_avg_c", 30),
+        "ambient_humidity_avg_pct"        : _fd_float(fd, "ambient_humidity_avg_pct", 75),
+        "rainfall_mm_30d"                 : _fd_float(fd, "rainfall_mm_30d", 100),
         "route_type"                      : str(fd.get("route_type") or "__missing__"),
         "cargo_type"                      : str(fd.get("cargo_type") or "__missing__"),
         "operating_shift"                 : str(fd.get("operating_shift") or "__missing__"),
@@ -308,7 +387,18 @@ def _run_classifier_batch(
     clf_features: list[str],
     clf_threshold: float,
     clf_categorical_cols: list[str],
-) -> list[tuple[float, bool]]:
+) -> list[tuple[float | None, bool]]:
+    """Returns one (failure_probability, maintenance_required) pair per row.
+
+    failure_probability is None when the classifier genuinely could not
+    score that row, after both the vectorized attempt and the per-row
+    fallback below have failed. Callers MUST treat None as a failed
+    prediction (pdm_batch_predictions status="error", no fabricated
+    numbers) — never substitute a default probability. A prior version of
+    the per-row fallback defaulted to 0.05 on failure with no error signal,
+    which recorded a scoring failure as "5% chance of failure, healthy":
+    the opposite of a fail-safe for a predictive-maintenance system.
+    """
     df = clf_model.build_frame(feature_dicts)
     try:
         probas = clf_model.predict_proba_positive(df)
@@ -319,13 +409,18 @@ def _run_classifier_batch(
     except Exception as e:
         log.warning("Batched LightGBM classification failed: %s. Falling back to per-row.", e)
 
-    results = []
+    results: list[tuple[float | None, bool]] = []
     for i in range(len(df)):
         try:
             prob = float(clf_model.predict_proba_positive(df.iloc[[i]])[0])
-        except Exception:
-            prob = 0.05
-        results.append((round(prob, 4), bool(prob >= clf_threshold)))
+            results.append((round(prob, 4), bool(prob >= clf_threshold)))
+        except Exception as row_exc:
+            log.error(
+                "LightGBM classification failed for row %d even after per-row fallback — "
+                "recording as a failed prediction, not a fabricated probability: %s",
+                i, row_exc,
+            )
+            results.append((None, False))
     return results
 
 
@@ -362,40 +457,80 @@ def _run_regressor_batch(
     return results
 
 
-def _compute_health_score(fd: dict, failure_probability: float, days_until: float) -> tuple[float, str]:
-    battery = _to_float(fd.get("battery_health_pct"))
-    brake = _to_float(fd.get("brake_health_pct"))
-    tire = _to_float(fd.get("tire_health_pct"))
-    oil = _to_float(fd.get("oil_life_pct"))
-    hydraulic = _to_float(fd.get("hydraulic_health_pct"))
+_HEALTH_COMPONENT_COLS = [
+    "battery_health_pct", "brake_health_pct", "tire_health_pct",
+    "oil_life_pct", "hydraulic_health_pct",
+]
 
-    base = (battery + brake + tire + oil + hydraulic) / 5.0 if any([battery, brake, tire, oil, hydraulic]) else 60.0
+
+def _health_components(fd: dict) -> list[tuple[str, float]]:
+    """(feature, value) pairs for the health-percentage components that make
+    up the health-score base average, excluding any that are missing (NaN —
+    see _to_float_or_nan). Shared by _compute_health_score and
+    _compute_contributing_factors so the two can never independently drift
+    apart again."""
+    out = []
+    for col in _HEALTH_COMPONENT_COLS:
+        v = _to_float_or_nan(fd.get(col))
+        if not np.isnan(v):
+            out.append((col, v))
+    return out
+
+
+def _compute_health_score(fd: dict, failure_probability: float, days_until: float) -> tuple[float, str]:
+    components = _health_components(fd)
+    # A missing component is excluded from the average rather than
+    # counted as a real 0% reading, so one not-yet-populated sensor field
+    # can't single-handedly drag a genuinely healthy asset into a false
+    # Critical band.
+    base = (sum(v for _, v in components) / len(components)) if components else 60.0
     penalty = (failure_probability * 35.0) + max(0.0, (30.0 - min(days_until, 30.0))) * 0.5
     score = round(max(0.0, min(100.0, base - penalty)), 2)
 
-    if score >= 85:
-        status = "Healthy"
-    elif score >= 70:
-        status = "Good"
-    elif score >= 50:
-        status = "Moderate"
-    elif score >= 30:
-        status = "Poor"
-    else:
-        status = "Critical"
+    # Band from the one shared definition. This block used to carry its own
+    # cut-offs (85/70/50/30 with a "Healthy" label that exists nowhere else in
+    # the system), which disagreed with health_bands.py for 602 of 850 assets —
+    # an asset stored as "Poor" here showed as moderate on the dashboard, and
+    # the chatbot quoted this column while the UI quoted the other. The
+    # asset_health_band Postgres enum is the schema-level authority and matches
+    # health_bands.py exactly, so that is what this now returns.
+    #
+    # The old top band was also unreachable: it needed score >= 85, and the
+    # highest score the fleet produces is 79.
+    status = band_for(score)
 
     return score, status
 
 
-def _compute_contributing_factors(fd: dict, failure_probability: float) -> list[dict]:
-    """Mirror the health score contributing factors from prediction_service.py."""
-    factors = []
-    factors.append({"feature": "brake_health_pct", "impact": round(_to_float(fd.get("brake_health_pct")) * 0.22, 4)})
-    factors.append({"feature": "tire_health_pct", "impact": round(_to_float(fd.get("tire_health_pct")) * 0.18, 4)})
-    factors.append({"feature": "oil_life_pct", "impact": round(_to_float(fd.get("oil_life_pct")) * 0.18, 4)})
-    factors.append({"feature": "battery_health_pct", "impact": round(_to_float(fd.get("battery_health_pct")) * 0.15, 4)})
-    factors.append({"feature": "hydraulic_health_pct", "impact": round(_to_float(fd.get("hydraulic_health_pct")) * 0.12, 4)})
+def _compute_contributing_factors(fd: dict, failure_probability: float, days_until: float) -> list[dict]:
+    """Factors that actually reconstruct _compute_health_score's number.
 
+    Each present health component contributes its equal share of the base
+    average (impacts sum to `base`); the two penalty terms are the exact
+    same values _compute_health_score subtracts from it (impacts sum to
+    `-penalty`) — so summing every impact here reproduces `score` before
+    the 0-100 clamp. A prior version used an independently-invented
+    weighted formula (brake 22%, tire 18%, oil 18%, battery 15%,
+    hydraulic 12%) that had no arithmetic relationship to the score it was
+    displayed alongside: the numbers never actually explained how that
+    score was computed.
+    """
+    components = _health_components(fd)
+    n = len(components) or 1
+
+    factors = [
+        {"feature": name, "impact": round(value / n, 4)}
+        for name, value in components
+    ]
+
+    fp_penalty = failure_probability * 35.0
+    factors.append({"feature": "failure_probability", "impact": -round(fp_penalty, 4)})
+    days_penalty = max(0.0, (30.0 - min(days_until, 30.0))) * 0.5
+    factors.append({"feature": "days_until_maintenance", "impact": -round(days_penalty, 4)})
+
+    # Secondary diagnostic-only flags for out-of-range readings — these were
+    # never part of the health-score formula itself, only additional "why"
+    # context, and stay as-is.
     engine_temp = _to_float(fd.get("engine_temp_avg_c"))
     if engine_temp > 95:
         factors.append({"feature": "engine_temp_avg_c", "impact": -round(min((engine_temp - 95) * 0.8, 10), 4)})
@@ -427,52 +562,76 @@ def _estimate_cost(
     days_until: float,
     asset: Asset | None = None,
     breakdown_cost_bundle: dict | None = None,
-) -> tuple[float, float, float]:
-    """Estimate maintenance cost.
+) -> tuple[float | None, float | None, float | None]:
+    """Estimate maintenance cost with the trained cost model.
 
-    If breakdown_cost_bundle is provided, uses the v4 XGBoost model for an
-    accurate data-driven estimate. Falls back to the heuristic formula if the
-    model is unavailable or raises an exception — so existing behaviour is
-    100% preserved when the bundle is not loaded.
+    Returns ``(None, None, None)`` when the model cannot produce a number —
+    the bundle failed to load, or prediction raised for this asset.
+
+    There used to be a heuristic fallback here: a hand-written formula
+    (base + vibration*1200 + faults*2500 + ...) that ran whenever the model
+    was unavailable. It wrote into the same ``estimated_cost_lkr`` column the
+    model writes to, with the same ``status="ok"``, so nothing downstream —
+    dashboards, reports, the LLM agent — could tell a model prediction from a
+    guess. That is worse than having no number at all: a fabricated cost still
+    gets summed into fleet spend totals and cited in generated reports.
+
+    A NULL is honest and every read path already handles it. Callers must not
+    substitute a default; surface "estimate unavailable" instead.
     """
-    if breakdown_cost_bundle is not None and asset is not None:
-        try:
-            from app.ai.models.cost_estimation_model.breakdown_cost_model import predict_breakdown_cost
-            cost_input = _build_cost_input_from_fd(asset, fd)
-            result = predict_breakdown_cost(cost_input, breakdown_cost_bundle, top_k=5)
-            estimated = result["predicted_cost_lkr"]
-            min_cost  = result["pi_80_lower_lkr"]
-            max_cost  = result["pi_80_upper_lkr"]
-            return round(estimated, 2), round(min_cost, 2), round(max_cost, 2)
-        except Exception as exc:
-            log.warning(
-                "_estimate_cost: breakdown cost model failed for asset %s, "
-                "falling back to heuristic: %s",
-                str(getattr(asset, "id", "?"))[:8], exc,
-            )
+    if breakdown_cost_bundle is None:
+        log.warning(
+            "_estimate_cost: cost model bundle not loaded — storing NULL cost "
+            "for asset %s rather than a fabricated estimate",
+            str(getattr(asset, "id", "?"))[:8],
+        )
+        return None, None, None
 
-    # ── Heuristic fallback (original formula — unchanged) ─────────────────────
-    base = 15_000.0
-    vibration_factor  = _to_float(fd.get("vibration_rms_mm_s")) * 1_200.0
-    fault_factor      = _to_int(fd.get("active_fault_code_count")) * 2_500.0
-    downtime_factor   = _to_float(fd.get("downtime_hours_last_90d")) * 300.0
-    urgency_factor    = max(0.0, (30.0 - min(days_until, 30.0))) * 250.0
-    probability_factor = failure_probability * 22_000.0
+    if asset is None:
+        log.warning("_estimate_cost: no asset supplied — cannot build cost model input")
+        return None, None, None
 
-    estimate = base + vibration_factor + fault_factor + downtime_factor + urgency_factor + probability_factor
-    min_cost = max(5_000.0, estimate * 0.85)
-    max_cost = estimate * 1.20
-    return round(estimate, 2), round(min_cost, 2), round(max_cost, 2)
+    try:
+        from app.ai.models.cost_estimation_model.breakdown_cost_model import predict_breakdown_cost
+        cost_input = _build_cost_input_from_fd(asset, fd)
+        result = predict_breakdown_cost(cost_input, breakdown_cost_bundle, top_k=5)
+        estimated = result["predicted_cost_lkr"]
+        min_cost  = result["pi_80_lower_lkr"]
+        max_cost  = result["pi_80_upper_lkr"]
+        return round(estimated, 2), round(min_cost, 2), round(max_cost, 2)
+    except Exception as exc:
+        log.warning(
+            "_estimate_cost: breakdown cost model failed for asset %s — storing "
+            "NULL cost rather than a fabricated estimate: %s",
+            str(getattr(asset, "id", "?"))[:8], exc,
+        )
+        return None, None, None
 
 
-def _compute_risk_level(failure_probability: float, days_until: float) -> str:
-    if failure_probability >= 0.8 or days_until <= 7:
-        return "critical"
-    if failure_probability >= 0.6 or days_until <= 14:
-        return "high"
-    if failure_probability >= 0.35 or days_until <= 30:
-        return "medium"
-    return "low"
+def _fmt_cost(value: float | None) -> str:
+    """Cost for log lines. None is a real outcome now, so %.0f would raise."""
+    return "n/a" if value is None else f"{value:.0f}"
+
+
+# pdm_decision_service.build_decision's tier is the authoritative
+# reconciliation of the classifier, regressor, and health score (it uses
+# the model's own tuned clf_threshold, not a guessed constant) — risk_level
+# is derived from that same tier instead of independently re-deriving a
+# verdict from raw probability/days with a different threshold set.
+# Previously _compute_risk_level (0.8/0.6/0.35 probability cuts, 7/14/30 day
+# cuts) and build_decision's tier (clf_threshold ~0.52, health-score-aware)
+# could — and did — disagree for the same evidence, e.g. risk_level="high"
+# next to tier="urgent" on the exact same pdm_batch_predictions row.
+_TIER_TO_RISK_LEVEL = {
+    "urgent": "critical",
+    "conflict": "high",
+    "watch": "medium",
+    "healthy": "low",
+}
+
+
+def _risk_level_from_tier(tier: str) -> str:
+    return _TIER_TO_RISK_LEVEL.get(tier, "medium")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -493,6 +652,87 @@ def _fetch_latest_readings(db: Session, asset_ids: list[str]) -> dict[str, Any]:
     return {str(r.asset_id): r for r in rows}
 
 
+def _fetch_previous_risk_levels(db: Session, asset_ids: list[str]) -> dict[str, str | None]:
+    """Batch-fetch each asset's risk_level from BEFORE this run's upsert, so a
+    critical-alert notification only fires on the transition into "critical",
+    not on every run for an asset that's already been critical for weeks."""
+    if not asset_ids:
+        return {}
+    rows = (
+        db.query(PdmBatchPrediction.asset_id, PdmBatchPrediction.risk_level)
+        .filter(PdmBatchPrediction.asset_id.in_(asset_ids))
+        .all()
+    )
+    return {str(asset_id): risk_level for asset_id, risk_level in rows}
+
+
+def _notify_newly_critical_assets(db: Session, assets: list[Asset]) -> None:
+    """Best-effort in-app alert for every asset that transitioned into
+    critical risk THIS run, batched across the whole list rather than one
+    notification round-trip set per asset.
+
+    On a real batch run it's common for a large fraction of the fleet to
+    flip critical at once (e.g. after a model swap, or in this project's
+    live data: 339/1065 assets were critical in one run) — calling
+    notify_admins() once per asset in that scenario turned into 1000+ DB
+    round-trips (272 admin-id queries + 447 preference queries + 447
+    profile queries + 447 inserts, measured on the real fleet). Instead:
+    one assigned-user notification per asset (inherently 1:1, can't be
+    reduced further) is combined into a single _create_notifications_bulk
+    call, and admins get ONE digest notification per warehouse listing all
+    of that warehouse's newly-critical assets, instead of N separate ones.
+
+    Never allowed to raise — a notification failure must not fail the
+    batch run that computed these predictions.
+    """
+    if not assets:
+        return
+    try:
+        assets_by_warehouse: dict[str | None, list[Asset]] = {}
+        for asset in assets:
+            wh_id = str(asset.warehouse_id) if asset.warehouse_id else None
+            assets_by_warehouse.setdefault(wh_id, []).append(asset)
+
+        # ── Assigned users: one bulk call for every asset's assignee ──────────
+        assignee_ids = [str(a.assigned_to) for a in assets if a.assigned_to]
+        if assignee_ids:
+            if len(assets) == 1:
+                message = f"{assets[0].asset_name} ({assets[0].asset_code}) is now at critical risk."
+                link_url = f"/admin/assets?asset_id={assets[0].id}"
+            else:
+                message = f"{len(assets)} assets are now at critical risk."
+                link_url = "/admin/assets?health_band=critical"
+            InAppNotificationService._create_notifications_bulk(
+                db, assignee_ids,
+                title="Asset is now critical risk",
+                message=message,
+                priority="high",
+                notification_type="high_risk_asset",
+                link_url=link_url,
+            )
+
+        # ── Admins: one digest notification per warehouse ─────────────────────
+        for wh_id, wh_assets in assets_by_warehouse.items():
+            if len(wh_assets) == 1:
+                a = wh_assets[0]
+                message = f"{a.asset_name} ({a.asset_code}) is now at critical risk."
+            else:
+                names = ", ".join(f"{a.asset_name} ({a.asset_code})" for a in wh_assets[:5])
+                more = f" and {len(wh_assets) - 5} more" if len(wh_assets) > 5 else ""
+                message = f"{len(wh_assets)} assets are now at critical risk: {names}{more}."
+            InAppNotificationService.notify_admins(
+                db,
+                title="Assets are now critical risk" if len(wh_assets) > 1 else "Asset is now critical risk",
+                message=message,
+                priority="high",
+                notification_type="high_risk_asset",
+                link_url="/admin/assets?health_band=critical",
+                warehouse_id=wh_id,
+            )
+    except Exception:
+        log.exception("Failed to send critical-asset notifications for %d assets", len(assets))
+
+
 _UPSERT_CHUNK_SIZE = 500
 
 
@@ -501,6 +741,55 @@ def _upsert_batch_predictions(db: Session, rows: list[dict]) -> None:
         return
     for start in range(0, len(rows), _UPSERT_CHUNK_SIZE):
         _upsert_batch_predictions_chunk(db, rows[start:start + _UPSERT_CHUNK_SIZE])
+
+
+def sync_asset_health_bands(db: Session, asset_ids: list[str] | None = None) -> int:
+    """Refresh ``assets.health_band`` from the score this run just wrote.
+
+    ``health_band`` previously had no writer anywhere in the backend — it was
+    populated once at seed time and only read afterwards, so it drifted further
+    from reality with every batch run. That is why the assets list and the admin
+    dashboard disagreed about the same fleet (13 "critical" against 161): two
+    numbers derived from different vintages of different measures, both labelled
+    critical.
+
+    Banding here uses app.services.health_bands, the same definition the
+    dashboard's distribution chart is generated from, so the two agree by
+    construction. Set-based and idempotent: one statement for the whole fleet,
+    and rows already carrying the right band are left untouched (``IS DISTINCT
+    FROM``) so updated_at only moves when the band genuinely changed.
+
+    Returns the number of assets whose band changed.
+    """
+    case_sql = band_case_sql("p.health_score")
+    where_ids = ""
+    params: dict[str, Any] = {}
+    if asset_ids:
+        where_ids = " AND a.id = ANY(CAST(:asset_ids AS uuid[]))"
+        params["asset_ids"] = list(asset_ids)
+
+    try:
+        result = db.execute(text(f"""
+            UPDATE assets AS a
+               SET health_band = ({case_sql})::asset_health_band,
+                   updated_at  = now()
+              FROM pdm_batch_predictions AS p
+             WHERE p.asset_id = a.id
+               AND p.status = 'ok'
+               AND p.health_score IS NOT NULL
+               AND a.health_band IS DISTINCT FROM ({case_sql})::asset_health_band
+               {where_ids}
+        """), params)
+        changed = result.rowcount or 0
+        db.commit()
+        if changed:
+            log.info("[batch] health_band updated for %d assets", changed)
+        return changed
+    except Exception:
+        # Denormalised convenience column — never fail a prediction run over it.
+        db.rollback()
+        log.warning("[batch] health_band sync failed (non-fatal)", exc_info=True)
+        return 0
 
 
 _UPSERT_COLUMNS = [
@@ -670,17 +959,28 @@ def run_batch_for_asset(
         (failure_probability, maintenance_required), = _run_classifier_batch(
             [fd], clf_model, clf_features, clf_threshold, clf_categorical_cols
         )
+        if failure_probability is None:
+            elapsed = int(time.time() * 1000) - start_ms
+            _upsert_single(db, asset_id_str, {
+                **_empty_prediction_fields(),
+                "run_duration_ms": elapsed,
+                "error_message": "Classifier inference failed for this asset",
+                "status": "error",
+            })
+            db.commit()
+            log.error("[batch] asset %s — classifier inference failed, marked as error", asset_id_str[:8])
+            return {"asset_id": asset_id_str, "status": "error"}
+
         (days_until, pred_date, top_explanations, horizon_saturated), = _run_regressor_batch(
             [fd], reg_model, reg_features, reg_categorical_cols, today
         )
         health_score, health_status = _compute_health_score(fd, failure_probability, days_until)
-        contributing_factors = _compute_contributing_factors(fd, failure_probability)
+        contributing_factors = _compute_contributing_factors(fd, failure_probability, days_until)
         estimated_cost, min_cost, max_cost = _estimate_cost(
             fd, failure_probability, days_until,
             asset=asset,
             breakdown_cost_bundle=breakdown_cost_bundle,
         )
-        risk_level = _compute_risk_level(failure_probability, days_until)
         decision = build_decision(
             failure_probability=failure_probability,
             maintenance_required=maintenance_required,
@@ -690,6 +990,7 @@ def run_batch_for_asset(
             horizon_saturated=horizon_saturated,
             clf_threshold=clf_threshold,
         )
+        risk_level = _risk_level_from_tier(decision["tier"])
 
         elapsed = int(time.time() * 1000) - start_ms
         _upsert_single(db, asset_id_str, {
@@ -709,7 +1010,7 @@ def run_batch_for_asset(
             "error_message": None,
             "status": "ok",
             "model_version": _model_version_tag(),
-            "feature_snapshot": json.dumps(fd),
+            "feature_snapshot": json.dumps(_json_safe_fd(fd)),
             "tier": decision["tier"],
             "agreement": decision["agreement"],
             "display_mode": decision["display_mode"],
@@ -718,6 +1019,9 @@ def run_batch_for_asset(
             "horizon_saturated": decision["horizon_saturated"],
         })
         db.commit()
+        # Same sync as the fleet run, scoped to this asset, so a single
+        # "Run AI" from the asset page also refreshes its band.
+        sync_asset_health_bands(db, [asset_id_str])
         _log_prediction_history(db, [{
             "asset_id": asset_id_str,
             "failure_probability": failure_probability,
@@ -729,13 +1033,13 @@ def run_batch_for_asset(
         }])
 
         log.info(
-            "[batch] asset %s (%s) — prob=%.3f days=%d health=%.1f cost=%.0f tier=%s [%dms]",
+            "[batch] asset %s (%s) — prob=%.3f days=%d health=%.1f cost=%s tier=%s [%dms]",
             asset_id_str[:8],
             asset.asset_code or "?",
             failure_probability,
             days_until,
             health_score,
-            estimated_cost,
+            _fmt_cost(estimated_cost),
             decision["tier"],
             elapsed,
         )
@@ -815,12 +1119,14 @@ def run_batch_for_all_assets(
 
     asset_ids = [str(a.id) for a in assets]
     readings_by_asset = _fetch_latest_readings(db, asset_ids)
+    previous_risk_by_asset = _fetch_previous_risk_levels(db, asset_ids)
     today = date.today()
 
     ok_count = 0
     no_data_count = 0
     error_count = 0
     upsert_rows: list[dict] = []
+    newly_critical_assets: list[Asset] = []
 
     scored_assets: list[Asset] = []
     feature_dicts: list[dict[str, Any]] = []
@@ -871,14 +1177,29 @@ def run_batch_for_all_assets(
                 scored_assets, feature_dicts, classifier_results, regressor_results
             ):
                 asset_id_str = str(asset.id)
+
+                if failure_probability is None:
+                    error_count += 1
+                    log.error(
+                        "[batch] asset %s (%s) — classifier inference failed, marking as error",
+                        asset_id_str[:8], asset.asset_code or "?",
+                    )
+                    upsert_rows.append({
+                        "asset_id": asset_id_str,
+                        **_empty_prediction_fields(),
+                        "run_duration_ms": 0,
+                        "error_message": "Classifier inference failed for this asset",
+                        "status": "error",
+                    })
+                    continue
+
                 health_score, health_status = _compute_health_score(fd, failure_probability, days_until)
-                contributing_factors = _compute_contributing_factors(fd, failure_probability)
+                contributing_factors = _compute_contributing_factors(fd, failure_probability, days_until)
                 estimated_cost, min_cost, max_cost = _estimate_cost(
                     fd, failure_probability, days_until,
                     asset=asset,
                     breakdown_cost_bundle=breakdown_cost_bundle,
                 )
-                risk_level = _compute_risk_level(failure_probability, days_until)
                 decision = build_decision(
                     failure_probability=failure_probability,
                     maintenance_required=maintenance_required,
@@ -888,6 +1209,9 @@ def run_batch_for_all_assets(
                     horizon_saturated=horizon_saturated,
                     clf_threshold=clf_threshold,
                 )
+                risk_level = _risk_level_from_tier(decision["tier"])
+                if risk_level == "critical" and previous_risk_by_asset.get(asset_id_str) != "critical":
+                    newly_critical_assets.append(asset)
 
                 ok_count += 1
                 upsert_rows.append({
@@ -908,7 +1232,7 @@ def run_batch_for_all_assets(
                     "error_message": None,
                     "status": "ok",
                     "model_version": model_version,
-                    "feature_snapshot": json.dumps(fd),
+                    "feature_snapshot": json.dumps(_json_safe_fd(fd)),
                     "tier": decision["tier"],
                     "agreement": decision["agreement"],
                     "display_mode": decision["display_mode"],
@@ -918,13 +1242,18 @@ def run_batch_for_all_assets(
                 })
 
                 log.info(
-                    "[batch] asset %s (%s) — prob=%.3f days=%d health=%.1f cost=%.0f tier=%s",
+                    "[batch] asset %s (%s) — prob=%.3f days=%d health=%.1f cost=%s tier=%s",
                     asset_id_str[:8], asset.asset_code or "?",
-                    failure_probability, days_until, health_score, estimated_cost, decision["tier"],
+                    failure_probability, days_until, health_score,
+                    _fmt_cost(estimated_cost), decision["tier"],
                 )
         except Exception as exc:  # noqa: BLE001
             error_msg = str(exc)[:500]
             log.exception("[batch] vectorized inference failed, falling back to per-asset: %s", error_msg)
+            # The per-asset fallback below doesn't compute risk transitions,
+            # so critical-asset alerts are skipped for this run rather than
+            # risk firing on stale/incomplete data.
+            newly_critical_assets = []
             for asset in scored_assets:
                 result = run_batch_for_asset(
                     db=db,
@@ -949,6 +1278,12 @@ def run_batch_for_all_assets(
             upsert_rows = [r for r in upsert_rows if r["asset_id"] not in {str(a.id) for a in scored_assets}]
 
     _upsert_batch_predictions(db, upsert_rows)
+
+    # Keep the denormalised assets.health_band in step with the scores just
+    # written, so the assets list and the dashboard describe the same fleet.
+    sync_asset_health_bands(db)
+
+    _notify_newly_critical_assets(db, newly_critical_assets)
 
     elapsed = round(time.time() - run_start, 2)
     log.info(

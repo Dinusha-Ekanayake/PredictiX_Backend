@@ -89,6 +89,9 @@ class Asset(Base):
     manufacture_year = Column(Integer)
     registration_number = Column(Text)
     vin = Column(Text, unique=True)
+    # Warehouse parking bay, "<zone>-<bay>" e.g. "A-012". Unique per warehouse
+    # (partial unique index, see docs/migrations/009_*.sql); NULL = unassigned.
+    parking_slot = Column(Text)
     status = Column(Text, nullable=False, default="active")
     health_band = Column(Text)
     criticality_score = Column(Numeric(5, 2))
@@ -295,8 +298,8 @@ class AssetAssignment(Base):
     __tablename__ = "asset_assignments"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"), nullable=False)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=False)
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"), nullable=False, index=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=False, index=True)
     assigned_by = Column(UUID(as_uuid=True), ForeignKey("profiles.id"))
     assigned_at = Column(DateTime(timezone=True), server_default=func.now())
     unassigned_at = Column(DateTime(timezone=True))
@@ -308,7 +311,7 @@ class AssetStatusHistory(Base):
     __tablename__ = "asset_status_history"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"), nullable=False)
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"), nullable=False, index=True)
     old_status = Column(Text)
     new_status = Column(Text, nullable=False)
     changed_by = Column(UUID(as_uuid=True), ForeignKey("profiles.id"))
@@ -320,7 +323,7 @@ class AssetDocument(Base):
     __tablename__ = "asset_documents"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"), nullable=False)
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"), nullable=False, index=True)
     title = Column(Text, nullable=False)
     file_path = Column(Text, nullable=False)
     mime_type = Column(Text)
@@ -413,7 +416,7 @@ class TicketPrediction(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     run_id = Column(UUID(as_uuid=True), ForeignKey("prediction_runs.id"), unique=True, nullable=False)
-    ticket_id = Column(UUID(as_uuid=True), ForeignKey("tickets.id"), nullable=False)
+    ticket_id = Column(UUID(as_uuid=True), ForeignKey("tickets.id"), nullable=False, index=True)
 
     predicted_category = Column(Text, nullable=True)
     predicted_priority = Column(Text, nullable=True)
@@ -428,8 +431,8 @@ class PredictionExplanation(Base):
     __tablename__ = "prediction_explanations"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    run_id = Column(UUID(as_uuid=True), ForeignKey("prediction_runs.id"), nullable=False)
-    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"))
+    run_id = Column(UUID(as_uuid=True), ForeignKey("prediction_runs.id"), nullable=False, index=True)
+    asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"), index=True)
     explanation_type = Column(Text, nullable=False, default="shap")
     explanation_text = Column(Text)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

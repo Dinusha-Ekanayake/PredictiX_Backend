@@ -10,8 +10,8 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.deps import get_db
-from app.models import Asset, Ticket
+from app.deps import get_db, get_current_user, is_admin_role, require_user
+from app.models import Asset, Profile, Ticket
 from app.schemas.ticket_summary import TicketSummaryRequest, TicketSummaryResponse
 from app.ai.services.ticket_summary_service import (
     build_ticket_summary_input,
@@ -22,12 +22,23 @@ from app.ai.services.ticket_summary_service import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/ticket-summaries", tags=["Ticket Summaries"])
 
+# Applied to the two inference endpoints individually rather than to the whole
+# router, so /health stays reachable unauthenticated for uptime probes — which
+# is the conventional treatment for a readiness check and costs nothing to
+# serve.
+_AUTHED = [Depends(require_user)]
+
 
 def _s(v) -> str | None:
     return str(v) if v is not None else None
 
 
-@router.post("/generate", response_model=TicketSummaryResponse)
+# Runs model inference for whoever calls it — on the deployed server that
+# reaches a Hugging Face Space. This had no auth dependency at all, so an
+# anonymous POST to the public URL produced a summary. Both real callers (the
+# admin and user new-ticket dialogs) already send a token through apiPost, so
+# requiring one changes nothing that works today.
+@router.post("/generate", response_model=TicketSummaryResponse, dependencies=_AUTHED)
 async def generate_summary(payload: TicketSummaryRequest):
     """Generate a ticket summary from structured fields (or a raw input_text)."""
     try:
@@ -49,11 +60,25 @@ async def generate_summary(payload: TicketSummaryRequest):
 
 
 @router.get("/by-ticket/{ticket_id}", response_model=TicketSummaryResponse)
-async def get_summary_by_ticket(ticket_id: str, db: Session = Depends(get_db)):
-    """Fetch a ticket, build its input, and generate a fresh summary."""
+async def get_summary_by_ticket(
+    ticket_id: str,
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
+    """Fetch a ticket, build its input, and generate a fresh summary.
+
+    Same ownership rule as the rest of the tickets API (see tickets.py):
+    admins/super_admins can summarise any ticket, a regular user only one
+    they created or are assigned to.
+    """
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
+
+    if not is_admin_role(current_user) and str(current_user.id) not in (
+        str(ticket.created_by), str(ticket.assigned_to)
+    ):
+        raise HTTPException(status_code=403, detail="You do not have access to this ticket.")
 
     asset_name = asset_code = None
     if ticket.asset_id is not None:

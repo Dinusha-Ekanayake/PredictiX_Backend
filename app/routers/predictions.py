@@ -1,14 +1,24 @@
-from fastapi import APIRouter, HTTPException, Depends, Query
+from uuid import UUID
+
+from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
 
-from app.deps import get_db, require_user
+from app.deps import (
+    get_db,
+    get_current_user,
+    require_user,
+    require_admin,
+    assert_asset_in_scope,
+    is_admin_role,
+    active_warehouse_id,
+    user_can_view_asset,
+)
 from app.models import (
     Asset,
     MaintenanceEvent,
-    PredictionRun,
-    AssetFailurePrediction,
-    AssetCostPrediction,
     TicketPrediction,
+    Ticket,
+    Profile,
 )
 from app.schemas.prediction import (
     PredictionRequest,
@@ -17,10 +27,6 @@ from app.schemas.prediction import (
     HealthScoreResponse,
     FullPredictionResponse,
     HealthResponse,
-    DebugFeaturesResponse,
-    PredictionRunOut,
-    AssetFailurePredictionOut,
-    AssetCostPredictionOut,
     BreakdownCostPredictionOut,   # ← NEW: matches predict_breakdown_cost()'s real shape
     TicketPredictionOut,
 )
@@ -37,6 +43,26 @@ router = APIRouter(
     tags=["Predictions"],
     dependencies=[Depends(require_user)],
 )
+
+
+# ── Warehouse/ownership scoping helpers ────────────────────────────────────────
+# This router's endpoints were previously unscoped: any authenticated user
+# could read any prediction run, failure/cost prediction, or ticket
+# prediction by ID — including the by-asset endpoints' own scoping being
+# bypassable by going through the by-run-id routes instead, since a run_id
+# is enumerable via the unscoped /runs list. These helpers apply the same
+# warehouse-wide visibility rule established for assets (see app.deps) and
+# tickets (see tickets.py) consistently across every route below.
+
+def _user_can_view_ticket(ticket: Ticket, current_user: Profile) -> bool:
+    """Same rule as tickets.py's get_ticket/list_tickets."""
+    uid = str(getattr(current_user, "id", ""))
+    user_wh_id = getattr(current_user, "warehouse_id", None)
+    if user_wh_id is not None and str(ticket.warehouse_id) == str(user_wh_id):
+        return True
+    return str(ticket.created_by) == uid or str(ticket.assigned_to) == uid
+
+
 
 
 # ── Shared input builder ──────────────────────────────────────────────────────
@@ -113,7 +139,7 @@ def _build_cost_input(asset, last_event) -> dict:
     }
 
 
-def _run_cost_prediction_for_asset(asset_id: str, db: Session) -> dict:
+def _run_cost_prediction_for_asset(asset_id: str, db: Session, current_user: Profile) -> dict:
     """Shared by GET /cost/{asset_id} and POST /cost/live/{asset_id}.
     Runs the breakdown cost model (currently v5.0) live and returns its native dict shape
     plus asset_id/model_version — the fields BreakdownCostPredictionOut expects.
@@ -126,6 +152,7 @@ def _run_cost_prediction_for_asset(asset_id: str, db: Session) -> dict:
     asset = db.query(Asset).filter(Asset.id == asset_id).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
+    assert_asset_in_scope(asset, current_user)
 
     last_event = (
         db.query(MaintenanceEvent)
@@ -164,27 +191,25 @@ def prediction_health():
     }
 
 
-@router.get("/debug/features", response_model=DebugFeaturesResponse)
-def debug_features():
-    from app.main import clf_features, reg_features
-
-    return {
-        "classifier_features": clf_features or [],
-        "regressor_features": reg_features or [],
-        "regressor_categorical_features": ["vehicle_role"],
-    }
 
 
-@router.post("/classification", response_model=ClassificationResponse)
+# The four raw-inference endpoints below take a feature payload rather than an
+# asset id, so they leak no data — but they run model inference on demand, and
+# any of the ~1,300 accounts could call them in a loop. Nothing in the frontend
+# uses them (they exist for model testing and ops), so restricting them to
+# admins closes the abuse vector at no functional cost.
+@router.post("/classification", response_model=ClassificationResponse,
+             dependencies=[Depends(require_admin)])
 def classification(payload: PredictionRequest):
-    from app.main import clf_model, clf_features
+    from app.main import clf_model, clf_features, clf_threshold
 
     if clf_model is None:
         raise HTTPException(status_code=500, detail="Classification model is not loaded")
-    return run_classification(payload.model_dump(), clf_model, clf_features)
+    return run_classification(payload.model_dump(), clf_model, clf_features, clf_threshold)
 
 
-@router.post("/regression", response_model=RegressionResponse)
+@router.post("/regression", response_model=RegressionResponse,
+             dependencies=[Depends(require_admin)])
 def regression(payload: PredictionRequest):
     from app.main import reg_model, reg_features
 
@@ -193,14 +218,16 @@ def regression(payload: PredictionRequest):
     return run_regression(payload.model_dump(), reg_model, reg_features)
 
 
-@router.post("/health-score", response_model=HealthScoreResponse)
+@router.post("/health-score", response_model=HealthScoreResponse,
+             dependencies=[Depends(require_admin)])
 def health_score(payload: PredictionRequest):
     return run_health_score(payload.model_dump())
 
 
-@router.post("/full", response_model=FullPredictionResponse)
+@router.post("/full", response_model=FullPredictionResponse,
+             dependencies=[Depends(require_admin)])
 def full_prediction(payload: PredictionRequest):
-    from app.main import clf_model, clf_features, reg_model, reg_features
+    from app.main import clf_model, clf_features, reg_model, reg_features, clf_threshold
 
     if clf_model is None or reg_model is None:
         raise HTTPException(status_code=500, detail="Models are not loaded")
@@ -208,49 +235,24 @@ def full_prediction(payload: PredictionRequest):
         data=payload.model_dump(),
         clf_model=clf_model, clf_features=clf_features,
         reg_model=reg_model, reg_features=reg_features,
+        clf_threshold=clf_threshold,
     )
 
 
-@router.get("/runs", response_model=list[PredictionRunOut])
-def list_prediction_runs(
-    limit: int = Query(default=100, ge=1, le=500),
-    offset: int = Query(default=0, ge=0),
-    db: Session = Depends(get_db),
-):
-    return db.query(PredictionRun).order_by(PredictionRun.run_started_at.desc()).offset(offset).limit(limit).all()
 
 
-@router.get("/runs/{run_id}", response_model=PredictionRunOut)
-def get_prediction_run(run_id: str, db: Session = Depends(get_db)):
-    row = db.query(PredictionRun).filter(PredictionRun.id == run_id).first()
-    if not row:
-        raise HTTPException(status_code=404, detail="Prediction run not found")
-    return row
 
 
-@router.get("/failure/{asset_id}", response_model=AssetFailurePredictionOut)
-def get_latest_failure_prediction(asset_id: str, db: Session = Depends(get_db)):
-    row = (
-        db.query(AssetFailurePrediction)
-        .filter(AssetFailurePrediction.asset_id == asset_id)
-        .order_by(AssetFailurePrediction.created_at.desc())
-        .first()
-    )
-    if not row:
-        raise HTTPException(status_code=404, detail="No failure prediction found")
-    return row
 
 
-@router.get("/failure/run/{run_id}", response_model=AssetFailurePredictionOut)
-def get_failure_prediction_by_run(run_id: str, db: Session = Depends(get_db)):
-    row = db.query(AssetFailurePrediction).filter(AssetFailurePrediction.run_id == run_id).first()
-    if not row:
-        raise HTTPException(status_code=404, detail="Failure prediction not found")
-    return row
 
 
 @router.get("/cost/{asset_id}", response_model=BreakdownCostPredictionOut)
-def get_latest_cost_prediction(asset_id: str, db: Session = Depends(get_db)):
+def get_latest_cost_prediction(
+    asset_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
     """
     Return the breakdown cost prediction (currently v5.0) for an asset — always runs live.
 
@@ -263,31 +265,28 @@ def get_latest_cost_prediction(asset_id: str, db: Session = Depends(get_db)):
     wrong response_model and would 500. Since predict_breakdown_cost() is
     ~15ms (see model docs §1), always running live is simpler and correct.
     """
-    return _run_cost_prediction_for_asset(asset_id, db)
+    return _run_cost_prediction_for_asset(str(asset_id), db, current_user)
 
 
-@router.get("/cost/run/{run_id}", response_model=AssetCostPredictionOut)
-def get_cost_prediction_by_run(run_id: str, db: Session = Depends(get_db)):
-    row = db.query(AssetCostPrediction).filter(AssetCostPrediction.run_id == run_id).first()
-    if not row:
-        raise HTTPException(status_code=404, detail="Cost prediction not found")
-    return row
 
 
-@router.post("/cost/live/{asset_id}", response_model=BreakdownCostPredictionOut)
-def run_live_cost_prediction(asset_id: str, db: Session = Depends(get_db)):
-    """
-    Force-run the breakdown cost model for one asset, bypassing cache.
-    (Functionally identical to GET /cost/{asset_id} now that that endpoint
-    always runs live too — kept as a separate route for API-contract/semantic
-    compatibility with existing callers that POST here after a maintenance
-    event to refresh the estimate.)
-    """
-    return _run_cost_prediction_for_asset(asset_id, db)
 
 
 @router.get("/ticket/{ticket_id}", response_model=TicketPredictionOut)
-def get_ticket_prediction(ticket_id: str, db: Session = Depends(get_db)):
+def get_ticket_prediction(
+    ticket_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
+    ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    if ticket is not None:
+        if is_admin_role(current_user):
+            wh_id = active_warehouse_id(current_user)
+            if wh_id and str(ticket.warehouse_id) != wh_id:
+                raise HTTPException(status_code=404, detail="Ticket prediction not found")
+        elif not _user_can_view_ticket(ticket, current_user):
+            raise HTTPException(status_code=404, detail="Ticket prediction not found")
+
     row = (
         db.query(TicketPrediction)
         .filter(TicketPrediction.ticket_id == ticket_id)

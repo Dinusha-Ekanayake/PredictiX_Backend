@@ -18,6 +18,7 @@ class AssetCreate(BaseModel):
     manufacture_year: Optional[int] = None
     registration_number: Optional[str] = None
     vin: Optional[str] = None
+    parking_slot: Optional[str] = None
     status: str = "active"
     health_band: Optional[str] = None
     criticality_score: Optional[Decimal] = None
@@ -49,6 +50,7 @@ class AssetUpdate(BaseModel):
     manufacture_year: Optional[int] = None
     registration_number: Optional[str] = None
     vin: Optional[str] = None
+    parking_slot: Optional[str] = None
     status: Optional[str] = None
     health_band: Optional[str] = None
     criticality_score: Optional[Decimal] = None
@@ -59,12 +61,15 @@ class AssetUpdate(BaseModel):
     last_service_date: Optional[date] = None
     next_service_date: Optional[date] = None
     description: Optional[str] = None
-    created_by: Optional[UUID] = None
     vehicle_role: Optional[str] = None
     payload_capacity_kg: Optional[Decimal] = None
     vehicle_age_years: Optional[int] = None
     lifetime_service_count: Optional[int] = None
     lifetime_breakdown_count: Optional[int] = None
+    # created_by intentionally omitted — an audit-trail field recording who
+    # created the asset, not something an edit should ever be able to
+    # change. AssetCreate still has it (server-derived from the caller at
+    # creation time, not client-trusted either — see create_asset).
 
 
 class AssetOut(BaseModel):
@@ -81,6 +86,7 @@ class AssetOut(BaseModel):
     manufacture_year: Optional[int] = None
     registration_number: Optional[str] = None
     vin: Optional[str] = None
+    parking_slot: Optional[str] = None
     status: str
     health_band: Optional[str] = None
     criticality_score: Optional[Decimal] = None

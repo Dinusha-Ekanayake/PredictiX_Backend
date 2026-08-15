@@ -166,6 +166,17 @@ def predict_breakdown_cost(raw_input: dict, bundle: dict, top_k: int = 5) -> dic
     ))
     hi = float(np.expm1(float(b["q90"].predict(Xg)[0])) * fuel_price + b["conformal_q_hat"])
 
+    # The point and the interval come from different models — CatBoost for the
+    # value, the two LightGBM quantile models above for the bounds — and nothing
+    # in training constrains them to agree. On live fleet data roughly half the
+    # assets returned lo > point, i.e. an "80% interval" that excludes its own
+    # estimate, which then rendered as a nonsense range on the asset report.
+    # Widen the interval to contain the point rather than moving the point:
+    # the estimate stays exactly what the predictor said, and the bounds stay
+    # the quantile models' own numbers except where they contradict it.
+    lo = min(lo, point)
+    hi = max(hi, point)
+
     # SHAP — computed in log-ratio space, same as v4's log1p(cost) space.
     # sv_log is intentionally not LKR-denominated; never display it directly.
     if b["predictor_name"] == "CatBoost":

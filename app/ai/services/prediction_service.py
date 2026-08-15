@@ -4,9 +4,32 @@ import numpy as np
 import pandas as pd
 from fastapi import HTTPException
 
+from app.ai.services.pdm_decision_service import classifier_only_tier
+from app.services.health_bands import band_for
+
+_TIER_TO_RISK_LABEL = {"urgent": "High", "watch": "Medium", "healthy": "Low"}
+_RISK_LABEL_TO_ACTION = {
+    "High": "Schedule maintenance immediately",
+    "Medium": "Inspect vehicle soon",
+    "Low": "Continue monitoring",
+}
+
 
 def validate_payload_fields(data: dict, required_fields: list[str]) -> None:
-    missing_fields = [field for field in required_fields if field not in data]
+    """422 if any required field is absent *or* None.
+
+    The None check matters: callers pass ``PredictionRequest.model_dump()``,
+    and because every field on that model is Optional with a ``None`` default,
+    the dict always contains all keys. A pure ``not in`` test therefore never
+    fired, and an empty ``{}`` request body sailed past this guard to die
+    inside the model as a 500 ("float() argument must be ... not 'NoneType'").
+    A missing input is a client error, so it must surface as a 422 naming the
+    fields rather than as a server error.
+    """
+    missing_fields = [
+        field for field in required_fields
+        if field not in data or data[field] is None
+    ]
 
     if missing_fields:
         raise HTTPException(
@@ -19,19 +42,22 @@ def validate_payload_fields(data: dict, required_fields: list[str]) -> None:
         )
 
 
-def get_risk_and_action(prob: float, pred_days: int | None = None) -> tuple[str, str]:
-    if pred_days is not None:
-        if prob >= 0.8 or pred_days <= 7:
-            return "High", "Schedule maintenance immediately"
-        if prob >= 0.5 or pred_days <= 30:
-            return "Medium", "Inspect vehicle soon"
-        return "Low", "Continue monitoring"
+def get_risk_and_action(prob: float, clf_threshold: float) -> tuple[str, str]:
+    """Classifier-probability-only risk estimate for the debug prediction
+    endpoints, using the exact same tier boundaries the real batch
+    pipeline's decision layer (pdm_decision_service) does.
 
-    if prob >= 0.8:
-        return "High", "Schedule maintenance immediately"
-    if prob >= 0.5:
-        return "Medium", "Inspect vehicle soon"
-    return "Low", "Continue monitoring"
+    Previously used its own disconnected, hardcoded 0.8/0.5 probability
+    cuts (with a 7/30-day override build_decision's tier never considers
+    at all) — a probability that read e.g. "High" here could read
+    "medium" risk_level in the real pdm_batch_predictions row for the
+    same evidence. days_until is intentionally not used for
+    classification here, matching build_decision (it only affects how
+    the predicted date is framed for display, never the risk tier).
+    """
+    tier = classifier_only_tier(prob, clf_threshold)
+    label = _TIER_TO_RISK_LABEL[tier]
+    return label, _RISK_LABEL_TO_ACTION[label]
 
 
 def _parse_snapshot_date(snapshot_date_raw: str) -> pd.Timestamp:
@@ -44,7 +70,7 @@ def _parse_snapshot_date(snapshot_date_raw: str) -> pd.Timestamp:
         )
 
 
-def run_classification(data: dict, clf_model, clf_features: list[str]) -> dict:
+def run_classification(data: dict, clf_model, clf_features: list[str], clf_threshold: float) -> dict:
     """``clf_model`` is an app.ai.services.lgb_model_adapter.LgbModelBundle."""
     validate_payload_fields(data, ["snapshot_date"])
     snapshot_date = _parse_snapshot_date(data["snapshot_date"])
@@ -54,7 +80,7 @@ def run_classification(data: dict, clf_model, clf_features: list[str]) -> dict:
         df = clf_model.build_frame([row])
         prob = float(clf_model.predict_proba_positive(df)[0])
         maintenance_required = int(prob >= 0.6)
-        risk_level, recommended_action = get_risk_and_action(prob)
+        risk_level, recommended_action = get_risk_and_action(prob, clf_threshold)
 
         return {
             "maintenance_probability": round(prob, 4),
@@ -190,14 +216,12 @@ def run_health_score(data: dict) -> dict:
 
         health_score = float(np.clip(round(base_score - total_penalty, 2), 0, 100))
 
-        if health_score >= 80:
-            health_status = "Healthy"
-        elif health_score >= 60:
-            health_status = "Moderate"
-        elif health_score >= 40:
-            health_status = "Poor"
-        else:
-            health_status = "Critical"
+        # Same shared band definition the batch pipeline and the dashboard use,
+        # so this endpoint cannot describe an asset differently from the rest of
+        # the system. The previous local scale (>=80 "Healthy" / >=60 / >=40)
+        # had an unreachable top band — health scores on this scale top out
+        # around 79 — so nothing could ever come back healthy.
+        health_status = band_for(health_score)
 
         all_factors = contributions + penalties
         top_factors = sorted(all_factors, key=lambda x: abs(x["impact"]), reverse=True)[:8]
@@ -220,14 +244,15 @@ def run_full_prediction(
     clf_features: list[str],
     reg_model,
     reg_features: list[str],
+    clf_threshold: float,
 ) -> dict:
-    classification = run_classification(data, clf_model, clf_features)
+    classification = run_classification(data, clf_model, clf_features, clf_threshold)
     regression = run_regression(data, reg_model, reg_features)
     health = run_health_score(data)
 
     risk_level, recommended_action = get_risk_and_action(
         classification["maintenance_probability"],
-        regression["predicted_days_until_maintenance"],
+        clf_threshold,
     )
 
     return {
