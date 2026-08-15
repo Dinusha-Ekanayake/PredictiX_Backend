@@ -321,7 +321,13 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             pass
             
         return {
-            "answer": "Please reach out to our admins at **neuromindspredictix@gmail.com** and they'll get back to you as soon as possible.",
+            # The trailing "(Debug: Generic fallback hit)" that used to be here
+            # was shipped verbatim to end users in the chat window.
+            "answer": (
+                "I couldn't find an answer to that in your fleet data. "
+                "Please reach out to our admins at **neuromindspredictix@gmail.com** "
+                "and they'll get back to you as soon as possible."
+            ),
             "action_buttons": [{"label": "Copy Admin Email", "path": "copy:neuromindspredictix@gmail.com"}],
         }
 
