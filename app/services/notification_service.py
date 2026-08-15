@@ -379,41 +379,52 @@ class NotificationService:
         import requests
 
         api_key = os.getenv("BREVO_API_KEY")
-        sender_email = os.getenv("BREVO_SENDER_EMAIL", "neuromindspredictix@gmail.com")
+        sender_email = os.getenv("BREVO_SENDER_EMAIL", "neuromindspredictix@11453287.brevo-mail.com")
         sender_name = os.getenv("BREVO_SENDER_NAME", "PredictiX System")
 
-        if not api_key:
-            print("[NOTIFICATION] Email service disabled - BREVO_API_KEY not configured")
-            return False
-
-        recipients = [{"email": e} for e in to_emails if e]
+        recipients = [e for e in to_emails if e]
         if not recipients:
             print("[NOTIFICATION] No valid recipients - skipping email")
             return False
 
+        # 1. Attempt delivery via Brevo API
+        if api_key:
+            try:
+                resp = requests.post(
+                    "https://api.brevo.com/v3/smtp/email",
+                    headers={
+                        "api-key": api_key,
+                        "Content-Type": "application/json",
+                        "accept": "application/json",
+                    },
+                    json={
+                        "sender": {"email": sender_email, "name": sender_name},
+                        "to": [{"email": e} for e in recipients],
+                        "subject": subject,
+                        "htmlContent": html_body,
+                    },
+                    timeout=15,
+                )
+                if resp.status_code in (200, 201, 202):
+                    print(f"[NOTIFICATION] Email sent via Brevo to {len(recipients)} recipient(s)")
+                    return True
+                print(f"[NOTIFICATION-WARNING] Brevo API returned {resp.status_code}: {resp.text[:200]}, attempting SMTP fallback...")
+            except Exception as e:
+                print(f"[NOTIFICATION-WARNING] Failed to send via Brevo: {str(e)}, attempting SMTP fallback...")
+
+        # 2. Fallback to direct Gmail SMTP relay
         try:
-            resp = requests.post(
-                "https://api.brevo.com/v3/smtp/email",
-                headers={
-                    "api-key": api_key,
-                    "Content-Type": "application/json",
-                    "accept": "application/json",
-                },
-                json={
-                    "sender": {"email": sender_email, "name": sender_name},
-                    "to": recipients,
-                    "subject": subject,
-                    "htmlContent": html_body,
-                },
-                timeout=15,
-            )
-            if resp.status_code in (200, 201, 202):
-                print(f"[NOTIFICATION] Email sent via Brevo to {len(recipients)} recipient(s)")
-                return True
-            print(f"[NOTIFICATION-ERROR] Brevo API {resp.status_code}: {resp.text[:200]}")
-            return False
-        except Exception as e:
-            print(f"[NOTIFICATION-ERROR] Failed to send via Brevo: {str(e)}")
+            from app.services.reminder_email_sender import send_email as send_smtp
+            for recipient in recipients:
+                send_smtp(
+                    to_email=recipient,
+                    subject=subject,
+                    html_body=html_body,
+                )
+            print(f"[NOTIFICATION] Email sent via SMTP fallback to {len(recipients)} recipient(s)")
+            return True
+        except Exception as smtp_err:
+            print(f"[NOTIFICATION-ERROR] Both Brevo and SMTP failed: {smtp_err}")
             return False
     
     @staticmethod
