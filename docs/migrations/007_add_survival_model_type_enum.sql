@@ -1,0 +1,14 @@
+-- Migration: Add 'component_survival_analysis' to the prediction_model_type enum
+-- Run this in Supabase SQL editor or via psql
+--
+-- model_registry.model_type is constrained to this enum. It already covers
+-- failure_classification / maintenance_regression / cost_estimation /
+-- ticket_category / ticket_priority / ticket_summary / asset_summary, but
+-- nothing for the per-component Weibull AFT survival models
+-- (app/ai/models/survival_analysis) — those were never registered in
+-- model_registry at all, so there was no queryable record of which
+-- survival-model version is actually live (see app/main.py's
+-- _register_active_models). ADD VALUE is additive and safe to run against
+-- the live DB; it cannot run inside the same transaction as a statement
+-- that uses the new value, so run it standalone.
+ALTER TYPE prediction_model_type ADD VALUE IF NOT EXISTS 'component_survival_analysis';

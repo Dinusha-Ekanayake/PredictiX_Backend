@@ -6,7 +6,7 @@ Handles sending emails when an admin generates and prints a Warehouse AI Report.
 from typing import List
 from datetime import datetime
 from sqlalchemy.orm import Session
-from app.services.notification_service import NotificationService, EmailConfig
+from app.services.notification_service import NotificationService
 from app.models import Profile, Department
 
 class ReportEmailTemplates:

@@ -111,7 +111,6 @@ def _classify_intent(question: str) -> str:
                 {"role": "system", "content": ROUTER_SYSTEM},
                 {"role": "user", "content": question},
             ],
-            model="llama-3.1-8b-instant",
             max_tokens=20,
             temperature=0.0,
         )
@@ -153,7 +152,6 @@ def _rewrite_query_with_history(question: str, history: list[dict]) -> str:
     try:
         rewritten, _ = call_groq(
             messages=[{"role": "user", "content": prompt}],
-            model="llama-3.1-8b-instant",
             max_tokens=50,
             temperature=0.0
         )

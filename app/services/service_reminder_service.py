@@ -14,6 +14,7 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from app.models import Asset, Profile, ServiceReminderLog
+from app.services.in_app_notification_service import InAppNotificationService
 from app.services.reminder_email_sender import EmailSendError, send_email
 from app.services.reminder_email_template import service_reminder_html
 
@@ -141,6 +142,24 @@ def _send_and_log(
         )
     )
     db.commit()
+
+    # In-app notification is independent of email deliverability — a bounced
+    # email must not also suppress the in-app alert, and vice versa.
+    try:
+        InAppNotificationService.notify_user(
+            db,
+            user_id=str(user.id),
+            title="Service reminder",
+            message=(
+                f"{asset.asset_name} is due for service "
+                f"{'tomorrow' if days_remaining <= 1 else f'in {days_remaining} days'}."
+            ),
+            priority="high" if days_remaining <= 1 else "medium",
+            notification_type="maintenance_due",
+            link_url=f"/admin/assets?asset_id={asset.id}",
+        )
+    except Exception:
+        log.exception("Failed to send in-app service reminder notification for asset %s", asset.id)
 
     return {
         "sent": success,

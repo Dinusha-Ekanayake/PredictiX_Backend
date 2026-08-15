@@ -44,7 +44,13 @@ class UserAssignedAssetOut(BaseModel):
     category: Optional[str]
     location: str        # warehouse name + city
     status: str          # asset status
-    healthPercent: float # from criticality_score or health_score
+    # The asset's real health score (pdm_batch_predictions.health_score), which
+    # is what the UI's health bar draws. Nullable on purpose: an asset with no
+    # completed prediction has no health to report, and the card renders "—".
+    # This was previously fed from criticality_score — a different measure
+    # altogether — with a 100.0 default that claimed perfect health for
+    # never-scored assets.
+    healthPercent: Optional[float] = None
     nextServiceDate: Optional[str]
 
 class UserItemOut(BaseModel):

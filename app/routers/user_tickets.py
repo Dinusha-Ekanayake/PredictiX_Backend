@@ -64,6 +64,7 @@ def list_my_tickets(
     query = svc.build_user_tickets_query(
         db,
         user_id=current_user.id,
+        warehouse_id=getattr(current_user, "warehouse_id", None),
         status=status_filter,
         priority=priority,
         asset_id=asset_id,
@@ -107,7 +108,7 @@ def get_my_ticket(
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    if not svc.user_can_view_ticket(ticket, current_user.id):
+    if not svc.user_can_view_ticket(ticket, current_user.id, getattr(current_user, "warehouse_id", None)):
         raise HTTPException(status_code=403, detail="Not allowed to view this ticket")
 
     comments = svc.fetch_ticket_comments(db, ticket_id)
@@ -261,7 +262,7 @@ def list_my_ticket_comments(
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    if not svc.user_can_view_ticket(ticket, current_user.id):
+    if not svc.user_can_view_ticket(ticket, current_user.id, getattr(current_user, "warehouse_id", None)):
         raise HTTPException(status_code=403, detail="Not allowed to view this ticket")
 
     comments = svc.fetch_ticket_comments(db, ticket_id)
@@ -283,7 +284,7 @@ def add_my_ticket_comment(
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    if not svc.user_can_view_ticket(ticket, current_user.id):
+    if not svc.user_can_view_ticket(ticket, current_user.id, getattr(current_user, "warehouse_id", None)):
         raise HTTPException(
             status_code=403, detail="Not allowed to comment on this ticket"
         )
@@ -312,7 +313,7 @@ def add_my_ticket_attachment(
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    if not svc.user_can_view_ticket(ticket, current_user.id):
+    if not svc.user_can_view_ticket(ticket, current_user.id, getattr(current_user, "warehouse_id", None)):
         raise HTTPException(
             status_code=403, detail="Not allowed to add attachments to this ticket"
         )

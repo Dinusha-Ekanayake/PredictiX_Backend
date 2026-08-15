@@ -9,7 +9,7 @@ from ..deps import get_db, get_current_user, require_user, active_warehouse_id
 from ..models import Department
 
 log = logging.getLogger("predictix")
-from ..models import Asset, Ticket, AssetFailurePrediction, MaintenanceEvent, AssetCostPrediction, Profile
+from ..models import Asset, Ticket, PdmBatchPrediction, PdmPredictionHistory, MaintenanceEvent, Profile
 from fastapi import BackgroundTasks
 from ..services.dashboard_cache import DashboardCache
 
@@ -21,6 +21,20 @@ warehouse_dashboard_router = APIRouter(
 
 _cache = DashboardCache("warehouse", ttl=int(__import__("os").getenv("WAREHOUSE_DASHBOARD_TTL", "60")))
 _survival_cache = DashboardCache("warehouse_survival", ttl=int(__import__("os").getenv("WAREHOUSE_DASHBOARD_TTL", "60")))
+
+
+def _months_ending_at(anchor: datetime, n: int) -> list[tuple[int, int, str]]:
+    """Return [(year, month, 'Mon'), ...] oldest->newest for the trailing n
+    months ending at the anchor month (inclusive). Year rollover is handled."""
+    out: list[tuple[int, int, str]] = []
+    for i in range(n - 1, -1, -1):
+        m = anchor.month - i
+        y = anchor.year
+        while m <= 0:
+            m += 12
+            y -= 1
+        out.append((y, m, calendar.month_abbr[m]))
+    return out
 
 @warehouse_dashboard_router.get("/summary")
 def get_warehouse_summary(
@@ -70,25 +84,28 @@ def _build_warehouse_summary(db: Session, warehouse_id: str | None = None):
     _tickets_and = "warehouse_id = :wh AND" if warehouse_id else ""
 
     # ── Query 1: all scalar KPIs from predictions + tickets + assets in one shot
+    # pdm_batch_predictions is the single source of truth for PdM output
+    # (populated by the daily scheduler + the asset-page "Run AI" trigger),
+    # upserted with exactly one row per asset — unlike the old
+    # asset_failure_predictions/asset_cost_predictions tables this replaced,
+    # there's no "latest of several rows" history to DISTINCT ON here.
+    # asset_failure_predictions/asset_cost_predictions were superseded by
+    # pdm_batch_predictions since the v7/decision-layer unification and
+    # never written to since — reading from them here silently produced
+    # stale/empty KPIs regardless of how current the real predictions were.
     kpi_row = db.execute(text(f"""
         SELECT
-            (SELECT ROUND(AVG(health_score)::numeric, 1) FROM (
-                SELECT DISTINCT ON (asset_id) health_score FROM asset_failure_predictions
-                WHERE {_assets_in} ORDER BY asset_id, created_at DESC) lp)         AS avg_health,
-            (SELECT COUNT(*) FROM (
-                SELECT DISTINCT ON (asset_id) health_score FROM asset_failure_predictions
-                WHERE {_assets_in} ORDER BY asset_id, created_at DESC) lp
-             WHERE health_score >= 80)                                             AS healthy_assets,
-            (SELECT COUNT(*) FROM (
-                SELECT DISTINCT ON (asset_id) health_score FROM asset_failure_predictions
-                WHERE {_assets_in} ORDER BY asset_id, created_at DESC) lp
-             WHERE health_score < 60)                                              AS at_risk_assets,
+            (SELECT ROUND(AVG(health_score)::numeric, 1) FROM pdm_batch_predictions
+             WHERE status = 'ok' AND {_assets_in})                                 AS avg_health,
+            (SELECT COUNT(*) FROM pdm_batch_predictions
+             WHERE status = 'ok' AND {_assets_in} AND health_score >= 80)          AS healthy_assets,
+            (SELECT COUNT(*) FROM pdm_batch_predictions
+             WHERE status = 'ok' AND {_assets_in} AND health_score < 60)           AS at_risk_assets,
             (SELECT COUNT(*) FROM assets {_assets_where})                          AS total_assets,
             (SELECT COUNT(*) FROM tickets WHERE {_tickets_and} status != 'closed') AS active_tickets,
             (SELECT COUNT(*) FROM tickets {_tickets_where})                        AS total_tickets,
-            (SELECT COALESCE(SUM(estimated_cost), 0) FROM (
-                SELECT DISTINCT ON (asset_id) estimated_cost FROM asset_cost_predictions
-                WHERE {_assets_in} ORDER BY asset_id, created_at DESC) lc)         AS total_cost
+            (SELECT COALESCE(SUM(estimated_cost_lkr), 0) FROM pdm_batch_predictions
+             WHERE status = 'ok' AND {_assets_in})                                 AS total_cost
     """), _wh).fetchone()
 
     avg_health_score     = float(kpi_row[0] or 0)
@@ -137,21 +154,16 @@ def _build_warehouse_summary(db: Session, warehouse_id: str | None = None):
     tickets_by_category = [{"category": c.title() if c else "General",                           "count": cnt} for c, cnt in category_counts]
     assets_by_type     = [{"type": str(t).replace("_", " ").title() if t else "Other",           "count": c} for t, c in type_counts]
 
-    # 6. Health Score Distribution — bucketed in SQL over the LATEST prediction
-    # per asset (append-only history), so bands don't inflate as runs accumulate.
+    # 6. Health Score Distribution — bucketed in SQL over pdm_batch_predictions,
+    # which already holds exactly one (current) row per asset.
     _bucket_where = (
-        "WHERE p.asset_id IN (SELECT id FROM assets WHERE warehouse_id = :wh)"
+        "p.asset_id IN (SELECT id FROM assets WHERE warehouse_id = :wh) AND "
         if warehouse_id else ""
     )
     bucket_rows = db.execute(text(f"""
         SELECT width_bucket(health_score, 60, 100, 4) AS b, COUNT(*)
-        FROM (
-            SELECT DISTINCT ON (p.asset_id) p.asset_id, p.health_score
-            FROM asset_failure_predictions p
-            {_bucket_where}
-            ORDER BY p.asset_id, p.created_at DESC
-        ) lp
-        WHERE lp.health_score IS NOT NULL
+        FROM pdm_batch_predictions p
+        WHERE {_bucket_where}p.status = 'ok' AND p.health_score IS NOT NULL
         GROUP BY b
     """), _wh).fetchall()
     # width_bucket(score, 60, 100, 4) → 0:<60, 1:60–69, 2:70–79, 3:80–89, 4&5:90–100
@@ -184,41 +196,51 @@ def _build_warehouse_summary(db: Session, warehouse_id: str | None = None):
 
     monthly_ticket_volume = [{"month": m, "total": months_dict.get(m, 0)} for m in recent_months]
 
-    current_avg_health = int(avg_health_score) if avg_health_score else 0
-    # Per-month avg health in ONE grouped query instead of one query per month.
-    _hm_q = db.query(
-        extract("month", AssetFailurePrediction.created_at).label("m"),
-        func.avg(AssetFailurePrediction.health_score),
-    ).filter(AssetFailurePrediction.created_at.isnot(None))
-    if warehouse_id:
-        _hm_q = _hm_q.join(Asset, Asset.id == AssetFailurePrediction.asset_id).filter(
-            Asset.warehouse_id == warehouse_id
-        )
-    health_month_rows = _hm_q.group_by("m").all()
-    avg_health_by_month = {int(m_num): avg_h for m_num, avg_h in health_month_rows}
-    health_trends = []
-    for m in recent_months:
-        month_num = list(calendar.month_abbr).index(m)
-        avg_h = avg_health_by_month.get(month_num)
-        health_trends.append({
-            "month": m,
-            "avgHealth": int(avg_h) if avg_h else current_avg_health,
-            "maintenance": months_dict.get(m, 0)
-        })
+    # Per-month avg health, from real history — not a fabricated flat line.
+    # pdm_batch_predictions can't supply this: it's an upsert table, one row
+    # per asset, latest score only. pdm_prediction_history is the append-only
+    # log the batch job actually writes on every run — group by real
+    # calendar year+month (not bare month-number, which would merge e.g.
+    # Jan-2025 and Jan-2026 into one bucket) and anchor the trailing window
+    # at the latest real data point rather than "today", so a stale/never-run
+    # batch job doesn't produce a trailing run of empty months. Months with
+    # no recorded predictions get a null gap rather than an invented number;
+    # with no history at all, the array comes back empty so the frontend's
+    # "No health-trend data" state shows instead of a misleadingly flat line.
+    _health_hist_rows = db.execute(text(f"""
+        SELECT to_char(h.predicted_at, 'YYYY-MM') AS ym,
+               AVG(h.health_score)                AS avg_health,
+               MAX(h.predicted_at)                AS latest
+        FROM pdm_prediction_history h
+        WHERE h.health_score IS NOT NULL
+          AND h.asset_id IN (SELECT id FROM assets {_assets_where})
+        GROUP BY ym
+    """), _wh).fetchall()
 
-    # 8. Critical Assets Table — LATEST prediction per asset (append-only history),
-    # so an asset can't appear multiple times from different runs. Worst first.
+    health_by_ym = {r[0]: float(r[1]) for r in _health_hist_rows}
+    if health_by_ym:
+        health_anchor_dt = max(r[2] for r in _health_hist_rows)
+        health_trends = [
+            {
+                "month": abbr,
+                "avgHealth": round(health_by_ym[f"{y:04d}-{m:02d}"], 1) if f"{y:04d}-{m:02d}" in health_by_ym else None,
+                "maintenance": months_dict.get(abbr, 0),
+            }
+            for (y, m, abbr) in _months_ending_at(health_anchor_dt, 6)
+        ]
+    else:
+        health_trends = []
+
+    # 8. Critical Assets Table — pdm_batch_predictions already holds exactly
+    # one (current) row per asset, so no per-asset dedup is needed here.
+    # Worst first.
     _crit_where = "AND a.warehouse_id = :wh" if warehouse_id else ""
     critical_assets_query = db.execute(text(f"""
-        SELECT a.asset_code, a.model, a.asset_name, a.category, latest.health_score
-        FROM (
-            SELECT DISTINCT ON (p.asset_id) p.asset_id, p.health_score
-            FROM asset_failure_predictions p
-            ORDER BY p.asset_id, p.created_at DESC
-        ) latest
-        JOIN assets a ON a.id = latest.asset_id
-        WHERE latest.health_score < 70 {_crit_where}
-        ORDER BY latest.health_score ASC
+        SELECT a.asset_code, a.model, a.asset_name, a.category, p.health_score
+        FROM pdm_batch_predictions p
+        JOIN assets a ON a.id = p.asset_id
+        WHERE p.status = 'ok' AND p.health_score < 70 {_crit_where}
+        ORDER BY p.health_score ASC
         LIMIT 10
     """), _wh).fetchall()
 
@@ -487,7 +509,7 @@ def get_departments_overview(
 def get_maintenance_schedule(db: Session = Depends(get_db)):
     """
     Returns predictive maintenance schedule from real Supabase database data.
-    predicted  = AssetFailurePrediction.days_until_maintenance (ML regressor output)
+    predicted  = PdmBatchPrediction.predicted_days_until_maintenance (ML regressor output)
     scheduled  = last performed_at + fleet avg maintenance interval, projected forward
                  (computed entirely from maintenance_events table — no hardcoded values)
     """
@@ -507,30 +529,19 @@ def get_maintenance_schedule(db: Session = Depends(get_db)):
         """)).scalar()
         avg_interval_days = int(avg_interval_row) if avg_interval_row else 90
 
-        # ── Most recent prediction per asset (subquery) ──
-        latest_pred = (
-            db.query(
-                AssetFailurePrediction.asset_id,
-                func.max(AssetFailurePrediction.created_at).label("max_at"),
-            )
-            .group_by(AssetFailurePrediction.asset_id)
-            .subquery()
-        )
-
+        # pdm_batch_predictions already holds exactly one (current) row per
+        # asset — no "most recent per asset" subquery/self-join needed here,
+        # unlike the old asset_failure_predictions history table this replaced.
         rows = (
-            db.query(Asset, AssetFailurePrediction)
-            .join(AssetFailurePrediction, Asset.id == AssetFailurePrediction.asset_id)
-            .join(
-                latest_pred,
-                (AssetFailurePrediction.asset_id == latest_pred.c.asset_id)
-                & (AssetFailurePrediction.created_at == latest_pred.c.max_at),
-            )
+            db.query(Asset, PdmBatchPrediction)
+            .join(PdmBatchPrediction, Asset.id == PdmBatchPrediction.asset_id)
             .filter(
                 text("assets.status::text NOT IN ('retired', 'inactive')"),
-                AssetFailurePrediction.days_until_maintenance.isnot(None),
-                AssetFailurePrediction.days_until_maintenance > 0,
+                PdmBatchPrediction.status == "ok",
+                PdmBatchPrediction.predicted_days_until_maintenance.isnot(None),
+                PdmBatchPrediction.predicted_days_until_maintenance > 0,
             )
-            .order_by(AssetFailurePrediction.days_until_maintenance.asc())
+            .order_by(PdmBatchPrediction.predicted_days_until_maintenance.asc())
             .limit(50)
             .all()
         )
@@ -549,7 +560,7 @@ def get_maintenance_schedule(db: Session = Depends(get_db)):
 
         schedule = []
         for asset, pred in rows:
-            predicted_weeks = round(float(pred.days_until_maintenance) / 7, 2)
+            predicted_weeks = round(float(pred.predicted_days_until_maintenance) / 7, 2)
 
             # Scheduled: project from last actual service + fleet avg interval
             scheduled_weeks = None

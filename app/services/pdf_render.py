@@ -31,8 +31,9 @@ from reportlab.pdfgen import canvas as rl_canvas
 from app.services.pdf_styles import (
     COLORS, get_styles, section_divider, thin_divider,
     kpi_card_style, data_table_style, info_grid_style,
-    risk_style_key, risk_color,
+    risk_style_key, risk_color, health_band_color,
 )
+from app.services.health_bands import band_for
 
 PAGE_W, PAGE_H = A4
 MARGIN    = 15 * mm
@@ -434,12 +435,12 @@ def _maintenance_section(story, ctx, insights, styles):
         rows = []
         for m in maintenance[:3]:
             rows.append([
-                _datetime(getattr(m, "performed_at", None)) or _datetime(getattr(m, "scheduled_date", None)),
-                getattr(m, "event_type", "—") or "—",
-                getattr(m, "title", "—") or "—",
-                getattr(m, "vendor_name", "—") or "—",
-                f"LKR {float(m.cost_amount):,.0f}" if getattr(m, "cost_amount", None) else "—",
-                f"{float(m.downtime_hours):.1f}h" if getattr(m, "downtime_hours", None) else "—",
+                _datetime(m.get("performed_at")) if m.get("performed_at") else _datetime(m.get("scheduled_date")),
+                m.get("event_type") or "—",
+                m.get("title") or "—",
+                m.get("vendor_name") or "—",
+                f"LKR {float(m['cost_amount']):,.0f}" if m.get("cost_amount") else "—",
+                f"{float(m['downtime_hours']):.1f}h" if m.get("downtime_hours") else "—",
             ])
         story.append(_data_table(
             ["Date", "Type", "Title", "Vendor", "Cost", "Downtime"],
@@ -475,12 +476,12 @@ def _tickets_section(story, ctx, styles):
         rows = []
         for t in tickets[:3]:
             rows.append([
-                str(t.ticket_number or "—"),
-                str(t.title or "—")[:55],
-                str(t.priority or "—"),
-                str(t.status or "—"),
-                str(t.final_category or t.predicted_category or "—"),
-                str(t.opened_at)[:10] if t.opened_at else "—",
+                str(t.get("ticket_number") or "—"),
+                str(t.get("title") or "—")[:55],
+                str(t.get("priority") or "—"),
+                str(t.get("status") or "—"),
+                str(t.get("final_category") or t.get("predicted_category") or "—"),
+                str(t.get("opened_at"))[:10] if t.get("opened_at") else "—",
             ])
         story.append(_data_table(
             ["Ticket #", "Title", "Priority", "Status", "Category", "Opened"],
@@ -516,7 +517,7 @@ def _predictions_section(story, ctx, insights, styles):
 
     # Health score bar
     health = metrics["health_score"]
-    bar_color = COLORS.LOW if health >= 80 else COLORS.MEDIUM if health >= 60 else COLORS.CRITICAL
+    bar_color = health_band_color(band_for(health))
     story.append(Paragraph("Asset Health Score", styles["subsection"]))
     story.append(HBarChart([("Health Score", health, 100, bar_color)], bar_h=12))
     story.append(Spacer(1, 5*mm))

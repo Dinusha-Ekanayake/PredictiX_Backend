@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from uuid import UUID
-from typing import Optional, Any
+from typing import Optional, Any, Literal
 from datetime import datetime
 from decimal import Decimal
 
@@ -17,6 +17,13 @@ class AssetAssignmentCreate(BaseModel):
 
 class AssetAssignmentOut(AssetAssignmentCreate):
     id: UUID
+
+    # Resolved on the way out so the assignment history reads as names rather
+    # than as UUIDs. Optional because a referenced profile may since have been
+    # deleted, in which case the id is still returned and the name is absent.
+    user_name: Optional[str] = None
+    user_email: Optional[str] = None
+    assigned_by_name: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -166,10 +173,22 @@ class ReportSourceOut(ReportSourceCreate):
         from_attributes = True
 
 
+# Both columns are Postgres enums. Typing them as plain `str` let any value
+# through Pydantic and pushed the rejection down to the INSERT, where an
+# unknown value surfaced as a psycopg2 InvalidTextRepresentation — a 500 with
+# a raw SQL traceback for what is really a client input error. Constraining
+# them here turns that into a 422 that names the valid options.
+NotificationChannel = Literal["in_app", "email"]
+NotificationType = Literal[
+    "high_risk_asset", "ticket_created", "ticket_resolved", "ticket_updated",
+    "maintenance_due", "prediction_ready", "report_ready", "system",
+]
+
+
 class UserNotificationPreferenceCreate(BaseModel):
     user_id: UUID
-    channel: str
-    notification_type: str
+    channel: NotificationChannel
+    notification_type: NotificationType
     enabled: bool = True
 
 

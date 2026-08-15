@@ -68,9 +68,22 @@ async def websocket_endpoint(
     user_id: str,
     token: Optional[str] = Query(default=None),
 ):
-    # Authenticate BEFORE accepting: the token must be valid and belong to the
-    # same user_id in the path, otherwise reject the handshake.
+    # The token must be valid and belong to the same user_id in the path,
+    # otherwise reject the connection.
     if not _verify_ws_token(token, user_id):
+        # accept() before close() is required for the close CODE to actually
+        # reach the browser: Starlette/ASGI closing a WebSocket that was
+        # never accepted just fails the HTTP-level upgrade handshake, which
+        # every browser reports to JS as the generic code 1006 (abnormal
+        # closure) — the real 1008 we send here never arrives client-side.
+        # Confirmed live: before this fix, an intentionally-invalid token
+        # produced `ws.onclose` with code 1006, indistinguishable from a
+        # plain network drop, which defeats the frontend's ability to tell
+        # "your session is dead, log in again" apart from "transient
+        # blip, just retry" (see NotificationBell.tsx). No message is ever
+        # sent or received in the brief accepted-then-closed window, so
+        # this doesn't grant an unauthenticated caller any real access.
+        await websocket.accept()
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         logger.warning("WebSocket auth rejected for user_id=%s", user_id)
         return

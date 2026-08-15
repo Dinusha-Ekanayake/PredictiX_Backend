@@ -24,23 +24,28 @@ router, or /reports/* would have two competing route definitions.
 
 from __future__ import annotations
 
+import asyncio
+import ipaddress
 import uuid
 import os
 import traceback
 import logging
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from fastapi.background import BackgroundTasks
 from pydantic import BaseModel, Field
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 # Existing imports (UNCHANGED)
 from app.services.report_service import ReportService
 from app.services.pdf_render import PDFRenderService
-from app.deps import get_db, require_user, require_admin
+from app.deps import get_db, require_user, require_admin, get_current_user, is_admin_role, active_warehouse_id, assert_asset_in_scope
 from app.models import Asset, Profile, Report, Ticket, Warehouse
 from app.schemas.report import ReportCreate, ReportUpdate, ReportOut
+from app.core.config import allowed_frontend_origins
 
 log = logging.getLogger("predictix.reports")
 
@@ -54,14 +59,38 @@ router = APIRouter(
 )
 
 
-@router.post("/{asset_id}")
+@router.post("/{asset_id}", deprecated=True, summary="[Deprecated] Server-rendered asset report")
 def generate_asset_report_endpoint(
     asset_id: uuid.UUID,
     background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
 ):
+    """Regular users may only generate a report for an asset assigned to
+    them — matches the ownership rule in asset_component_rul.py's
+    /assets/{asset_id}/component-rul. Admins are scoped to their active
+    warehouse (previously not checked at all here — any admin could
+    generate a report, including its maintenance/ticket history and AI
+    insights, for an asset in a warehouse they don't manage). 404 (not
+    403) so an out-of-scope asset's existence isn't revealed.
+
+    Deprecated: superseded by the client-built HTML report
+    (src/lib/assetPdfExport.ts) rendered via POST /reports/render-pdf —
+    the frontend's own generateAssetReport() caller for this route was
+    already removed ("report now handled by parent via onReport prop").
+    Kept live rather than deleted in case any external caller still
+    depends on it; not used by this app's own frontend."""
+    asset = db.query(Asset).filter(Asset.id == asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail=f"Asset {asset_id} not found")
+    if is_admin_role(current_user):
+        assert_asset_in_scope(asset, current_user)
+    elif str(asset.assigned_to) != str(getattr(current_user, "id", "")):
+        raise HTTPException(status_code=404, detail=f"Asset {asset_id} not found")
+
     service = ReportService()
     try:
-        url, pdf_path = service.generate_asset_report(asset_id)
+        url, pdf_path = service.generate_asset_report(asset_id, user_id=current_user.id)
         background_tasks.add_task(os.remove, pdf_path)
         return FileResponse(
             path=pdf_path,
@@ -77,8 +106,16 @@ def generate_asset_report_endpoint(
         raise HTTPException(status_code=500, detail=f"Failed to generate report: {str(e)}")
 
 
-@router.get("/dummy/pdf")
+@router.get(
+    "/dummy/pdf",
+    dependencies=[Depends(require_admin)],
+    summary="[Dev/QA only] Render a PDF with hardcoded dummy data",
+)
 def generate_dummy_pdf(background_tasks: BackgroundTasks):
+    """Styling-test endpoint — every field is hardcoded, no real data ever
+    touched. Was reachable by any authenticated user regardless of role;
+    admin-gated since there's no reason a regular account needs to trigger
+    PDF rendering on demand, even against fake data."""
     try:
         pdf_service = PDFRenderService()
         dummy_context = {
@@ -169,21 +206,51 @@ reports_router = APIRouter(
 )
 
 @reports_router.post("/", response_model=ReportOut)
-def create_report(payload: ReportCreate, db: Session = Depends(get_db)):
+def create_report(
+    payload: ReportCreate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
     if payload.asset_id and not db.query(Asset).filter(Asset.id == payload.asset_id).first():
         raise HTTPException(status_code=404, detail="Asset not found")
     if payload.warehouse_id and not db.query(Warehouse).filter(Warehouse.id == payload.warehouse_id).first():
         raise HTTPException(status_code=404, detail="Warehouse not found")
     if payload.ticket_id and not db.query(Ticket).filter(Ticket.id == payload.ticket_id).first():
         raise HTTPException(status_code=404, detail="Ticket not found")
-    if payload.generated_by and not db.query(Profile).filter(Profile.id == payload.generated_by).first():
-        raise HTTPException(status_code=404, detail="User not found")
 
-    obj = Report(**payload.model_dump())
+    data = payload.model_dump()
+    # generated_by was previously accepted verbatim from the request body —
+    # validated to be a real profile, but never forced to equal the caller,
+    # so a user could attribute a report they generated to someone else.
+    data["generated_by"] = current_user.id
+
+    obj = Report(**data)
     db.add(obj)
     db.commit()
     db.refresh(obj)
     return obj
+
+
+def _report_visibility_filter(current_user):
+    """SQLAlchemy filter for which reports a caller may read.
+
+    Admins/super_admins see their active warehouse's reports (plus any
+    report with no warehouse_id, so orphaned reports don't vanish for
+    everyone). Non-admin users see reports in their own warehouse, plus any
+    report they personally generated. Previously unscoped entirely — any
+    authenticated user could read every warehouse's reports.
+    """
+    if is_admin_role(current_user):
+        wh_id = active_warehouse_id(current_user)
+        if wh_id:
+            return or_(Report.warehouse_id == wh_id, Report.warehouse_id.is_(None))
+        return None
+    uid = getattr(current_user, "id", None)
+    user_wh_id = getattr(current_user, "warehouse_id", None)
+    conditions = [Report.generated_by == uid]
+    if user_wh_id:
+        conditions.append(Report.warehouse_id == user_wh_id)
+    return or_(*conditions)
 
 
 @reports_router.get("/", response_model=list[ReportOut])
@@ -191,23 +258,49 @@ def list_reports(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
 ):
-    return db.query(Report).order_by(Report.created_at.desc()).offset(offset).limit(limit).all()
+    q = db.query(Report)
+    visibility = _report_visibility_filter(current_user)
+    if visibility is not None:
+        q = q.filter(visibility)
+    return q.order_by(Report.created_at.desc()).offset(offset).limit(limit).all()
 
 
 @reports_router.get("/{report_id}", response_model=ReportOut)
-def get_report(report_id: str, db: Session = Depends(get_db)):
+def get_report(
+    report_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
     obj = db.query(Report).filter(Report.id == report_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Report not found")
+    visibility = _report_visibility_filter(current_user)
+    if visibility is not None:
+        visible = db.query(Report).filter(Report.id == report_id, visibility).first()
+        if visible is None:
+            raise HTTPException(status_code=404, detail="Report not found")
     return obj
 
 
 @reports_router.put("/{report_id}", response_model=ReportOut)
-def update_report(report_id: str, payload: ReportUpdate, db: Session = Depends(get_db)):
+def update_report(
+    report_id: uuid.UUID,
+    payload: ReportUpdate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
     obj = db.query(Report).filter(Report.id == report_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Report not found")
+
+    # Edit rights are narrower than read visibility: only the report's own
+    # generator or an admin may modify it — matches the owner-or-admin edit
+    # pattern used elsewhere in this app (tickets, comments). Previously any
+    # authenticated user could overwrite any warehouse's report content.
+    if not is_admin_role(current_user) and str(obj.generated_by) != str(getattr(current_user, "id", "")):
+        raise HTTPException(status_code=403, detail="You can only edit reports you generated.")
 
     for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(obj, key, value)
@@ -218,7 +311,7 @@ def update_report(report_id: str, payload: ReportUpdate, db: Session = Depends(g
 
 
 @reports_router.delete("/{report_id}", dependencies=[Depends(require_admin)])
-def delete_report(report_id: str, db: Session = Depends(get_db)):
+def delete_report(report_id: uuid.UUID, db: Session = Depends(get_db)):
     obj = db.query(Report).filter(Report.id == report_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Report not found")
@@ -239,8 +332,12 @@ def delete_report(report_id: str, db: Session = Depends(get_db)):
 # Setup: pip install playwright && playwright install --with-deps chromium
 
 class RenderPdfRequest(BaseModel):
-    html: str = Field(..., description="Full HTML document string to render (as produced by assetPdfExport.ts's generateAssetReportHtml()).")
-    filename: str = Field(default="report.pdf", description="Suggested download filename.")
+    html: str = Field(
+        ...,
+        max_length=2_000_000,
+        description="Full HTML document string to render (as produced by assetPdfExport.ts's generateAssetReportHtml()).",
+    )
+    filename: str = Field(default="report.pdf", max_length=200, description="Suggested download filename.")
 
 
 # Repeating footer — rendered by Chromium on every physical page. Playwright's
@@ -261,11 +358,118 @@ _FOOTER_TEMPLATE = """
 _HEADER_TEMPLATE = "<span></span>"
 
 
-@reports_router.post("/render-pdf")
-async def render_pdf(payload: RenderPdfRequest) -> Response:
-    """Render the given HTML to a PDF and return it as a binary download."""
+# ── render_pdf's network allowlist ─────────────────────────────────────────
+# The rendered HTML's only legitimate outbound resource request is the
+# PredictiX logo, fetched from the app's own frontend origin
+# (assetPdfExport.ts embeds it as `${origin}/logo/...`). Everything else a
+# malicious payload could ask for — a cloud metadata endpoint, an internal
+# service, an attacker's own exfiltration server — must never reach the
+# network. Computed once at import time from the same origin list the CORS
+# middleware trusts (app.core.config.allowed_frontend_origins), so the two
+# can't silently drift apart.
+_PDF_RENDER_ALLOWED_HOSTS = {
+    host for host in (urlsplit(origin).hostname for origin in allowed_frontend_origins()) if host
+}
+
+
+def _is_ip_literal(hostname: str) -> bool:
     try:
-        from playwright.async_api import async_playwright
+        ipaddress.ip_address(hostname)
+        return True
+    except ValueError:
+        return False
+
+
+def _pdf_render_url_allowed(url: str) -> bool:
+    """Default-deny allowlist check, shared by the request interceptor.
+
+    Allows only `data:` URIs (fully self-contained, no network egress) and
+    http(s) requests whose hostname exactly matches a trusted frontend
+    origin. Any IP-literal destination is rejected outright regardless of
+    the allowlist, which blocks cloud-metadata addresses
+    (e.g. 169.254.169.254) and other internal-network probing even if a
+    hostname entry were ever misconfigured.
+    """
+    parsed = urlsplit(url)
+    if parsed.scheme == "data":
+        return True
+    return (
+        parsed.scheme in ("http", "https")
+        and bool(parsed.hostname)
+        and not _is_ip_literal(parsed.hostname)
+        and parsed.hostname in _PDF_RENDER_ALLOWED_HOSTS
+    )
+
+
+def _pdf_render_route_guard(route) -> None:
+    """Playwright (sync API) request interceptor for render_pdf."""
+    url = route.request.url
+    if _pdf_render_url_allowed(url):
+        route.continue_()
+        return
+    log.warning("PDF render: blocked outbound request to %s", url)
+    route.abort()
+
+
+def _render_pdf_sync(html: str) -> bytes:
+    """Runs the actual Playwright render — deliberately the *sync* API,
+    executed via asyncio.to_thread from the endpoint below rather than the
+    async API on the request's own event loop.
+
+    Why: Playwright's async API launches Chromium via
+    asyncio.create_subprocess_exec, which requires a ProactorEventLoop on
+    Windows. Uvicorn forces the SelectorEventLoop on Windows whenever it
+    manages worker subprocesses itself (e.g. under --reload), which doesn't
+    support that call at all and raises NotImplementedError — a failure
+    that depends entirely on how the ASGI server happens to be started, not
+    on anything this endpoint controls. The sync API launches its browser
+    process from a plain OS thread instead, so it behaves identically
+    regardless of the surrounding event loop or platform.
+    """
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+        try:
+            context = browser.new_context(java_script_enabled=False)
+            try:
+                context.route("**/*", _pdf_render_route_guard)
+                page = context.new_page()
+                page.set_content(html, wait_until="networkidle", timeout=15_000)
+                return page.pdf(
+                    format="A4",
+                    print_background=True,
+                    display_header_footer=True,
+                    header_template=_HEADER_TEMPLATE,
+                    footer_template=_FOOTER_TEMPLATE,
+                    margin={"top": "10mm", "bottom": "18mm", "left": "13mm", "right": "13mm"},
+                )
+            finally:
+                context.close()
+        finally:
+            browser.close()
+
+
+@reports_router.post("/render-pdf", dependencies=[Depends(require_admin)])
+async def render_pdf(payload: RenderPdfRequest) -> Response:
+    """Render the given HTML to a PDF and return it as a binary download.
+
+    The HTML is built client-side by an authenticated admin's own browser
+    (assetPdfExport.ts) but is treated as fully untrusted once it reaches
+    this endpoint, since the request body itself is just JSON any caller
+    could construct directly. Chromium is locked down so it can't be used
+    as an SSRF / internal-network-probing primitive:
+      - JavaScript execution is disabled for the page — the report HTML is
+        static markup with no <script> tags by design, so nothing
+        legitimate depends on script execution.
+      - Every outbound request is intercepted and default-denied; only the
+        app's own known frontend origins (and inline data: URIs) are
+        allowed through — see _pdf_render_url_allowed.
+      - Admin-only, with an explicit render timeout so a pathological
+        payload can't tie up a worker indefinitely.
+    """
+    try:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
     except ImportError as exc:
         raise HTTPException(
             status_code=503,
@@ -276,26 +480,15 @@ async def render_pdf(payload: RenderPdfRequest) -> Response:
         raise HTTPException(status_code=400, detail="html payload is empty or too short")
 
     try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
-            try:
-                page = await browser.new_page()
-                await page.set_content(payload.html, wait_until="networkidle")
-                pdf_bytes = await page.pdf(
-                    format="A4",
-                    print_background=True,
-                    display_header_footer=True,
-                    header_template=_HEADER_TEMPLATE,
-                    footer_template=_FOOTER_TEMPLATE,
-                    margin={"top": "10mm", "bottom": "18mm", "left": "13mm", "right": "13mm"},
-                )
-            finally:
-                await browser.close()
+        pdf_bytes = await asyncio.to_thread(_render_pdf_sync, payload.html)
     except HTTPException:
         raise
+    except PlaywrightTimeoutError as exc:
+        log.warning("PDF render timed out")
+        raise HTTPException(status_code=504, detail="PDF render timed out") from exc
     except Exception as exc:  # noqa: BLE001
         log.exception("PDF render failed")
-        raise HTTPException(status_code=500, detail=f"PDF render failed: {exc}") from exc
+        raise HTTPException(status_code=500, detail="PDF render failed") from exc
 
     safe_name = payload.filename.replace('"', "").strip() or "report.pdf"
     if not safe_name.lower().endswith(".pdf"):

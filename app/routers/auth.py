@@ -198,11 +198,10 @@ def list_warehouses():
         raise HTTPException(status_code=500, detail="Could not fetch warehouses.")
 
 
-# ─── GET /auth/test ────────────────────────────────────────────────────────────
-
-@router.get("/test")
-def test_auth():
-    return {"message": "Auth router working"}
+# GET /auth/test was a development stub that returned {"message": "Auth router
+# working"} to anonymous callers. It is removed rather than secured: it proved
+# only that the router was mounted, which GET / already covers as the service
+# health check, and nothing in the product ever called it.
 
 
 # ─── internal: authenticate ───────────────────────────────────────────────────

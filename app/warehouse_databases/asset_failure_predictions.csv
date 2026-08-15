@@ -1,0 +1,1 @@
+id,run_id,asset_id,health_score,failure_probability,confidence,risk_level,predicted_maintenance_date,days_until_maintenance,top_explanations,created_at
