@@ -369,7 +369,6 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                         },
                         {"role": "user", "content": question}
                     ],
-                    model="llama-3.1-8b-instant",
                     max_tokens=300,
                     temperature=0.3,
                 )

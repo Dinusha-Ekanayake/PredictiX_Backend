@@ -34,7 +34,6 @@ log = logging.getLogger("predictix.llm")
 # the cascade is that Groq retires models faster than this file gets edited.
 MODEL_CASCADE = [
     "llama-3.3-70b-versatile",
-    "llama-3.1-8b-instant",
 ]
 
 # The model every caller starts from unless it asks for a specific one. Callers
@@ -116,11 +115,11 @@ def call_groq(
                 or ("model" in err_str and "not found" in err_str)
             )
 
-            if is_rate_limit or is_model_blocked:
+            if is_model_blocked:
                 next_model = next((m for m in MODEL_CASCADE if m not in tried), None)
                 if next_model:
                     log.warning(
-                        "Model %s blocked/rate-limited. Falling back to %s.",
+                        "Model %s blocked. Falling back to %s.",
                         current_model, next_model,
                     )
                     current_model = next_model
@@ -131,7 +130,7 @@ def call_groq(
 
             attempt += 1
             if attempt <= retries:
-                backoff = 1.5 ** (attempt - 1)
+                backoff = 2.0 * attempt
                 log.warning(
                     "Groq call failed (attempt %d/%d), retrying in %.1fs: %s",
                     attempt, retries, backoff, str(e)[:120],
