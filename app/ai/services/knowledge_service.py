@@ -42,8 +42,6 @@ def _embedding_url() -> str:
         )
         return _DEFAULT_EMBEDDING_URL
     return configured
-
-
 def embed_text(text: str) -> list[float]:
     """Generate a 384-dim embedding vector for the given text.
 
@@ -67,12 +65,10 @@ def embed_text(text: str) -> list[float]:
 
     return response.json()[0]
 
-
 def search_knowledge(query: str, match_count: int = 3) -> list:
     try:
         # Use Hugging Face Inference API instead of heavy local torch/transformers models
         api_url = _embedding_url()
-
         headers = {}
         if token := os.getenv("HF_TOKEN"):
             headers["Authorization"] = f"Bearer {token}"
@@ -91,7 +87,6 @@ def search_knowledge(query: str, match_count: int = 3) -> list:
                         response.status_code, response.text[:300])
             return []
             
-        # The feature-extraction pipeline for sentence-transformers returns a 1D array per input
         embedding = response.json()[0]
         
         response = supabase.rpc("match_knowledge", {

@@ -421,11 +421,9 @@ KB_DOCUMENTS = [
         "tags": ["iso55001", "asset management", "governance", "risk-based"],
         "source": "CEDR Implementation Guide for an ISO 55001 Asset Management System (Oct 2016)",
         "content": (
-            "ISO 55001 specifies a managed Asset Management System (AMS) rather than ad-hoc maintenance. Its backbone is a "
-            "Strategic Asset Management Plan (SAMP) that turns organisational objectives into an asset management policy, "
-            "objectives and plans, executed under a Plan-Do-Check-Act improvement cycle. It requires demonstrable top-management "
-            "leadership and commitment, a risk-based approach to decision-making, and management of assets across their whole "
-            "lifecycle."
+            "ISO 55001 governs asset lifecycle optimization. It requires a Strategic Asset Management Plan (SAMP) "
+            "to convert corporate objectives into risk-based operational maintenance targets under a Plan-Do-Check-Act (PDCA) loop. "
+            "Critical-rate, PM-ratio, and SHAP diagnostics must feed regular leadership review cycles to assure governance."
         ),
     },
     {

@@ -315,7 +315,6 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             # reply below — but never silently: a persistently failing LLM here
             # is invisible otherwise, since the user just sees a polite message.
             log.warning("Generic chatbot fallback could not reach the LLM: %s", exc)
-
         return {
             # The trailing "(Debug: Generic fallback hit)" that used to be here
             # was shipped verbatim to end users in the chat window.
@@ -346,6 +345,7 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                         },
                         {"role": "user", "content": question}
                     ],
+                    model="llama-3.1-8b-instant",
                     max_tokens=300,
                     temperature=0.3,
                 )

@@ -41,6 +41,7 @@ class KBArticleCreate(BaseModel):
     title: str
     content: str
     category: Optional[str] = "General"
+    source: Optional[str] = ""
     tags: Optional[list[str]] = None
 
 
@@ -48,6 +49,7 @@ class KBArticleUpdate(BaseModel):
     title: Optional[str] = None
     content: Optional[str] = None
     category: Optional[str] = None
+    source: Optional[str] = None
     tags: Optional[list[str]] = None
     is_active: Optional[bool] = None
 
@@ -57,6 +59,7 @@ class KBArticleOut(BaseModel):
     title: str
     content: str
     category: Optional[str] = None
+    source: Optional[str] = None
     tags: Optional[list] = None
     is_active: bool
     created_by: Optional[str] = None
@@ -84,7 +87,7 @@ def list_articles(
         raise HTTPException(status_code=403, detail="Only admins can view the knowledge base")
 
     q = supabase.from_("knowledge_base").select(
-        "id,title,content,category,tags,is_active,created_by,created_at,updated_at"
+        "id,title,content,category,source,tags,is_active,created_by,created_at,updated_at"
     )
     if not include_inactive:
         q = q.eq("is_active", True)
@@ -107,7 +110,7 @@ def get_article(
         raise HTTPException(status_code=403, detail="Only admins can view KB articles")
 
     response = supabase.from_("knowledge_base").select(
-        "id,title,content,category,tags,is_active,created_by,created_at,updated_at"
+        "id,title,content,category,source,tags,is_active,created_by,created_at,updated_at"
     ).eq("id", article_id).single().execute()
 
     if not response.data:
@@ -141,6 +144,7 @@ def create_article(
         "title": title,
         "content": content,
         "category": payload.category or "General",
+        "source": payload.source or "",
         "tags": payload.tags or [],
         "is_active": True,
         "created_by": str(getattr(current_user, "id", "")),
@@ -149,7 +153,7 @@ def create_article(
         insert_data["embedding"] = embedding
 
     response = supabase.from_("knowledge_base").insert(insert_data).select(
-        "id,title,content,category,tags,is_active,created_by,created_at,updated_at"
+        "id,title,content,category,source,tags,is_active,created_by,created_at,updated_at"
     ).single().execute()
 
     if not response.data:
@@ -186,7 +190,7 @@ def update_article(
                 log.warning("Failed to re-embed KB article: %s", e)
 
     response = supabase.from_("knowledge_base").update(updates).eq("id", article_id).select(
-        "id,title,content,category,tags,is_active,created_by,created_at,updated_at"
+        "id,title,content,category,source,tags,is_active,created_by,created_at,updated_at"
     ).single().execute()
 
     if not response.data:
@@ -212,7 +216,7 @@ def toggle_article(
         "is_active": new_status,
         "updated_at": datetime.utcnow().isoformat(),
     }).eq("id", article_id).select(
-        "id,title,content,category,tags,is_active,created_by,created_at,updated_at"
+        "id,title,content,category,source,tags,is_active,created_by,created_at,updated_at"
     ).single().execute()
 
     if not response.data:

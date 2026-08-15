@@ -610,7 +610,6 @@ class NotificationService:
             # FAQs are a shared knowledge base (not tied to a warehouse or
             # asset), so every active admin/super_admin is notified.
             admin_emails = NotificationService._admin_emails_for_warehouse(db, None)
-
             if not admin_emails:
                 print("[NOTIFICATION] No admins to notify for new FAQ - skipping email", flush=True)
                 return False
@@ -656,7 +655,6 @@ class NotificationService:
             # admins don't get flooded with notifications for tickets
             # outside the warehouse they manage.
             admin_emails = NotificationService._admin_emails_for_warehouse(db, ticket.warehouse_id)
-
             # Determine overall recipients list ensuring uniqueness
             recipients = set(admin_emails)
             if creator_email:
@@ -714,7 +712,6 @@ class NotificationService:
                 if old_assignee:
                     old_assignee_name = old_assignee.full_name
                     old_assignee_email = old_assignee.email
-
             new_assignee_name = "Unassigned"
             new_assignee_email = None
             if ticket.assigned_to:
@@ -739,7 +736,6 @@ class NotificationService:
             
             # Admins scoped to the ticket's own warehouse — see notify_on_new_ticket.
             admin_emails = NotificationService._admin_emails_for_warehouse(db, ticket.warehouse_id)
-
             # Build recipients set
             recipients = set(admin_emails)
             if creator_email:
@@ -749,7 +745,6 @@ class NotificationService:
             # Notify old assignee too if they were removed/changed
             if old_assignee_email:
                 recipients.add(old_assignee_email)
-
             email_list = list(recipients)
             if not email_list:
                 return False
