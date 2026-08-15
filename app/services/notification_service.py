@@ -330,6 +330,21 @@ class NotificationService:
     """Service to send email notifications using PostgreSQL database data"""
 
     @staticmethod
+    def _resolve_session(db: Optional[Session]) -> tuple[Session, bool]:
+        """Ensures an open, valid SQLAlchemy session.
+        If `db` is None or closed (e.g. dispatched via FastAPI BackgroundTasks),
+        opens a fresh SessionLocal() and returns (session, should_close=True)."""
+        try:
+            if db is not None and db.is_active:
+                # Ping connection to ensure it's not closed
+                db.connection()
+                return db, False
+        except Exception:
+            pass
+        from app.db.session import SessionLocal
+        return SessionLocal(), True
+
+    @staticmethod
     def _admin_emails_for_warehouse(db: Session, warehouse_id: Optional[str]) -> List[str]:
         """Active admin/super_admin emails, scoped to a warehouse.
 
@@ -402,50 +417,34 @@ class NotificationService:
             return False
     
     @staticmethod
-    def notify_on_new_user(db: Session, new_user_id: str) -> bool:
+    def notify_on_new_user(db: Optional[Session], new_user_id: str) -> bool:
         """
         Main notification handler - sends all notifications for new user
         Queries all data directly from PostgreSQL database
-        
-        Args:
-            db: SQLAlchemy database session
-            new_user_id: UUID of the newly created user
-            
-        Returns:
-            True if notifications sent successfully (or email disabled)
         """
+        session, should_close = NotificationService._resolve_session(db)
         try:
             from app.models import Profile, Department
             
-            # ============================================================
-            # Query new user from database
-            # ============================================================
-            new_user = db.query(Profile).filter(Profile.id == new_user_id).first()
-            
+            new_user = session.query(Profile).filter(Profile.id == new_user_id).first()
             if not new_user:
                 print(f"[NOTIFICATION-ERROR] New user with ID {new_user_id} not found in database")
                 return False
             
             print(f"[NOTIFICATION] Processing notifications for user: {new_user.full_name}")
             
-            # Get department name from database
             department_name = "Not Assigned"
             if new_user.department_id:
-                dept = db.query(Department).filter(Department.id == new_user.department_id).first()
+                dept = session.query(Department).filter(Department.id == new_user.department_id).first()
                 if dept:
                     department_name = dept.name
             
-            # Format creation timestamp
             created_at = (new_user.created_at or datetime.now()).strftime('%B %d, %Y at %I:%M %p')
             
-            # Generate temporary password
             import secrets
             temp_password = secrets.token_urlsafe(12)
             
-            # ============================================================
-            # 1. SEND WELCOME EMAIL TO NEW USER
-            # ============================================================
-            print(f"[NOTIFICATION] Sending welcome email to {new_user.email}")
+            # 1. Welcome email to new user
             subject, html_body = EmailTemplates.new_user_welcome_email(
                 new_user_name=new_user.full_name,
                 email=new_user.email,
@@ -453,13 +452,9 @@ class NotificationService:
             )
             NotificationService.send_email([new_user.email], subject, html_body)
             
-            # ============================================================
-            # 2. SEND NOTIFICATION TO ADMINS IN THE NEW USER'S WAREHOUSE
-            # ============================================================
-            admin_emails = NotificationService._admin_emails_for_warehouse(db, new_user.warehouse_id)
-
+            # 2. Notification to admins
+            admin_emails = NotificationService._admin_emails_for_warehouse(session, new_user.warehouse_id)
             if admin_emails:
-                print(f"[NOTIFICATION] Notifying {len(admin_emails)} admin(s) from database")
                 subject, html_body = EmailTemplates.new_user_admin_notification(
                     new_user_name=new_user.full_name,
                     department=department_name,
@@ -469,20 +464,15 @@ class NotificationService:
                 )
                 NotificationService.send_email(admin_emails, subject, html_body)
             
-            # ============================================================
-            # 3. SEND NOTIFICATION TO DEPARTMENT MEMBERS FROM DATABASE
-            # ============================================================
+            # 3. Notification to department members
             if new_user.department_id:
-                dept_members = db.query(Profile).filter(
+                dept_members = session.query(Profile).filter(
                     Profile.department_id == new_user.department_id,
-                    Profile.id != new_user.id,  # Exclude the new user
+                    Profile.id != new_user.id,
                     Profile.status == "active"
                 ).all()
-                
                 dept_email_list = [member.email for member in dept_members if member.email]
-                
                 if dept_email_list:
-                    print(f"[NOTIFICATION] Notifying {len(dept_email_list)} department member(s) in {department_name} from database")
                     subject, html_body = EmailTemplates.new_user_department_notification(
                         new_user_name=new_user.full_name,
                         department=department_name,
@@ -491,125 +481,65 @@ class NotificationService:
                     )
                     NotificationService.send_email(dept_email_list, subject, html_body)
             
-            print(f"[NOTIFICATION] All notifications processed for {new_user.full_name}")
             return True
-            
         except Exception as e:
             print(f"[NOTIFICATION-ERROR] Failed to process notifications: {str(e)}")
             import traceback
             traceback.print_exc()
             return False
+        finally:
+            if should_close:
+                session.close()
     
     @staticmethod
-    def notify_on_profile_update(db: Session, user_id: str) -> bool:
-        """
-        Send notification to admins when a user updates their profile
-        All data fetched directly from PostgreSQL database
-        
-        Args:
-            db: SQLAlchemy database session
-            user_id: UUID of the user who updated their profile
-            
-        Returns:
-            True if notifications sent successfully (or email disabled)
-        """
+    def notify_on_profile_update(db: Optional[Session], user_id: str) -> bool:
+        """Send notification to admins when a user updates their profile"""
+        session, should_close = NotificationService._resolve_session(db)
         try:
             from app.models import Profile, Department
             
-            # ============================================================
-            # Query user who updated their profile
-            # ============================================================
-            user = db.query(Profile).filter(Profile.id == user_id).first()
-            
+            user = session.query(Profile).filter(Profile.id == user_id).first()
             if not user:
                 print(f"[NOTIFICATION-ERROR] User with ID {user_id} not found in database", flush=True)
                 return False
             
             print(f"[NOTIFICATION] Processing profile update notification for: {user.full_name}", flush=True)
             
-            # Get department name from database
             department_name = "Not Assigned"
             if user.department_id:
-                dept = db.query(Department).filter(Department.id == user.department_id).first()
+                dept = session.query(Department).filter(Department.id == user.department_id).first()
                 if dept:
                     department_name = dept.name
             
-            # Format timestamp
             updated_at = (datetime.now()).strftime('%B %d, %Y at %I:%M %p')
             
-            # ============================================================
-            # SEND NOTIFICATION TO ADMINS IN THE USER'S WAREHOUSE
-            # ============================================================
-            admin_emails = NotificationService._admin_emails_for_warehouse(db, user.warehouse_id)
-
+            admin_emails = NotificationService._admin_emails_for_warehouse(session, user.warehouse_id)
             if admin_emails:
-                print(f"[NOTIFICATION] Notifying {len(admin_emails)} admin(s) of profile update from database", flush=True)
-                
-                subject = f"Profile Updated: {user.full_name}"
-                
-                html_body = f"""
-                <html>
-                    <head>
-                        <style>
-                            body {{ font-family: Arial, sans-serif; color: #333; }}
-                            .container {{ max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 8px; }}
-                            .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 8px 8px 0 0; }}
-                            .content {{ padding: 20px; }}
-                            .info-box {{ background: #f5f5f5; padding: 15px; border-left: 4px solid #667eea; margin: 15px 0; }}
-                            .footer {{ background: #f5f5f5; padding: 10px; text-align: center; font-size: 12px; color: #666; border-radius: 0 0 8px 8px; }}
-                        </style>
-                    </head>
-                    <body>
-                        <div class="container">
-                            <div class="header">
-                                <h2>Profile Update Notification</h2>
-                            </div>
-                            <div class="content">
-                                <p>Hello Admin,</p>
-                                <p>A user has updated their profile information in the PredictiX system.</p>
-                                
-                                <div class="info-box">
-                                    <strong>User Details (from Database):</strong><br>
-                                    <strong>Name:</strong> {user.full_name}<br>
-                                    <strong>Email:</strong> {user.email}<br>
-                                    <strong>Department:</strong> {department_name}<br>
-                                    <strong>Role:</strong> {user.role.upper()}<br>
-                                    <strong>Contact Number:</strong> {user.phone if user.phone else 'Not provided'}<br>
-                                    <strong>Updated:</strong> {updated_at}
-                                </div>
-                                
-                                <p>Please review their updated profile in the admin section if needed.</p>
-                                
-                                <p>Best regards,<br>PredictiX System</p>
-                            </div>
-                            <div class="footer">
-                                <p>This is an automated notification. Please do not reply to this email.</p>
-                            </div>
-                        </div>
-                    </body>
-                </html>
-                """
-                
+                subject, html_body = EmailTemplates.new_user_admin_notification(
+                    new_user_name=user.full_name,
+                    department=department_name,
+                    role=user.role,
+                    email=user.email,
+                    created_at=updated_at
+                )
                 NotificationService.send_email(admin_emails, subject, html_body)
             
-            print(f"[NOTIFICATION] Profile update notification processed for {user.full_name}")
             return True
-            
         except Exception as e:
             print(f"[NOTIFICATION-ERROR] Failed to process profile update notification: {str(e)}")
             import traceback
             traceback.print_exc()
             return False
+        finally:
+            if should_close:
+                session.close()
 
     @staticmethod
-    def notify_on_new_faq(db: Session, question: str, answer: str, category: Optional[str] = None, creator_name: str = "Administrator") -> bool:
+    def notify_on_new_faq(db: Optional[Session], question: str, answer: str, category: Optional[str] = None, creator_name: str = "Administrator") -> bool:
         """Send notification to admins when a new FAQ is created"""
+        session, should_close = NotificationService._resolve_session(db)
         try:
-            from app.models import Profile
-            
-            # FAQs are a shared knowledge base (not tied to a warehouse or
-            # asset), so every active admin/super_admin is notified.
-            admin_emails = NotificationService._admin_emails_for_warehouse(db, None)
+            admin_emails = NotificationService._admin_emails_for_warehouse(session, None)
             if not admin_emails:
                 print("[NOTIFICATION] No admins to notify for new FAQ - skipping email", flush=True)
                 return False
@@ -625,37 +555,35 @@ class NotificationService:
         except Exception as e:
             print(f"[NOTIFICATION-ERROR] Failed to notify on new FAQ: {str(e)}", flush=True)
             return False
+        finally:
+            if should_close:
+                session.close()
 
     @staticmethod
-    def notify_on_new_ticket(db: Session, ticket_id: str) -> bool:
+    def notify_on_new_ticket(db: Optional[Session], ticket_id: str) -> bool:
         """Send notifications to admins, creator, and assignee when a ticket is created"""
+        session, should_close = NotificationService._resolve_session(db)
         try:
             from app.models import Ticket, Profile
             
-            ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+            ticket = session.query(Ticket).filter(Ticket.id == ticket_id).first()
             if not ticket:
                 print(f"[NOTIFICATION-ERROR] Ticket with ID {ticket_id} not found", flush=True)
                 return False
                 
-            # Get creator details
-            creator = db.query(Profile).filter(Profile.id == ticket.created_by).first()
+            creator = session.query(Profile).filter(Profile.id == ticket.created_by).first()
             creator_name = creator.full_name if creator else "System/Unknown"
             creator_email = creator.email if creator else None
             
-            # Get assignee details
             assignee_name = "Unassigned"
             assignee_email = None
             if ticket.assigned_to:
-                assignee = db.query(Profile).filter(Profile.id == ticket.assigned_to).first()
+                assignee = session.query(Profile).filter(Profile.id == ticket.assigned_to).first()
                 if assignee:
                     assignee_name = assignee.full_name
                     assignee_email = assignee.email
                     
-            # Admin recipients — scoped to the ticket's own warehouse so
-            # admins don't get flooded with notifications for tickets
-            # outside the warehouse they manage.
-            admin_emails = NotificationService._admin_emails_for_warehouse(db, ticket.warehouse_id)
-            # Determine overall recipients list ensuring uniqueness
+            admin_emails = NotificationService._admin_emails_for_warehouse(session, ticket.warehouse_id)
             recipients = set(admin_emails)
             if creator_email:
                 recipients.add(creator_email)
@@ -680,42 +608,42 @@ class NotificationService:
         except Exception as e:
             print(f"[NOTIFICATION-ERROR] Failed to notify on new ticket: {str(e)}", flush=True)
             return False
+        finally:
+            if should_close:
+                session.close()
 
     @staticmethod
-    def notify_on_ticket_update(db: Session, ticket_id: str, updater_id: str, old_status: str, old_priority: str, old_assigned_to: Optional[str]) -> bool:
+    def notify_on_ticket_update(db: Optional[Session], ticket_id: str, updater_id: str, old_status: str, old_priority: str, old_assigned_to: Optional[str]) -> bool:
         """Send notifications when a ticket is updated"""
+        session, should_close = NotificationService._resolve_session(db)
         try:
             from app.models import Ticket, Profile
             
-            ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+            ticket = session.query(Ticket).filter(Ticket.id == ticket_id).first()
             if not ticket:
                 print(f"[NOTIFICATION-ERROR] Ticket with ID {ticket_id} not found", flush=True)
                 return False
                 
-            # Get updater details
-            updater = db.query(Profile).filter(Profile.id == updater_id).first()
+            updater = session.query(Profile).filter(Profile.id == updater_id).first()
             updater_name = updater.full_name if updater else "System/User"
             
-            # Determine changes
             changes = []
             if old_status != ticket.status:
                 changes.append(f"<li><b>Status:</b> Changed from <span style='color: #ef4444;'>{old_status}</span> to <span style='color: #22c55e;'>{ticket.status}</span></li>")
             if old_priority != ticket.priority:
                 changes.append(f"<li><b>Priority:</b> Changed from <b>{old_priority}</b> to <b>{ticket.priority}</b></li>")
             
-            # Check assignee change (single lookup, reused below for both
-            # the changelog name and the notification recipient email).
             old_assignee_name = "Unassigned"
             old_assignee_email = None
             if old_assigned_to:
-                old_assignee = db.query(Profile).filter(Profile.id == old_assigned_to).first()
+                old_assignee = session.query(Profile).filter(Profile.id == old_assigned_to).first()
                 if old_assignee:
                     old_assignee_name = old_assignee.full_name
                     old_assignee_email = old_assignee.email
             new_assignee_name = "Unassigned"
             new_assignee_email = None
             if ticket.assigned_to:
-                new_assignee = db.query(Profile).filter(Profile.id == ticket.assigned_to).first()
+                new_assignee = session.query(Profile).filter(Profile.id == ticket.assigned_to).first()
                 if new_assignee:
                     new_assignee_name = new_assignee.full_name
                     new_assignee_email = new_assignee.email
@@ -723,26 +651,21 @@ class NotificationService:
             if str(old_assigned_to or "") != str(ticket.assigned_to or ""):
                 changes.append(f"<li><b>Assignee:</b> Changed from <b>{old_assignee_name}</b> to <b>{new_assignee_name}</b></li>")
                 
-            # If nothing notable changed, don't send notification
             if not changes:
                 print(f"[NOTIFICATION] No status, priority, or assignee change on ticket {ticket.ticket_number} - skipping email", flush=True)
                 return False
                 
             changes_html = "<ul>" + "".join(changes) + "</ul>"
             
-            # Get creator details
-            creator = db.query(Profile).filter(Profile.id == ticket.created_by).first()
+            creator = session.query(Profile).filter(Profile.id == ticket.created_by).first()
             creator_email = creator.email if creator else None
             
-            # Admins scoped to the ticket's own warehouse — see notify_on_new_ticket.
-            admin_emails = NotificationService._admin_emails_for_warehouse(db, ticket.warehouse_id)
-            # Build recipients set
+            admin_emails = NotificationService._admin_emails_for_warehouse(session, ticket.warehouse_id)
             recipients = set(admin_emails)
             if creator_email:
                 recipients.add(creator_email)
             if new_assignee_email:
                 recipients.add(new_assignee_email)
-            # Notify old assignee too if they were removed/changed
             if old_assignee_email:
                 recipients.add(old_assignee_email)
             email_list = list(recipients)
@@ -760,4 +683,7 @@ class NotificationService:
         except Exception as e:
             print(f"[NOTIFICATION-ERROR] Failed to notify on ticket update: {str(e)}", flush=True)
             return False
+        finally:
+            if should_close:
+                session.close()
 
