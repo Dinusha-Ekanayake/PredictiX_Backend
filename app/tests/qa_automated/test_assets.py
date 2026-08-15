@@ -37,10 +37,10 @@ def test_list_assets_dropdown_returns_mapped_list(client, asset_app):
     mock_asset.asset_type = "Logistics"
     mock_asset.warehouse_id = "some-warehouse-uuid"
     
-    # Configure mock query chain
+    # Mirror the real chain: query -> filter -> order_by -> limit -> all
     mock_query = fake_db.query.return_value
     mock_query.filter.return_value = mock_query
-    mock_query.order_by.return_value.all.return_value = [mock_asset]
+    mock_query.order_by.return_value.limit.return_value.all.return_value = [mock_asset]
     
     resp = client.get("/assets/dropdown")
     
