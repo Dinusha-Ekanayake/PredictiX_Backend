@@ -1,8 +1,0 @@
-INFO:     Started server process [25996]
-INFO:     Waiting for application startup.
-Asset summary warmup failed (non-fatal): The paging file is too small for this operation to complete. (os error 1455)
-INFO:     Application startup complete.
-ERROR:    [Errno 10048] error while attempting to bind on address ('127.0.0.1', 8000): only one usage of each socket address (protocol/network address/port) is normally permitted
-INFO:     Waiting for application shutdown.
-INFO:     Application shutdown complete.
-Asset summary model warmup failed: The paging file is too small for this operation to complete. (os error 1455)
