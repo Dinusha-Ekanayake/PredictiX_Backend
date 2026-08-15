@@ -378,16 +378,33 @@ class NotificationService:
         """
         import requests
 
-        api_key = os.getenv("BREVO_API_KEY")
-        sender_email = os.getenv("BREVO_SENDER_EMAIL", "neuromindspredictix@11453287.brevo-mail.com")
-        sender_name = os.getenv("BREVO_SENDER_NAME", "PredictiX System")
-
         recipients = [e for e in to_emails if e]
         if not recipients:
             print("[NOTIFICATION] No valid recipients - skipping email")
             return False
 
-        # 1. Attempt delivery via Brevo API
+        reply_to_email = "neuromindspredictix@gmail.com"
+
+        # 1. Primary: Direct Google SMTP relay (guaranteed 100% inbox delivery)
+        try:
+            from app.services.reminder_email_sender import send_email as send_smtp
+            for recipient in recipients:
+                send_smtp(
+                    to_email=recipient,
+                    subject=subject,
+                    html_body=html_body,
+                    reply_to=reply_to_email,
+                )
+            print(f"[NOTIFICATION] Email sent via direct SMTP to {len(recipients)} recipient(s)")
+            return True
+        except Exception as smtp_err:
+            print(f"[NOTIFICATION-WARNING] Direct SMTP failed: {smtp_err}, falling back to Brevo...")
+
+        # 2. Secondary Fallback: Brevo API
+        api_key = os.getenv("BREVO_API_KEY")
+        sender_email = os.getenv("BREVO_SENDER_EMAIL", "neuromindspredictix@gmail.com")
+        sender_name = os.getenv("BREVO_SENDER_NAME", "PredictiX System")
+
         if api_key:
             try:
                 resp = requests.post(
@@ -400,32 +417,20 @@ class NotificationService:
                     json={
                         "sender": {"email": sender_email, "name": sender_name},
                         "to": [{"email": e} for e in recipients],
+                        "replyTo": {"email": reply_to_email, "name": "PredictiX Support"},
                         "subject": subject,
                         "htmlContent": html_body,
                     },
                     timeout=15,
                 )
                 if resp.status_code in (200, 201, 202):
-                    print(f"[NOTIFICATION] Email sent via Brevo to {len(recipients)} recipient(s)")
+                    print(f"[NOTIFICATION] Email sent via Brevo fallback to {len(recipients)} recipient(s)")
                     return True
-                print(f"[NOTIFICATION-WARNING] Brevo API returned {resp.status_code}: {resp.text[:200]}, attempting SMTP fallback...")
+                print(f"[NOTIFICATION-ERROR] Brevo API {resp.status_code}: {resp.text[:200]}")
             except Exception as e:
-                print(f"[NOTIFICATION-WARNING] Failed to send via Brevo: {str(e)}, attempting SMTP fallback...")
+                print(f"[NOTIFICATION-ERROR] Brevo fallback failed: {str(e)}")
 
-        # 2. Fallback to direct Gmail SMTP relay
-        try:
-            from app.services.reminder_email_sender import send_email as send_smtp
-            for recipient in recipients:
-                send_smtp(
-                    to_email=recipient,
-                    subject=subject,
-                    html_body=html_body,
-                )
-            print(f"[NOTIFICATION] Email sent via SMTP fallback to {len(recipients)} recipient(s)")
-            return True
-        except Exception as smtp_err:
-            print(f"[NOTIFICATION-ERROR] Both Brevo and SMTP failed: {smtp_err}")
-            return False
+        return False
     
     @staticmethod
     def notify_on_new_user(db: Optional[Session], new_user_id: str) -> bool:
