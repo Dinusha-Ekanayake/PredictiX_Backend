@@ -269,6 +269,7 @@ def handle_knowledge(question: str, ctx: ToolContext) -> dict:
                     "role": "system",
                     "content": (
                         "You are PredictiX Assistant. Summarize the following knowledge base articles to answer the user's question. "
+                        "Do NOT include general fleet statistics, counts of critical assets, or predicted failures (e.g. '205 assets at critical risk', '125 predicted to fail') unless the user's question explicitly asks for numbers, counts, or statistics. "
                         "Be concise (3-5 sentences). Use professional language. End with 'Is there anything else I can help with?'"
                     ),
                 },
@@ -300,6 +301,7 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                         "role": "system",
                         "content": "You are Sidekick, the PredictiX AI Assistant. The user asked a question that couldn't be answered via database search. "
                                    "Answer it based on general knowledge of the PredictiX Smart Asset Management System. "
+                                   "Do NOT include general fleet statistics, counts of critical assets, or predicted failures (e.g. '205 assets at critical risk', '125 predicted to fail') unless the user's question explicitly asks for numbers, counts, or statistics. "
                                    "Roles: Admins manage users, assets, and settings. Users can view assigned assets, create tickets, and run predictions. "
                                    "Keep it concise, friendly, and helpful. If you truly cannot answer it, tell them to contact neuromindspredictix@gmail.com."
                     },
@@ -340,6 +342,7 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                                 f"{str(fc)}\n\n"
                                 "Answer the user's question as best as you can using only this cached data. Keep it friendly, helpful, and concise. "
                                 "Do NOT mention 'frontend context', 'cached data', 'database errors', or 'SQL'. Just answer the question naturally. "
+                                "Do NOT include general fleet statistics, counts of critical assets, or predicted failures from the cached state (e.g. '205 assets at critical risk', '125 predicted to fail') unless the user's question explicitly asks for numbers, counts, or statistics. "
                                 "If you cannot answer the question using the provided state, say: 'The database is temporarily busy, but you can find this information on the main dashboard page.'"
                             )
                         },
