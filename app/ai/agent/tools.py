@@ -200,7 +200,7 @@ def handle_faq(question: str, ctx: ToolContext) -> dict:
     top = [faq for _, faq in scored[:4]]
 
     if not top:
-        return _get_faq_fallback()
+        return handle_knowledge(question, ctx)
 
     context_str = "\n".join(
         f"Q: {faq['question']}\nA: {faq['answer']}" for faq in top
@@ -233,12 +233,12 @@ def handle_faq(question: str, ctx: ToolContext) -> dict:
         )
         
         if not summary or "NOT_FOUND" in str(summary).strip():
-            return _get_faq_fallback()
+            return handle_knowledge(question, ctx)
             
         answer = fb + str(summary)
     except Exception as e:
         log.error("FAQ LLM synthesis failed: %s", e)
-        return _get_faq_fallback()
+        return handle_knowledge(question, ctx)
 
     return {
         "answer": answer,
@@ -247,19 +247,26 @@ def handle_faq(question: str, ctx: ToolContext) -> dict:
 
 
 def handle_knowledge(question: str, ctx: ToolContext) -> dict:
-    """Semantic search on knowledge base, then summarize with fast model."""
+    """Semantic search on knowledge base, then synthesize and format cleanly with fast model."""
     from app.ai.services.llm_service import call_groq
     from app.chatbot.knowledge_service import search_knowledge
 
-    results = search_knowledge(question, match_count=4)
-    if not results:
+    raw_results = search_knowledge(question, match_count=4)
+    if not raw_results:
         return {
             "answer": "📚 I couldn't find anything relevant in the knowledge base for that question. Try rephrasing or ask about a specific asset/ticket.",
             "action_buttons": [],
         }
 
-    context_parts = [f"- {r.get('title', 'Article')}: {r.get('content', '')[:300]}" for r in results]
-    context_str = "\n".join(context_parts)
+    # Filter out low-similarity noisy matches (keep only relevant results with similarity >= 0.20)
+    filtered = [r for r in raw_results if r.get("similarity", 0) >= 0.20]
+    results = filtered if filtered else [raw_results[0]]
+
+    context_parts = [
+        f"Article Title: {r.get('title', 'Article')}\nContent: {r.get('content', '')}"
+        for r in results
+    ]
+    context_str = "\n\n".join(context_parts)
 
     fallback_msg = ""
     try:
@@ -268,23 +275,34 @@ def handle_knowledge(question: str, ctx: ToolContext) -> dict:
                 {
                     "role": "system",
                     "content": (
-                        "You are PredictiX Assistant. Summarize the following knowledge base articles to answer the user's question. "
-                        "Do NOT include general fleet statistics, counts of critical assets, or predicted failures (e.g. '205 assets at critical risk', '125 predicted to fail') unless the user's question explicitly asks for numbers, counts, or statistics. "
-                        "Use professional emojis strategically to format your response (e.g., 📊 for stats, 🎫 for tickets, ⚙️ for assets, 👥 for users, 💡 for suggestions, ⚠️ for alerts). "
-                        "Be concise (3-5 sentences). Use professional language. End with 'Is there anything else I can help with?'"
+                        "You are PredictiX Assistant. Answer the user's question directly using ONLY the provided Knowledge Base articles.\n\n"
+                        "CRITICAL FORMATTING INSTRUCTIONS:\n"
+                        "1. Focus ONLY on the article that directly answers the question. Ignore any unrelated background articles.\n"
+                        "2. Format the response with clean, professional line breaks and spacing. Use bold titles, bullet points, or numbered steps for instructions.\n"
+                        "3. Do NOT dump raw lists of article titles or unformatted bullet points.\n"
+                        "4. Do NOT include general fleet statistics, counts of critical assets, or predicted failures unless explicitly asked.\n"
+                        "5. Start your response with an appropriate professional emoji (e.g., 👤 for profile/account, ⚙️ for assets, 🎫 for tickets, 📚 for guides, 💡 for tips).\n"
+                        "6. End with a polite closing, e.g. '*Let me know if you need any more help! 😊*'"
                     ),
                 },
-                {"role": "user", "content": f"Question: {question}\n\nKnowledge Base:\n{context_str}"},
+                {"role": "user", "content": f"User Question: \"{question}\"\n\nKnowledge Base Articles:\n{context_str}"},
             ],
-            max_tokens=300,
-            temperature=0.4,
+            max_tokens=400,
+            temperature=0.2,
         )
+        if summary:
+            return {
+                "answer": fallback_msg + str(summary).strip(),
+                "action_buttons": [],
+            }
     except Exception as e:
         log.error("Knowledge summarization failed: %s", e)
-        summary = context_str
 
+    # Fallback to single top article with clean formatting if LLM fails
+    top_art = results[0]
+    clean_ans = f"📚 **{top_art.get('title', 'Knowledge Article')}**\n\n{top_art.get('content', '')}\n\n*Let me know if you need any more help! 😊*"
     return {
-        "answer": fallback_msg + f"📚 {summary}",
+        "answer": fallback_msg + clean_ans,
         "action_buttons": [],
     }
 
@@ -351,7 +369,6 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                         },
                         {"role": "user", "content": question}
                     ],
-                    model="llama-3.1-8b-instant",
                     max_tokens=300,
                     temperature=0.3,
                 )
