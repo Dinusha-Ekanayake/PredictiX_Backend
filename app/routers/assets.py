@@ -1,4 +1,6 @@
 """Assets resource — CRUD, search, assignment, status updates."""
+import logging
+from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -125,6 +127,8 @@ def _non_admin_visibility_filter(current_user):
 
 # require_user gates every endpoint (valid token needed); mutating endpoints
 # additionally require_admin below.
+log = logging.getLogger(__name__)
+
 router = APIRouter(
     prefix="/assets",
     tags=["Assets"],
@@ -704,25 +708,99 @@ def update_asset(
 def assign_asset(
     asset_id: UUID,
     assigned_to: UUID | None = None,
+    notes: str | None = None,
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
+    """Assign an asset to a user, or unassign it by omitting `assigned_to`.
+
+    Admin only. Two things are written together: `assets.assigned_to`, which
+    drives visibility and every "my assets" view, and a row in
+    `asset_assignments`, which is the audit trail of who assigned what to whom.
+    Writing only the first would leave the history permanently empty.
+    """
     obj = db.query(Asset).filter(Asset.id == asset_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Asset not found")
     _assert_asset_in_scope(obj, current_user)
 
-    # Previously took the raw string with no existence check — assigning
-    # to a nonexistent user_id silently "succeeded" with a dangling
-    # reference.
+    assignee: Profile | None = None
     if assigned_to is not None:
         assignee = db.query(Profile).filter(Profile.id == assigned_to).first()
         if not assignee:
             raise HTTPException(status_code=404, detail="User not found")
 
-    obj.assigned_to = assigned_to
-    db.commit()
+        # An asset can only be worked on by someone at its site, so refuse a
+        # cross-warehouse assignment rather than creating one nobody can act on.
+        if assignee.warehouse_id is not None and str(assignee.warehouse_id) != str(obj.warehouse_id):
+            raise HTTPException(
+                status_code=422,
+                detail="That user belongs to a different warehouse than this asset.",
+            )
+
+        if (assignee.status or "").strip().lower() != "active":
+            raise HTTPException(
+                status_code=422,
+                detail="That user account is not active.",
+            )
+
+    previous = obj.assigned_to
+    now = datetime.utcnow()
+
+    try:
+        # Close whatever assignment was open, whether this is a reassignment
+        # or an unassignment.
+        (
+            db.query(AssetAssignment)
+            .filter(
+                AssetAssignment.asset_id == asset_id,
+                AssetAssignment.is_active == True,  # noqa: E712
+            )
+            .update(
+                {"is_active": False, "unassigned_at": now},
+                synchronize_session=False,
+            )
+        )
+
+        obj.assigned_to = assigned_to
+
+        if assigned_to is not None:
+            db.add(
+                AssetAssignment(
+                    asset_id=asset_id,
+                    user_id=assigned_to,
+                    assigned_by=current_user.id,
+                    is_active=True,
+                    notes=notes,
+                )
+            )
+
+        db.commit()
+    except Exception:
+        db.rollback()
+        log.exception("Failed to assign asset %s to %s", asset_id, assigned_to)
+        raise HTTPException(status_code=500, detail="Could not update the assignment")
+
     db.refresh(obj)
+
+    # Best-effort: the assignment is already committed, so a failed
+    # notification must not fail the request.
+    if assigned_to is not None and str(previous or "") != str(assigned_to):
+        try:
+            from app.services.in_app_notification_service import InAppNotificationService
+
+            InAppNotificationService.notify_user(
+                db,
+                user_id=str(assigned_to),
+                title="Asset assigned to you",
+                message=f"{obj.asset_name or obj.asset_code} has been assigned to you.",
+                priority="medium",
+                notification_type="system",
+                link_url=f"/user/assets?asset_id={asset_id}",
+            )
+        except Exception:
+            log.exception("Asset-assignment notification failed (non-fatal)")
+
     return obj
 
 
