@@ -460,6 +460,20 @@ KB_DOCUMENTS = [
             "3. Predictive Layer: ISO 55000/SMRP targets (<5% critical, >=90% PM ratio).\n"
             "The strictest applicable interval across these three layers governs the asset scheduling queue."
         ),
+    },
+    {
+        "title": "How to Change Profile Picture / Upload Avatar",
+        "category": "General",
+        "tags": ["profile", "picture", "avatar", "upload", "photo", "settings"],
+        "source": "PredictiX User Guide",
+        "content": (
+            "To change your profile picture or upload a new photo: "
+            "1. Click on the profile dropdown in the top-right corner of the navigation bar.\n"
+            "2. Select 'Settings' or 'Profile Settings'.\n"
+            "3. In the settings page, locate the 'Profile Photo' or 'Avatar' section.\n"
+            "4. Click 'Upload Photo' to select an image from your device (JPEG/PNG, maximum size 2MB).\n"
+            "5. The new photo will automatically update across your account."
+        ),
     }
 ]
 
