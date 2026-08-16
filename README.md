@@ -529,7 +529,7 @@ python seed_data/seed.py
 
 ## Deployment
 
-The backend is deployed on AWS EC2 — see `EC2 Backend Deployment by Dinusha.md` for the full setup.
+The backend is deployed on AWS EC2 — see [`docs/EC2_Deployment.md`](docs/EC2_Deployment.md) for the full setup.
 
 ```bash
 # Production command

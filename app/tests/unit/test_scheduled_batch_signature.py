@@ -17,9 +17,13 @@ import ast
 import inspect
 from pathlib import Path
 
+import app
+
 from app.ai.services.batch_prediction_service import run_batch_for_all_assets
 
-_MAIN_PY = Path(__file__).resolve().parents[1] / "main.py"
+# Resolved from the installed package rather than by counting directories up
+# from this file, so moving the test does not silently break the lookup.
+_MAIN_PY = Path(app.__file__).resolve().parent / "main.py"
 
 
 def _kwargs_passed_to_run_batch_for_all_assets() -> set[str]:

@@ -57,7 +57,16 @@ except Exception as e:
 # ── Step 3: try the actual load function the app calls ──────────────────────
 print("\n[3] Calling load_breakdown_bundle() exactly as main.py does...")
 try:
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import sys
+    from pathlib import Path
+
+    # Put the repository root on sys.path so `import app` works however this script
+    # is invoked. Located by walking up to the directory that contains the app
+    # package, rather than by counting parents, so moving this file cannot break it.
+    _here = Path(__file__).resolve()
+    _root = next(p for p in _here.parents if (p / "app" / "__init__.py").exists())
+    if str(_root) not in sys.path:
+        sys.path.insert(0, str(_root))
     from app.ai.models.cost_estimation_model.breakdown_cost_model import load_breakdown_bundle
     bundle = load_breakdown_bundle()
     print("    SUCCESS")
