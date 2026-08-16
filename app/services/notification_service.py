@@ -405,7 +405,9 @@ class NotificationService:
             Profile.email.isnot(None),
         )
         if warehouse_id:
-            q = q.filter(Profile.warehouse_id == warehouse_id)
+            q = q.filter(
+                (Profile.warehouse_id == warehouse_id) | (Profile.role == "super_admin")
+            )
         return [email for (email,) in q.all()]
 
     @staticmethod
@@ -430,7 +432,7 @@ class NotificationService:
 
         reply_to_email = "neuromindspredictix@gmail.com"
 
-        # 1. Primary: Direct Google SMTP relay (guaranteed 100% inbox delivery)
+        # 1. Primary: Direct Google SMTP (guaranteed inbox delivery)
         try:
             from app.services.reminder_email_sender import send_email as send_smtp
             for recipient in recipients:
@@ -440,15 +442,15 @@ class NotificationService:
                     html_body=html_body,
                     reply_to=reply_to_email,
                 )
-            print(f"[NOTIFICATION] Email sent via direct SMTP to {len(recipients)} recipient(s)")
+            print(f"[NOTIFICATION] Email sent via SMTP to {len(recipients)} recipient(s)", flush=True)
             return True
         except Exception as smtp_err:
-            print(f"[NOTIFICATION-WARNING] Direct SMTP failed: {smtp_err}, falling back to Brevo...")
+            print(f"[NOTIFICATION-WARNING] Direct SMTP failed: {smtp_err}, trying Brevo API...", flush=True)
 
         # 2. Secondary Fallback: Brevo API
         api_key = os.getenv("BREVO_API_KEY")
-        sender_email = os.getenv("BREVO_SENDER_EMAIL", "neuromindspredictix@gmail.com")
-        sender_name = os.getenv("BREVO_SENDER_NAME", "PredictiX System")
+        sender_email = os.getenv("BREVO_SENDER_EMAIL", "neuromindspredictix@11453287.brevosend.com")
+        sender_name = os.getenv("BREVO_SENDER_NAME", "PredictiX Admin")
 
         if api_key:
             try:
@@ -469,11 +471,11 @@ class NotificationService:
                     timeout=15,
                 )
                 if resp.status_code in (200, 201, 202):
-                    print(f"[NOTIFICATION] Email sent via Brevo fallback to {len(recipients)} recipient(s)")
+                    print(f"[NOTIFICATION] Email sent from {sender_email} via Brevo to {len(recipients)} recipient(s)", flush=True)
                     return True
-                print(f"[NOTIFICATION-ERROR] Brevo API {resp.status_code}: {resp.text[:200]}")
-            except Exception as e:
-                print(f"[NOTIFICATION-ERROR] Brevo fallback failed: {str(e)}")
+                print(f"[NOTIFICATION-ERROR] Brevo API returned {resp.status_code}: {resp.text[:200]}", flush=True)
+            except Exception as brevo_err:
+                print(f"[NOTIFICATION-ERROR] Brevo sending failed: {brevo_err}", flush=True)
 
         return False
     
@@ -725,11 +727,14 @@ class NotificationService:
             
             creator = session.query(Profile).filter(Profile.id == ticket.created_by).first()
             creator_email = creator.email if creator else None
+            updater_email = updater.email if updater else None
             
             admin_emails = NotificationService._admin_emails_for_warehouse(session, ticket.warehouse_id)
             recipients = set(admin_emails)
             if creator_email:
                 recipients.add(creator_email)
+            if updater_email:
+                recipients.add(updater_email)
             if new_assignee_email:
                 recipients.add(new_assignee_email)
             if old_assignee_email:
