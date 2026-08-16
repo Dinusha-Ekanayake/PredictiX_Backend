@@ -488,6 +488,7 @@ def update_my_ticket(
 @router.delete("/mine/{ticket_id}")
 def delete_my_ticket(
     ticket_id: str,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
@@ -496,12 +497,38 @@ def delete_my_ticket(
         raise HTTPException(status_code=404, detail="Ticket not found")
     if not _is_admin(current_user) and str(obj.created_by) != str(current_user.id):
         raise HTTPException(status_code=403, detail="You can only delete tickets you created.")
+    
+    # Gather details for deletion notification before purging
+    ticket_number = obj.ticket_number
+    title = obj.title
+    
+    creator = db.query(Profile).filter(Profile.id == obj.created_by).first()
+    creator_email = creator.email if creator else None
+    
+    assignee_email = None
+    if obj.assigned_to:
+        assignee = db.query(Profile).filter(Profile.id == obj.assigned_to).first()
+        assignee_email = assignee.email if assignee else None
+        
+    admin_emails = NotificationService._admin_emails_for_warehouse(db, obj.warehouse_id)
+    deleter_name = getattr(current_user, "full_name", "User")
+
     try:
         _purge_ticket(db, ticket_id)
         db.commit()
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=f"Cannot delete ticket: {getattr(exc, 'orig', exc)}")
+        
+    background_tasks.add_task(
+        NotificationService.notify_on_ticket_delete,
+        ticket_number,
+        title,
+        creator_email,
+        assignee_email,
+        deleter_name,
+        admin_emails
+    )
     return {"message": "Ticket deleted", "id": ticket_id}
 
 
@@ -590,8 +617,13 @@ def update_ticket(
     return obj
 
 
-@router.delete("/{ticket_id}", dependencies=[Depends(require_admin)])
-def delete_ticket(ticket_id: str, db: Session = Depends(get_db)):
+@router.delete("/{ticket_id}")
+def delete_ticket(
+    ticket_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(require_admin),
+):
     """Delete a ticket and clean up its dependent rows in one transaction.
 
     Child rows (comments, attachments, status history, predictions) are
@@ -602,6 +634,21 @@ def delete_ticket(ticket_id: str, db: Session = Depends(get_db)):
     obj = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Ticket not found")
+
+    # Gather details for deletion notification before purging
+    ticket_number = obj.ticket_number
+    title = obj.title
+    
+    creator = db.query(Profile).filter(Profile.id == obj.created_by).first()
+    creator_email = creator.email if creator else None
+    
+    assignee_email = None
+    if obj.assigned_to:
+        assignee = db.query(Profile).filter(Profile.id == obj.assigned_to).first()
+        assignee_email = assignee.email if assignee else None
+        
+    admin_emails = NotificationService._admin_emails_for_warehouse(db, obj.warehouse_id)
+    deleter_name = getattr(current_user, "full_name", "Admin")
 
     try:
         # Delete owned child rows.
@@ -637,6 +684,15 @@ def delete_ticket(ticket_id: str, db: Session = Depends(get_db)):
         detail = str(orig) if orig else str(exc)
         raise HTTPException(status_code=409, detail=f"Cannot delete ticket: {detail}")
 
+    background_tasks.add_task(
+        NotificationService.notify_on_ticket_delete,
+        ticket_number,
+        title,
+        creator_email,
+        assignee_email,
+        deleter_name,
+        admin_emails
+    )
     return {"message": "Ticket deleted", "id": ticket_id}
 
 
