@@ -325,6 +325,51 @@ class EmailTemplates:
         """
         return subject, html_body
 
+    @staticmethod
+    def ticket_deleted_notification(ticket_number: str, title: str, deleter_name: str) -> tuple:
+        """Email template for ticket deletion"""
+        subject = f"PredictiX Alert: Ticket {ticket_number} Deleted"
+        
+        html_body = f"""
+        <html>
+            <head>
+                <style>
+                    body {{ font-family: Arial, sans-serif; color: #333; }}
+                    .container {{ max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 8px; }}
+                    .header {{ background: linear-gradient(135deg, #ef4444 0%, #b91c1c 100%); color: white; padding: 20px; border-radius: 8px 8px 0 0; }}
+                    .content {{ padding: 20px; }}
+                    .delete-box {{ background: #fef2f2; padding: 15px; border-left: 4px solid #ef4444; margin: 15px 0; border-radius: 4px; }}
+                    .footer {{ background: #f5f5f5; padding: 10px; text-align: center; font-size: 12px; color: #666; border-radius: 0 0 8px 8px; }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        <h2>Ticket Deleted: {ticket_number}</h2>
+                    </div>
+                    <div class="content">
+                        <p>Hello,</p>
+                        <p>Ticket <strong>{ticket_number} ({title})</strong> has been deleted from the PredictiX system by <strong>{deleter_name}</strong>.</p>
+                        
+                        <div class="delete-box">
+                            <strong>Details of deleted ticket:</strong><br>
+                            <strong>Ticket ID/Number:</strong> {ticket_number}<br>
+                            <strong>Title:</strong> {title}
+                        </div>
+                        
+                        <p>No further actions are required for this ticket.</p>
+                        
+                        <p>Best regards,<br>PredictiX Help Desk</p>
+                    </div>
+                    <div class="footer">
+                        <p>This is an automated notification. Please do not reply to this email.</p>
+                    </div>
+                </div>
+            </body>
+        </html>
+        """
+        return subject, html_body
+
 
 class NotificationService:
     """Service to send email notifications using PostgreSQL database data"""
@@ -552,22 +597,27 @@ class NotificationService:
 
     @staticmethod
     def notify_on_new_faq(db: Optional[Session], question: str, answer: str, category: Optional[str] = None, creator_name: str = "Administrator") -> bool:
-        """Send notification to admins when a new FAQ is created"""
+        """Send notification to all users when a new FAQ is created"""
         session, should_close = NotificationService._resolve_session(db)
         try:
-            admin_emails = NotificationService._admin_emails_for_warehouse(session, None)
-            if not admin_emails:
-                print("[NOTIFICATION] No admins to notify for new FAQ - skipping email", flush=True)
+            from app.models import Profile
+            user_emails = [
+                email for (email,) in session.query(Profile.email)
+                .filter(Profile.email.isnot(None))
+                .all()
+            ]
+            if not user_emails:
+                print("[NOTIFICATION] No users to notify for new FAQ - skipping email", flush=True)
                 return False
                 
-            print(f"[NOTIFICATION] Notifying {len(admin_emails)} admin(s) of new FAQ", flush=True)
+            print(f"[NOTIFICATION] Notifying {len(user_emails)} user(s) of new FAQ", flush=True)
             subject, html_body = EmailTemplates.new_faq_notification(
                 question=question,
                 answer=answer,
                 category=category or "General",
                 creator_name=creator_name
             )
-            return NotificationService.send_email(admin_emails, subject, html_body)
+            return NotificationService.send_email(user_emails, subject, html_body)
         except Exception as e:
             print(f"[NOTIFICATION-ERROR] Failed to notify on new FAQ: {str(e)}", flush=True)
             return False
@@ -702,4 +752,37 @@ class NotificationService:
         finally:
             if should_close:
                 session.close()
+
+    @staticmethod
+    def notify_on_ticket_delete(
+        ticket_number: str,
+        title: str,
+        creator_email: Optional[str],
+        assignee_email: Optional[str],
+        deleter_name: str,
+        admin_emails: List[str]
+    ) -> bool:
+        """Send notifications to creator, assignee, and admins when a ticket is deleted"""
+        try:
+            recipients = set(admin_emails)
+            if creator_email:
+                recipients.add(creator_email)
+            if assignee_email:
+                recipients.add(assignee_email)
+                
+            email_list = list(recipients)
+            if not email_list:
+                print("[NOTIFICATION] No recipients to notify for deleted ticket - skipping email", flush=True)
+                return False
+                
+            print(f"[NOTIFICATION] Notifying on deleted ticket {ticket_number} to {len(email_list)} recipients", flush=True)
+            subject, html_body = EmailTemplates.ticket_deleted_notification(
+                ticket_number=ticket_number,
+                title=title,
+                deleter_name=deleter_name
+            )
+            return NotificationService.send_email(email_list, subject, html_body)
+        except Exception as e:
+            print(f"[NOTIFICATION-ERROR] Failed to notify on ticket delete: {str(e)}", flush=True)
+            return False
 
