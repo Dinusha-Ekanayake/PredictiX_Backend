@@ -88,4 +88,7 @@ class UserUpdate(BaseModel):
     email: Optional[str] = None
     address: Optional[str] = None
     contactNumber: Optional[str] = None
-
+    role: Optional[str] = None
+    status: Optional[str] = None
+    department: Optional[str] = None
+    warehouse: Optional[str] = None
