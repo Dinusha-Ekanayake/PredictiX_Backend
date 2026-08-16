@@ -107,6 +107,30 @@ add yourself as a required reviewer if you want deploys to pause for approval.
 These are read at build time, so a missing one fails CI rather than producing a
 blank page on a preview deployment.
 
+## Database connection mode
+
+`DATABASE_URL` must point at Supabase's **transaction-mode** pooler, port
+**6543**, everywhere the application runs: locally, on EC2, and in the
+`DATABASE_URL` secret used by CI.
+
+Session mode (5432) holds one server connection per client for the entire
+session and this tier caps that at 15 clients across every process touching the
+database. A dev server, the deployed instance and a CI run together exceed it,
+and every request then fails with:
+
+```
+FATAL: (EMAXCONNSESSION) max clients reached in session mode
+```
+
+Transaction mode returns the connection to the pooler after each transaction,
+so the client cap stops being the binding constraint. Verified at 20 concurrent
+queries, well past the old ceiling.
+
+The trade is roughly 200 ms per warm request, and a one-off multi-second
+handshake on each pool slot rather than on each request. `DB_POOL_SIZE` and
+`DB_MAX_OVERFLOW` override the per-process ceiling if a deployment owns the
+tier outright.
+
 ## EC2 prerequisites
 
 The deploy user must restart the service without a password prompt:
