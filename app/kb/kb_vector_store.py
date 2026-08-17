@@ -85,7 +85,12 @@ class KBVectorStore:
         Returns list of dicts with: id, section, text, score.
         """
         self._ensure_loaded()
-        if not self._matrix or not self._vectorizer:
+        # `not self._matrix` raises on a scipy sparse matrix, which has no
+        # single truth value, so this must test for None explicitly. The old
+        # form made retrieve() raise ValueError on every call once documents
+        # had loaded, and only never showed up because the report path calls
+        # build_full_kb_context() instead of retrieving.
+        if self._matrix is None or self._vectorizer is None:
             return []
 
         q_vec  = self._vectorizer.transform([query])
