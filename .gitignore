@@ -66,3 +66,7 @@ CLAUDE.md
 
 # Virtualenv. A stray venv/Scripts/python.exe was tracked once.
 venv/
+
+# Row-level backups written before a seeding script updates the database. They
+# carry reading ids from one environment and cannot be replayed against another.
+scripts/backups/
