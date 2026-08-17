@@ -5,7 +5,10 @@ from uuid import UUID
 import logging
 
 from app.schemas.asset_summary import AssetSummaryRequest, AssetSummaryResponse
-from app.ai.services.asset_summary_service import generate_asset_summary, get_asset_summary_repo
+from app.ai.services.asset_summary_service import (
+    generate_asset_summary_with_source,
+    get_asset_summary_repo,
+)
 from app.deps import (
     get_db,
     require_user,
@@ -117,12 +120,13 @@ async def get_summary_by_asset(
     input_text = _build_asset_input_text(asset, _latest_prediction(db, asset.id))
     try:
         logger.info(f"[AssetSummary] Generating summary for asset {asset_id}: {input_text[:80]}...")
-        summary = generate_asset_summary(input_text)
+        summary, source = generate_asset_summary_with_source(input_text)
         logger.info(f"[AssetSummary] ✓ Summary generated for asset {asset_id}")
         return AssetSummaryResponse(
             summary=summary,
             generated_at=datetime.utcnow().isoformat(),
             model_version="1.0",
+            source=source,
         )
     except Exception as e:
         logger.error(f"[AssetSummary] ✗ Failed for asset {asset_id}: {e}")
@@ -147,13 +151,14 @@ async def generate_summary(payload: AssetSummaryRequest):
     """
     try:
         logger.info(f"[AssetSummary] Generating summary for input: {payload.input_text[:80]}...")
-        summary = generate_asset_summary(payload.input_text)
+        summary, source = generate_asset_summary_with_source(payload.input_text)
         logger.info(f"[AssetSummary] ✓ Summary generated successfully")
         
         return AssetSummaryResponse(
             summary=summary,
             generated_at=datetime.utcnow().isoformat(),
-            model_version="1.0"
+            model_version="1.0",
+            source=source,
         )
     except ValueError as e:
         error_msg = f"Invalid input: {str(e)}"

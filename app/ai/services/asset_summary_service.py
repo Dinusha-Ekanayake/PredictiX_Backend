@@ -237,11 +237,17 @@ def _summarize_via_space(space_id, input_text: str):
         return None
 
 
-def generate_asset_summary(input_text: str) -> str:
-    """Summarise the formatted asset text.
+def generate_asset_summary_with_source(input_text: str) -> tuple[str, str]:
+    """Summarise the formatted asset text and say which path produced it.
 
     Order: HF Space (online, ASSET_SUMMARY_SPACE) → deterministic fallback.
     Only output that passes the grounding/quality guard is published.
+
+    Returns (summary, source) where source is "model" when the Space answered
+    and its output passed the guard, and "template" when the deterministic
+    fallback was used. Callers need this: the two are not interchangeable, and
+    reporting a model version for templated text tells the reader something
+    untrue about where the sentence came from.
     """
     if not input_text or not input_text.strip():
         raise ValueError("input_text cannot be empty")
@@ -250,6 +256,11 @@ def generate_asset_summary(input_text: str) -> str:
 
     space_out = _summarize_via_space(os.getenv("ASSET_SUMMARY_SPACE"), input_text)
     if space_out and _is_clean_summary(space_out, input_text):
-        return space_out
+        return space_out, "model"
 
-    return _fallback_summary(fields)
+    return _fallback_summary(fields), "template"
+
+
+def generate_asset_summary(input_text: str) -> str:
+    """Summary text only, for callers that do not care which path produced it."""
+    return generate_asset_summary_with_source(input_text)[0]
