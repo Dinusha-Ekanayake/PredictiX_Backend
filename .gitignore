@@ -37,6 +37,10 @@ _temp_readme.md
 test_out.txt
 test_results.json
 
+# Written by scripts/run_functional_tests.py on every run; CI uploads it as a
+# build artifact rather than tracking it.
+functional_results.json
+
 # Fleet-rebuild intermediate caches (regenerable; hold account id mappings)
 scripts/.fleet_cache.pkl
 scripts/.superadmin_ids.pkl
