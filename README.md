@@ -1,11 +1,46 @@
 # PredictiX — AI-Powered Fleet & Asset Management Backend
 
-PredictiX is a predictive maintenance platform for fleet and warehouse operations. It combines real-time IoT sensor ingestion, classical machine learning (CatBoost, scikit-learn), Weibull AFT survival analysis, SHAP explainability, and Groq LLM agents to surface failure risk, maintenance forecasts, AI-generated reports, and real-time notifications through a FastAPI REST API backed by Supabase PostgreSQL.
+![Python](https://img.shields.io/badge/Python-3.12+-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-ASGI-009688?logo=fastapi&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/Supabase-PostgreSQL-3ECF8E?logo=supabase&logoColor=white)
+![LightGBM](https://img.shields.io/badge/LightGBM-v7-9ACD32)
+![CatBoost](https://img.shields.io/badge/CatBoost-v5-FFCC00)
+![Tests](https://img.shields.io/badge/tests-195%20backend-brightgreen)
+
+PredictiX is a predictive maintenance platform for fleet and warehouse operations. It ingests
+vehicle telemetry, predicts whether an asset will need maintenance within a 30-day horizon,
+estimates when and at what cost, and forecasts remaining life for five individual components.
+Results are served through a role-scoped FastAPI REST API and are queryable in natural language
+through a retrieval-augmented assistant.
+
+Gradient-boosted models (LightGBM, CatBoost), Weibull AFT survival analysis, SHAP explainability
+and Groq LLM agents sit behind the API, backed by Supabase PostgreSQL.
+
+---
+
+## Live Deployment
+
+| Component | Platform | URL |
+|---|---|---|
+| Frontend | Vercel | [predicti-x-frontend.vercel.app](https://predicti-x-frontend.vercel.app) |
+| REST API | AWS EC2 (systemd + nginx) | set per environment as the `BACKEND_PUBLIC_URL` CI variable |
+| Database | Supabase PostgreSQL (`ap-southeast-2`) | private — transaction pooler, port 6543 |
+| Inference API | Hugging Face Spaces | [dinusha-ekanayake-predictix-inference-api.hf.space](https://dinusha-ekanayake-predictix-inference-api.hf.space) |
+| Asset summariser | Hugging Face Spaces | `SharadaAbeywickrama/Asset_summery_generation` |
+| Ticket summariser | Hugging Face Spaces | `SharadaAbeywickrama/Ticket_summery_generation` |
+
+> The API host is not committed to the repository. It is supplied to CI as a repository
+> variable so the instance can be rebuilt or moved without a code change. See
+> [`docs/CICD.md`](docs/CICD.md).
+
+Interactive API documentation is served by the running instance at `/docs` (Swagger UI)
+and `/redoc`.
 
 ---
 
 ## Table of Contents
 
+- [Live Deployment](#live-deployment)
 - [Tech Stack](#tech-stack)
 - [Architecture Overview](#architecture-overview)
 - [Project Structure](#project-structure)
@@ -18,6 +53,8 @@ PredictiX is a predictive maintenance platform for fleet and warehouse operation
 - [Getting Started](#getting-started)
 - [Database Migrations](#database-migrations)
 - [Seeding the Database](#seeding-the-database)
+- [Testing](#testing)
+- [Continuous Integration and Deployment](#continuous-integration-and-deployment)
 - [Deployment](#deployment)
 - [Background Jobs](#background-jobs)
 - [Development Notes](#development-notes)
@@ -32,9 +69,10 @@ PredictiX is a predictive maintenance platform for fleet and warehouse operation
 | Database | PostgreSQL via Supabase |
 | ORM / Migrations | SQLAlchemy + Alembic |
 | Authentication | JWT (python-jose) + bcrypt |
-| ML — Classification | scikit-learn pipeline (failure probability) |
-| ML — Regression | CatBoost (days until maintenance) |
-| ML — Survival | Lifelines / Weibull AFT (component RUL) |
+| ML — Classification | LightGBM v7 — 30-day maintenance probability (500 trees, 58 features) |
+| ML — Regression | LightGBM v7 — days until next maintenance (500 trees, 58 features) |
+| ML — Cost | CatBoost v5 point estimate + two LightGBM quantile models for the 80% interval |
+| ML — Survival | lifelines / Weibull AFT — per-component RUL across 5 components |
 | Explainability | SHAP |
 | NLP / GenAI | Groq Llama-3.3-70B, LangChain, HuggingFace Transformers + PyTorch |
 | PDF Generation | ReportLab |
@@ -47,35 +85,132 @@ PredictiX is a predictive maintenance platform for fleet and warehouse operation
 
 ## Architecture Overview
 
+```mermaid
+graph TB
+    subgraph CLIENT["CLIENTS"]
+        FE["Next.js frontend<br/>Vercel"]
+        IOT["Telemetry ingestion"]
+    end
+
+    subgraph API["FastAPI — app/main.py"]
+        R["Routers · one per domain"]
+        S["Pydantic schemas · validation"]
+        SVC["Services · business logic"]
+        DEP["deps.py · JWT auth,<br/>role and warehouse scoping"]
+        R --> S --> SVC
+        DEP --> R
+    end
+
+    subgraph AI["AI / ML LAYER"]
+        PDM["PdM classifier + regressor<br/>LightGBM v7"]
+        COST["Cost model<br/>CatBoost v5 + LGBM quantiles"]
+        SURV["Weibull AFT × 5 components"]
+        SHAP["SHAP explainability"]
+        AGENT["Groq LLM agent<br/>router · text-to-SQL · RAG"]
+    end
+
+    subgraph DATA["PERSISTENCE"]
+        PG[("Supabase PostgreSQL<br/>ap-southeast-2 · pooler 6543")]
+        CACHE["In-process caches<br/>dashboard TTL · AI summaries"]
+    end
+
+    subgraph EXT["EXTERNAL"]
+        HF["Hugging Face Spaces<br/>summarisation · embeddings"]
+        GROQ["Groq API"]
+    end
+
+    FE --> DEP
+    IOT --> R
+    SVC --> PDM & COST & SURV & AGENT
+    PDM --> SHAP
+    SVC --> PG
+    SVC --> CACHE
+    AGENT --> GROQ
+    AGENT --> PG
+    SVC --> HF
+
+    SCHED["APScheduler<br/>nightly PdM batch<br/>daily service reminders"] --> SVC
+
+    style DEP fill:#0F4C5C,color:#fff
+    style PG fill:#E6F1F4,stroke:#0F4C5C,stroke-width:2px
 ```
-Client (Frontend / IoT Devices)
-         │
-         ▼
-  FastAPI Application (app/main.py)
-         │
-  ┌──────┴──────────────────────────────────────────┐
-  │  37 Routers (one per domain)                    │
-  │  17 Pydantic Schema modules (validation)        │
-  │  Service modules (business logic + caching)     │
-  │  Repository layer (data access)                 │
-  └──────┬──────────────────────────────────────────┘
-         │
-  ┌──────┴──────────────┐    ┌──────────────────────────────┐
-  │  SQLAlchemy ORM     │    │  AI / ML Services            │
-  │  (models.py)        │    │  • PDM Classifier            │
-  └──────┬──────────────┘    │  • PDM Regressor (CatBoost)  │
-         │                   │  • Survival Analysis          │
-         ▼                   │  • SHAP Explainability        │
-  Supabase PostgreSQL        │  • Groq LLM Agent (RAG)      │
-  (ap-southeast-2)           │  • HuggingFace NLP (optional) │
-                             └──────────────────────────────┘
-         │
-  ┌──────┴──────────────────────┐
-  │  Dashboard Cache            │
-  │  (TTL-based in-memory)      │
-  │  AI Summary Cache           │
-  │  (background refresh)       │
-  └─────────────────────────────┘
+
+### Request lifecycle
+
+Every authenticated request resolves the caller's profile, role and active warehouse before a
+handler runs. Scoping is enforced in Python: the API connects to Postgres as an owner role, so
+row-level security policies do not apply on this path.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant A as FastAPI
+    participant D as deps.get_current_user
+    participant S as Service
+    participant P as PostgreSQL
+
+    C->>A: GET /assets/{id} + Bearer JWT
+    A->>D: decode JWT, load profile
+    D->>P: SELECT profile by id
+    P-->>D: role · warehouse_id · status
+    Note over D: status re-checked per request,<br/>so deactivation takes effect at once
+    D-->>A: current_user
+    A->>S: handler(current_user)
+    S->>P: scoped query
+    P-->>S: rows
+    S-->>C: 200, or 404 when out of scope
+```
+
+### Prediction pipeline
+
+The nightly batch is the spine of the platform. Four model outputs enter a decision layer, and
+one tiered recommendation per asset leaves.
+
+```mermaid
+graph LR
+    A["assets"] --> FB["_build_feature_dict<br/>58 features"]
+    SR["sensor_readings"] --> FB
+    ME["maintenance_events"] --> FB
+
+    FB --> C["Classifier<br/>failure probability"]
+    FB --> R["Regressor<br/>days until maintenance"]
+    FB --> H["Health score<br/>weighted rule"]
+    FB --> K["Cost model<br/>LKR + q10/q90"]
+
+    C & R & H & K --> D{"build_decision<br/>reconcile signals"}
+    D --> ROW[("pdm_batch_predictions<br/>one current row per asset")]
+    ROW --> N["urgent → notification"]
+
+    style FB fill:#0F4C5C,color:#fff
+    style D fill:#1B7A8C,color:#fff
+    style ROW fill:#E6F1F4,stroke:#0F4C5C,stroke-width:2px
+```
+
+When a model fails for an asset, the row is written with `status = "error"` and a null
+probability rather than a substituted default, so a caller can always tell a real prediction
+from a missing one.
+
+### Core data model
+
+Populated tables only. `warehouses` is the root of the access model — every scoped query
+resolves back to it.
+
+```mermaid
+erDiagram
+    WAREHOUSES  ||--o{ DEPARTMENTS : contains
+    WAREHOUSES  ||--o{ ASSETS : houses
+    WAREHOUSES  ||--o{ PROFILES : employs
+    DEPARTMENTS ||--o{ PROFILES : groups
+    PROFILES    ||--o{ ASSET_ASSIGNMENTS : holds
+    ASSETS      ||--o{ ASSET_ASSIGNMENTS : "assigned via"
+    ASSETS      ||--o{ SENSOR_READINGS : emits
+    ASSETS      ||--o{ MAINTENANCE_EVENTS : accrues
+    ASSETS      ||--|| PDM_BATCH_PREDICTIONS : "one current row"
+    ASSETS      ||--o{ PDM_PREDICTION_HISTORY : "trend trail"
+    ASSETS      ||--o{ TICKETS : "raised against"
+    TICKETS     ||--o{ TICKET_COMMENTS : thread
+    TICKETS     ||--o{ TICKET_STATUS_HISTORY : audits
+    PROFILES    ||--o{ NOTIFICATIONS : receives
 ```
 
 ---
@@ -524,6 +659,74 @@ python seed_data/create_supabase_users_from_roster.py
 # Step 2: Seed warehouses, departments, assets, and operational records
 python seed_data/seed.py
 ```
+
+---
+
+## Testing
+
+| Suite | Tests | Needs a database | What it covers |
+|---|---|---|---|
+| `app/tests/unit` | 65 | no | health bands, decision layer, cost validation, KB retrieval |
+| `app/tests/qa_automated` | 9 | no | routers against a mocked session |
+| `app/tests/integration` | 37 | yes | live API, access control, data consistency |
+| `app/tests/functional` | 84 | yes | the module-by-module test plan, one case per requirement |
+
+```bash
+python scripts/run_tests.py                 # unit, router and integration
+python scripts/run_tests.py --unit          # what a fork PR runs
+python scripts/run_functional_tests.py      # the test plan, as a pass/fail table
+python scripts/run_functional_tests.py --md # the same tables in markdown
+```
+
+The functional suite prints one row per requirement with three possible outcomes. `PASS` means
+the expectation held against the live system. `FAIL` means it did not, and is reported as a
+defect rather than smoothed over. Cases that depend on an external model skip themselves with a
+stated reason when `GROQ_API_KEY` or Hugging Face inference is unavailable — a test that only
+checks "something came back" would otherwise pass on a fallback and report a model that was
+never called.
+
+---
+
+## Continuous Integration and Deployment
+
+```mermaid
+graph LR
+    F["feature branch"] -->|PR| DEV["dev"]
+    DEV -->|PR| MAIN["main"]
+
+    subgraph CI["ci.yml — every PR and push"]
+        SC["static-checks<br/>compileall · secret scan"]
+        UT["unit-tests"]
+        IT["integration-tests"]
+        FT["functional-tests"]
+        SC --> UT --> IT
+        UT --> FT
+        IT & FT --> OK{"ci-passed"}
+    end
+
+    F --> SC
+    MAIN --> SC
+    OK -->|green on main| DEPLOY["deploy.yml → EC2"]
+    DEPLOY --> HC{"health check"}
+    HC -->|healthy| LIVE["live"]
+    HC -->|unhealthy| RB["roll back to previous commit"]
+
+    style OK fill:#1B7A8C,color:#fff
+    style RB fill:#F6DEDA,stroke:#B23A2B,stroke-width:2px
+```
+
+Deployment is triggered by CI **completing successfully**, not by the push, so a red build
+cannot reach production. `ci-passed` aggregates every job and is the single status check to
+require in branch protection.
+
+Rolling back on a failed health check matters here specifically because of the nightly batch:
+leaving broken code installed would corrupt prediction data overnight rather than merely serving
+errors. Full configuration is in [`docs/CICD.md`](docs/CICD.md).
+
+> **Database connection mode.** `DATABASE_URL` must point at Supabase's transaction-mode pooler
+> on port **6543** everywhere the application runs. Session mode (5432) holds one server
+> connection per client and this tier caps that at 15 across every process, which a dev server,
+> the deployed instance and a CI run together exceed.
 
 ---
 
