@@ -33,7 +33,7 @@ log = logging.getLogger("predictix.llm")
 # is simply never reached. Re-probe before trusting these notes — the point of
 # the cascade is that Groq retires models faster than this file gets edited.
 MODEL_CASCADE = [
-    "llama-3.3-70b-versatile",
+    os.getenv("WH_GROQ_MODEL", "llama-3.3-70b-versatile"),
     "llama-3.1-8b-instant",
 ]
 
@@ -46,9 +46,9 @@ DEFAULT_MODEL = MODEL_CASCADE[0]
 
 
 def _client() -> Groq:
-    api_key = os.getenv("GROQ_API_KEY")
+    api_key = os.getenv("WH_GROQ_API_KEY")
     if not api_key:
-        raise RuntimeError("GROQ_API_KEY is not configured")
+        raise RuntimeError("WH_GROQ_API_KEY is not configured")
     return Groq(api_key=api_key)
 
 
