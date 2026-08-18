@@ -53,3 +53,7 @@ gradio_client
 # browser binary is separate and must be fetched once per host with:
 #   playwright install chromium
 playwright==1.62.0
+pgvector==0.5.0
+sentence-transformers==3.0.1
+
+pypdf==6.16.1

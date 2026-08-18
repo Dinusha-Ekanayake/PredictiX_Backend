@@ -249,7 +249,7 @@ def generate_asset_summary(input_text: str) -> str:
     fields = _parse_input_fields(input_text)
 
     space_out = _summarize_via_space(os.getenv("ASSET_SUMMARY_SPACE"), input_text)
-    if space_out and _is_clean_summary(space_out, input_text):
+    if space_out:
         return space_out
 
     return _fallback_summary(fields)
