@@ -81,7 +81,30 @@ def list_asset_assignments(
         q = q.filter(AssetAssignment.asset_id == asset_id)
     if user_id:
         q = q.filter(AssetAssignment.user_id == user_id)
-    return q.order_by(AssetAssignment.assigned_at.desc()).offset(offset).limit(limit).all()
+
+    rows = q.order_by(AssetAssignment.assigned_at.desc()).offset(offset).limit(limit).all()
+
+    # Resolve the people involved in one query rather than one per row, so the
+    # history can show names instead of UUIDs.
+    person_ids = {r.user_id for r in rows if r.user_id}
+    person_ids |= {r.assigned_by for r in rows if r.assigned_by}
+    people = {
+        p.id: p
+        for p in db.query(Profile.id, Profile.full_name, Profile.email)
+        .filter(Profile.id.in_(person_ids))
+        .all()
+    } if person_ids else {}
+
+    out: list[AssetAssignmentOut] = []
+    for r in rows:
+        assignee = people.get(r.user_id)
+        assigner = people.get(r.assigned_by)
+        item = AssetAssignmentOut.model_validate(r)
+        item.user_name = assignee.full_name if assignee else None
+        item.user_email = assignee.email if assignee else None
+        item.assigned_by_name = assigner.full_name if assigner else None
+        out.append(item)
+    return out
 
 
 @router.delete("/{assignment_id}", dependencies=[Depends(require_admin)])

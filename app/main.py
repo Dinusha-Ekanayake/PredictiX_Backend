@@ -56,12 +56,11 @@ from .routers.websockets import router as websockets_router
 from .routers.asset_reports import router as asset_reports_router, reports_router
 from .routers.warmup import router as warmup_router
 
-# Sharada — user-role self-service profile (/user-profile)
-from .routers.user_profile import router as user_profile_router
 # Sharada — user-role ticket section (/user/tickets)
 from .routers.user_tickets import router as user_tickets_router
 # Sharada — FRSO warehouse-level survival predictions (/survival/*)
 from .routers.survival_predictions import router as survival_predictions_router
+from .chatbot.knowledge_base import router as knowledge_base_router
 
 # ─── ML warmup ────────────────────────────────────────────────────────────────
 # Asset & ticket summaries run on HF Spaces (online) — nothing to warm up here.
@@ -482,7 +481,6 @@ async def _db_unavailable_handler(request: Request, exc: Exception) -> JSONRespo
 app.include_router(auth_router)
 app.include_router(profiles_router)
 app.include_router(users_router)
-app.include_router(user_profile_router)
 
 # Organisation
 app.include_router(warehouses_router)
@@ -521,8 +519,9 @@ app.include_router(asset_reports_router)
 # Chatbot
 app.include_router(chatbot_router)
 
-# FAQs
+# FAQs & Knowledge Base
 app.include_router(faqs_router)
+app.include_router(knowledge_base_router)
 
 # Diagnostics
 if os.getenv("ENABLE_DEBUG_ROUTES", "false").strip().lower() == "true":

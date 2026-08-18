@@ -18,6 +18,13 @@ class AssetAssignmentCreate(BaseModel):
 class AssetAssignmentOut(AssetAssignmentCreate):
     id: UUID
 
+    # Resolved on the way out so the assignment history reads as names rather
+    # than as UUIDs. Optional because a referenced profile may since have been
+    # deleted, in which case the id is still returned and the name is absent.
+    user_name: Optional[str] = None
+    user_email: Optional[str] = None
+    assigned_by_name: Optional[str] = None
+
     class Config:
         from_attributes = True
 

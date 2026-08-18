@@ -128,23 +128,33 @@ def _rewrite_query_with_history(question: str, history: list[dict]) -> str:
     if not history:
         return question
 
+    q_lower = question.strip().lower()
+    # If the question is obviously a standalone request (e.g. asking for counts, general queries, overview), do NOT rewrite
+    standalone_triggers = [
+        "how many", "how much", "which is", "what is the most", "show all", "list all",
+        "who is", "who are", "total", "count of", "number of", "give number"
+    ]
+    if any(q_lower.startswith(t) for t in standalone_triggers):
+        return question
+
     # Take the last 3 turns to provide context without overloading tokens
     recent_history = history[-3:]
     history_text = ""
     for turn in recent_history:
         role = turn.get("role", "unknown")
         content = turn.get("content", "")
-        # Limit assistant content length in case it's a huge dump of tickets
         if len(content) > 300:
             content = content[:300] + "...[truncated]"
         history_text += f"{role}: {content}\n"
 
     prompt = (
-        "You are a query rewriting assistant.\n"
-        "Given the following conversation history, rewrite the user's latest query into a standalone, fully-contextualized query.\n"
-        "If the user's query is already standalone (e.g. 'how many users are there?'), return it exactly as is.\n"
-        "If the user refers to something in the history (e.g. 'resolve the first one', 'what is its status?'), replace the pronouns or references with the actual entity from the history (e.g. 'resolve ticket #102', 'what is the status of Asset A-100').\n"
-        "Return ONLY the rewritten query, nothing else.\n\n"
+        "You are a query rewriting assistant for the PredictiX Smart Asset Management System.\n"
+        "Given the conversation history, rewrite the user's latest query into a standalone, fully-contextualized query ONLY if the user uses an explicit reference/pronoun (e.g. 'it', 'this one', 'the first ticket', 'its status', 'show details of that asset').\n\n"
+        "STRICT RULES:\n"
+        "1. If the user query is asking about a general system entity (e.g. 'how many tickets here', 'which is the most critical asset', 'show users', 'how many assets'), DO NOT mix or blend it with previous topics (like profile pictures, avatars, or passwords). Return the query EXACTLY as is.\n"
+        "2. 'here' or 'in the system' refers to the user's current warehouse/system, NOT the previous conversational topic.\n"
+        "3. If in doubt, return the original query unchanged.\n"
+        "4. Return ONLY the rewritten query with no explanations.\n\n"
         f"History:\n{history_text}\n"
         f"User Latest Query: {question}"
     )

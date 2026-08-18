@@ -1,5 +1,4 @@
 import logging
-
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -111,12 +110,10 @@ def create_ticket(
     db.add(obj)
     db.commit()
     db.refresh(obj)
-
     if obj.assigned_to:
         _notify_ticket_assignment(db, obj)
 
     background_tasks.add_task(NotificationService.notify_on_new_ticket, db, str(obj.id))
-
     return obj
 
 
@@ -246,6 +243,8 @@ def list_tickets_paginated(
     search: str | None = Query(default=None),
     asset_id: str | None = Query(default=None),
     warehouse_id: str | None = Query(default=None),
+    sort_by: str | None = Query(default=None),
+    sort_dir: str = Query(default="desc", pattern="^(asc|desc)$"),
     limit: int = Query(default=10, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
@@ -295,12 +294,41 @@ def list_tickets_paginated(
         q = q.filter((Ticket.warehouse_id == warehouse_id) | (Ticket.warehouse_id.is_(None)))
     if search and search.strip():
         term = f"%{search.strip()}%"
+        from app.models import Profile
+        assigned_user_exists = db.query(Profile.id).filter(
+            (Profile.id == Ticket.assigned_to) &
+            (Profile.full_name.ilike(term))
+        ).exists()
         q = q.filter(
-            Ticket.title.ilike(term) | Ticket.description.ilike(term)
+            Ticket.title.ilike(term) |
+            Ticket.description.ilike(term) |
+            Ticket.ticket_number.ilike(term) |
+            assigned_user_exists
         )
 
     total = q.count()
-    rows = q.order_by(Ticket.created_at.desc()).offset(offset).limit(limit).all()
+
+    # Sort results
+    sort_col = Ticket.created_at
+    if sort_by:
+        s_by = sort_by.lower()
+        if s_by in ("title", "name"):
+            sort_col = Ticket.title
+        elif s_by == "priority":
+            sort_col = Ticket.priority
+        elif s_by == "status":
+            sort_col = Ticket.status
+        elif s_by == "ticket_number":
+            sort_col = Ticket.ticket_number
+        elif s_by == "updated_at":
+            sort_col = Ticket.updated_at
+
+    if sort_dir.lower() == "asc":
+        q = q.order_by(sort_col.asc())
+    else:
+        q = q.order_by(sort_col.desc())
+
+    rows = q.offset(offset).limit(limit).all()
 
     return {"tickets": [TicketOut.model_validate(t) for t in rows], "total": total}
 
@@ -406,9 +434,7 @@ def create_my_ticket(
     asset_name = None
     if obj.asset_id:
         asset_name = db.query(Asset.asset_name).filter(Asset.id == obj.asset_id).scalar()
-
     background_tasks.add_task(NotificationService.notify_on_new_ticket, db, str(obj.id))
-
     return _serialize_user_ticket(obj, asset_name)
 
 
@@ -462,6 +488,7 @@ def update_my_ticket(
 @router.delete("/mine/{ticket_id}")
 def delete_my_ticket(
     ticket_id: str,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
@@ -470,12 +497,38 @@ def delete_my_ticket(
         raise HTTPException(status_code=404, detail="Ticket not found")
     if not _is_admin(current_user) and str(obj.created_by) != str(current_user.id):
         raise HTTPException(status_code=403, detail="You can only delete tickets you created.")
+    
+    # Gather details for deletion notification before purging
+    ticket_number = obj.ticket_number
+    title = obj.title
+    
+    creator = db.query(Profile).filter(Profile.id == obj.created_by).first()
+    creator_email = creator.email if creator else None
+    
+    assignee_email = None
+    if obj.assigned_to:
+        assignee = db.query(Profile).filter(Profile.id == obj.assigned_to).first()
+        assignee_email = assignee.email if assignee else None
+        
+    admin_emails = NotificationService._admin_emails_for_warehouse(db, obj.warehouse_id)
+    deleter_name = getattr(current_user, "full_name", "User")
+
     try:
         _purge_ticket(db, ticket_id)
         db.commit()
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=f"Cannot delete ticket: {getattr(exc, 'orig', exc)}")
+        
+    background_tasks.add_task(
+        NotificationService.notify_on_ticket_delete,
+        ticket_number,
+        title,
+        creator_email,
+        assignee_email,
+        deleter_name,
+        admin_emails
+    )
     return {"message": "Ticket deleted", "id": ticket_id}
 
 
@@ -548,11 +601,9 @@ def update_ticket(
 
     db.commit()
     db.refresh(obj)
-
     new_assigned_to = updates.get("assigned_to")
     if new_assigned_to and str(new_assigned_to) != str(old_assigned_to or ""):
         _notify_ticket_assignment(db, obj)
-
     background_tasks.add_task(
         NotificationService.notify_on_ticket_update,
         db,
@@ -566,8 +617,13 @@ def update_ticket(
     return obj
 
 
-@router.delete("/{ticket_id}", dependencies=[Depends(require_admin)])
-def delete_ticket(ticket_id: str, db: Session = Depends(get_db)):
+@router.delete("/{ticket_id}")
+def delete_ticket(
+    ticket_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(require_admin),
+):
     """Delete a ticket and clean up its dependent rows in one transaction.
 
     Child rows (comments, attachments, status history, predictions) are
@@ -578,6 +634,21 @@ def delete_ticket(ticket_id: str, db: Session = Depends(get_db)):
     obj = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Ticket not found")
+
+    # Gather details for deletion notification before purging
+    ticket_number = obj.ticket_number
+    title = obj.title
+    
+    creator = db.query(Profile).filter(Profile.id == obj.created_by).first()
+    creator_email = creator.email if creator else None
+    
+    assignee_email = None
+    if obj.assigned_to:
+        assignee = db.query(Profile).filter(Profile.id == obj.assigned_to).first()
+        assignee_email = assignee.email if assignee else None
+        
+    admin_emails = NotificationService._admin_emails_for_warehouse(db, obj.warehouse_id)
+    deleter_name = getattr(current_user, "full_name", "Admin")
 
     try:
         # Delete owned child rows.
@@ -613,6 +684,15 @@ def delete_ticket(ticket_id: str, db: Session = Depends(get_db)):
         detail = str(orig) if orig else str(exc)
         raise HTTPException(status_code=409, detail=f"Cannot delete ticket: {detail}")
 
+    background_tasks.add_task(
+        NotificationService.notify_on_ticket_delete,
+        ticket_number,
+        title,
+        creator_email,
+        assignee_email,
+        deleter_name,
+        admin_emails
+    )
     return {"message": "Ticket deleted", "id": ticket_id}
 
 

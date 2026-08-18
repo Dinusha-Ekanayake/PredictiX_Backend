@@ -57,11 +57,11 @@ class ToolContext:
 DB_SCHEMAS: dict[str, str] = {
     "warehouses": "id, code, name, address, city, district, country, timezone, is_active, climate_zone, warehouse_type, metadata, created_at, updated_at",
     "departments": "id, warehouse_id, code, name, description, is_active, created_at, updated_at",
-    "profiles": "id, employee_id, full_name, email, phone, role, status, warehouse_id, department_id, avatar_url, meta, created_at, updated_at",
-    "assets": "id, asset_code, warehouse_id, department_id, asset_name, asset_type, category, vehicle_type, make, model, manufacture_year, registration_number, vin, status(ENUM: active|inactive|maintenance|retired|disposed — NOTE: assets do NOT have 'open' status; use 'active' for working assets), health_band, criticality_score, purchase_date, warranty_expiry_date, assigned_to, current_mileage, last_service_date, next_service_date, description, fuel_type, transmission, make_model, maintenance_priority, service_provider_type, metadata, created_by, vehicle_role, payload_capacity_kg, vehicle_age_years, lifetime_service_count, lifetime_breakdown_count, created_at, updated_at",
+    "profiles": "id, employee_id, full_name, email, phone, role(ENUM: admin|super_admin|user), status(ENUM: active|inactive|suspended), warehouse_id, department_id, avatar_url, meta, created_at, updated_at",
+    "assets": "id, asset_code, warehouse_id, department_id, asset_name, asset_type, category(e.g. Heavy Truck (16T), Forklift 2.5T, Delivery Van (1.5T), Medium Truck (7T), Light Truck (3.5T), Mini Truck (1T)), vehicle_type, make, model, manufacture_year, registration_number, vin, status(ENUM: active|inactive|under_maintenance|decommissioned), health_band(ENUM: excellent|good|moderate|poor|critical), criticality_score(float 0-100), purchase_date, warranty_expiry_date, assigned_to, current_mileage, last_service_date, next_service_date, description, fuel_type, transmission, make_model, maintenance_priority, created_at, updated_at",
     "maintenance_events": "id, asset_id, event_type(ENUM: preventive|corrective|inspection|emergency), title, description, performed_by, scheduled_date, performed_at, odometer_reading, downtime_hours, cost_amount, currency, vendor_name, notes, metadata, created_at, updated_at",
     "sensor_readings": "id, asset_id, recorded_at, temperature, vibration, pressure, humidity, rpm, voltage, fuel_level, odometer, engine_hours_since_last_service, days_since_last_service, tire_health_pct, brake_health_pct, battery_health_pct, oil_life_pct, hydraulic_health_pct, vibration_rms_mm_s, fuel_efficiency_km_per_l, engine_hours_total, coolant_temp_max_c, battery_voltage_v, odometer_km",
-    "tickets": "id, ticket_number, asset_id, warehouse_id, title, description, status(ENUM: open|in_progress|pending|resolved|closed|cancelled — NOTE: use 'open' for new/open tickets, 'in_progress' for active ones), priority(ENUM: low|medium|high), predicted_priority, final_priority, predicted_category(ENUM: electrical|mechanical|software), final_category, ticket_summary, created_by, assigned_to, reviewed_by, opened_at, reviewed_at, resolved_at, closed_at, created_at, updated_at",
+    "tickets": "id, ticket_number, asset_id, warehouse_id, title, description, status(ENUM: open|in_progress|resolved|closed), priority(ENUM: low|medium|high), predicted_priority, final_priority, predicted_category(ENUM: electrical|mechanical|software), final_category(ENUM: electrical|mechanical|software), ticket_summary, created_by, assigned_to, reviewed_by, opened_at, reviewed_at, resolved_at, closed_at, created_at, updated_at",
     "prediction_runs": "id, model_id, asset_id, ticket_id, input_snapshot, requested_by, run_started_at, run_finished_at, status, error_message",
     "reports": "id, report_type, status, asset_id, warehouse_id, ticket_id, title, generated_by, report_text, report_json, file_path, generation_started_at, generation_completed_at, created_at",
     "notifications": "id, user_id, type, channel, title, message, status, related_asset_id, related_ticket_id, sent_at, read_at, created_at",
@@ -70,13 +70,7 @@ DB_SCHEMAS: dict[str, str] = {
     "ticket_comments": "id, ticket_id, user_id, comment, is_internal, created_at",
     "ticket_status_history": "id, ticket_id, old_status, new_status, changed_by, note, created_at",
     "model_registry": "id, model_name, model_type, version, framework, artifact_path, metrics, is_active, created_at",
-    # ML Prediction tables
-    "asset_failure_predictions": "id, run_id, asset_id, health_score, failure_probability, confidence, risk_level, predicted_maintenance_date, days_until_maintenance, top_explanations, created_at",
-    "asset_cost_predictions": "id, run_id, asset_id, estimated_cost, min_cost, max_cost, currency, confidence_score, created_at",
-    "ticket_predictions": "id, run_id, ticket_id, predicted_category, predicted_priority, category_confidence, priority_confidence, generated_summary, created_at",
-    "prediction_explanations": "id, run_id, asset_id, explanation_type, explanation_text, created_at",
-    "prediction_feature_importance": "id, explanation_id, feature_name, feature_value, importance_score, direction, rank_order",
-    "pdm_batch_predictions": "id, asset_id, failure_probability, maintenance_required, risk_level, predicted_days_until_maintenance, predicted_maintenance_date, health_score, health_status, contributing_factors, estimated_cost_lkr, min_cost_lkr, max_cost_lkr, top_explanations, predicted_at, run_duration_ms, status",
+    "pdm_batch_predictions": "id, asset_id, failure_probability(float 0.0-1.0), maintenance_required(boolean), risk_level(ENUM: low|medium|high|critical), predicted_days_until_maintenance(int), predicted_maintenance_date(date), health_score(float 0-100), health_status(ENUM: excellent|good|moderate|poor|critical), contributing_factors, estimated_cost_lkr(float), min_cost_lkr, max_cost_lkr, top_explanations, predicted_at, run_duration_ms, status(ok) — PRIMARY TABLE for ML predictions, health scores, and critical assets",
     "report_sources": "id, report_id, source_table, source_id, source_label, relevance_score, created_at",
 }
 
@@ -200,7 +194,7 @@ def handle_faq(question: str, ctx: ToolContext) -> dict:
     top = [faq for _, faq in scored[:4]]
 
     if not top:
-        return _get_faq_fallback()
+        return handle_knowledge(question, ctx)
 
     context_str = "\n".join(
         f"Q: {faq['question']}\nA: {faq['answer']}" for faq in top
@@ -233,12 +227,12 @@ def handle_faq(question: str, ctx: ToolContext) -> dict:
         )
         
         if not summary or "NOT_FOUND" in str(summary).strip():
-            return _get_faq_fallback()
+            return handle_knowledge(question, ctx)
             
         answer = fb + str(summary)
     except Exception as e:
         log.error("FAQ LLM synthesis failed: %s", e)
-        return _get_faq_fallback()
+        return handle_knowledge(question, ctx)
 
     return {
         "answer": answer,
@@ -247,18 +241,26 @@ def handle_faq(question: str, ctx: ToolContext) -> dict:
 
 
 def handle_knowledge(question: str, ctx: ToolContext) -> dict:
-    """Semantic search on knowledge base, then summarize with fast model."""
+    """Semantic search on knowledge base, then synthesize and format cleanly with fast model."""
     from app.ai.services.llm_service import call_groq
+    from app.chatbot.knowledge_service import search_knowledge
 
-    results = search_knowledge(question, match_count=4)
-    if not results:
+    raw_results = search_knowledge(question, match_count=4)
+    if not raw_results:
         return {
             "answer": "📚 I couldn't find anything relevant in the knowledge base for that question. Try rephrasing or ask about a specific asset/ticket.",
             "action_buttons": [],
         }
 
-    context_parts = [f"- {r.get('title', 'Article')}: {r.get('content', '')[:300]}" for r in results]
-    context_str = "\n".join(context_parts)
+    # Filter out low-similarity noisy matches (keep only relevant results with similarity >= 0.20)
+    filtered = [r for r in raw_results if r.get("similarity", 0) >= 0.20]
+    results = filtered if filtered else [raw_results[0]]
+
+    context_parts = [
+        f"Article Title: {r.get('title', 'Article')}\nContent: {r.get('content', '')}"
+        for r in results
+    ]
+    context_str = "\n\n".join(context_parts)
 
     fallback_msg = ""
     try:
@@ -267,21 +269,34 @@ def handle_knowledge(question: str, ctx: ToolContext) -> dict:
                 {
                     "role": "system",
                     "content": (
-                        "You are PredictiX Assistant. Summarize the following knowledge base articles to answer the user's question. "
-                        "Be concise (3-5 sentences). Use professional language. End with 'Is there anything else I can help with?'"
+                        "You are PredictiX Assistant. Answer the user's question directly using ONLY the provided Knowledge Base articles.\n\n"
+                        "CRITICAL FORMATTING INSTRUCTIONS:\n"
+                        "1. Focus ONLY on the article that directly answers the question. Ignore any unrelated background articles.\n"
+                        "2. Format the response with clean, professional line breaks and spacing. Use bold titles, bullet points, or numbered steps for instructions.\n"
+                        "3. Do NOT dump raw lists of article titles or unformatted bullet points.\n"
+                        "4. Do NOT include general fleet statistics, counts of critical assets, or predicted failures unless explicitly asked.\n"
+                        "5. Start your response with an appropriate professional emoji (e.g., 👤 for profile/account, ⚙️ for assets, 🎫 for tickets, 📚 for guides, 💡 for tips).\n"
+                        "6. End with a polite closing, e.g. '*Let me know if you need any more help! 😊*'"
                     ),
                 },
-                {"role": "user", "content": f"Question: {question}\n\nKnowledge Base:\n{context_str}"},
+                {"role": "user", "content": f"User Question: \"{question}\"\n\nKnowledge Base Articles:\n{context_str}"},
             ],
-            max_tokens=300,
-            temperature=0.4,
+            max_tokens=400,
+            temperature=0.2,
         )
+        if summary:
+            return {
+                "answer": fallback_msg + str(summary).strip(),
+                "action_buttons": [],
+            }
     except Exception as e:
         log.error("Knowledge summarization failed: %s", e)
-        summary = context_str
 
+    # Fallback to single top article with clean formatting if LLM fails
+    top_art = results[0]
+    clean_ans = f"📚 **{top_art.get('title', 'Knowledge Article')}**\n\n{top_art.get('content', '')}\n\n*Let me know if you need any more help! 😊*"
     return {
-        "answer": fallback_msg + f"📚 {summary}",
+        "answer": fallback_msg + clean_ans,
         "action_buttons": [],
     }
 
@@ -299,6 +314,8 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                         "role": "system",
                         "content": "You are Sidekick, the PredictiX AI Assistant. The user asked a question that couldn't be answered via database search. "
                                    "Answer it based on general knowledge of the PredictiX Smart Asset Management System. "
+                                   "Do NOT include general fleet statistics, counts of critical assets, or predicted failures (e.g. '205 assets at critical risk', '125 predicted to fail') unless the user's question explicitly asks for numbers, counts, or statistics. "
+                                   "Use professional emojis strategically to format your response (e.g., 📊 for stats, 🎫 for tickets, ⚙️ for assets, 👥 for users, 💡 for suggestions, ⚠️ for alerts). "
                                    "Roles: Admins manage users, assets, and settings. Users can view assigned assets, create tickets, and run predictions. "
                                    "Keep it concise, friendly, and helpful. If you truly cannot answer it, tell them to contact neuromindspredictix@gmail.com."
                     },
@@ -314,7 +331,6 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             # reply below — but never silently: a persistently failing LLM here
             # is invisible otherwise, since the user just sees a polite message.
             log.warning("Generic chatbot fallback could not reach the LLM: %s", exc)
-
         return {
             # The trailing "(Debug: Generic fallback hit)" that used to be here
             # was shipped verbatim to end users in the chat window.
@@ -340,6 +356,8 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                                 f"{str(fc)}\n\n"
                                 "Answer the user's question as best as you can using only this cached data. Keep it friendly, helpful, and concise. "
                                 "Do NOT mention 'frontend context', 'cached data', 'database errors', or 'SQL'. Just answer the question naturally. "
+                                "Do NOT include general fleet statistics, counts of critical assets, or predicted failures from the cached state (e.g. '205 assets at critical risk', '125 predicted to fail') unless the user's question explicitly asks for numbers, counts, or statistics. "
+                                "Use professional emojis strategically to format your response (e.g., 📊 for stats, 🎫 for tickets, ⚙️ for assets, 👥 for users, 💡 for suggestions, ⚠️ for alerts). "
                                 "If you cannot answer the question using the provided state, say: 'The database is temporarily busy, but you can find this information on the main dashboard page.'"
                             )
                         },
@@ -363,11 +381,177 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
 
     # Collect fallback messages from models
     fallback_msg = ""
+    q_lower = question.lower()
+
+    # ── Fast-Path A: Critical Asset Lookups ───────────────────────────────────
+    if any(k in q_lower for k in ["critical asset", "most critical", "highest risk", "most at risk", "urgent asset", "lowest health"]):
+        try:
+            if ctx.role not in ["admin", "super_admin"]:
+                query = ctx.db.execute(text(
+                    "SELECT a.asset_name, a.asset_code, a.category, a.vehicle_type, a.status, a.health_band, "
+                    "p.failure_probability, p.health_score, p.risk_level, p.predicted_maintenance_date "
+                    "FROM assets a JOIN pdm_batch_predictions p ON a.id = p.asset_id "
+                    "WHERE a.assigned_to = :uid "
+                    "ORDER BY p.failure_probability DESC, p.health_score ASC LIMIT 1"
+                ), {"uid": ctx.user_id}).mappings().first()
+                if not query:
+                    return {
+                        "answer": "⚙️ You currently have no critical assets assigned to you.",
+                        "action_buttons": [{"label": "View My Assets", "path": "/user/assets"}]
+                    }
+            else:
+                sql_str = (
+                    "SELECT a.asset_name, a.asset_code, a.category, a.vehicle_type, a.status, a.health_band, "
+                    "p.failure_probability, p.health_score, p.risk_level, p.predicted_maintenance_date "
+                    "FROM assets a JOIN pdm_batch_predictions p ON a.id = p.asset_id "
+                )
+                params = {}
+                if ctx.warehouse_id:
+                    sql_str += " WHERE a.warehouse_id = :wid "
+                    params["wid"] = ctx.warehouse_id
+                sql_str += " ORDER BY p.failure_probability DESC, p.health_score ASC LIMIT 1"
+                query = ctx.db.execute(text(sql_str), params).mappings().first()
+            
+            if query:
+                fail_pct = round(float(query['failure_probability'] or 0) * 100, 1) if query['failure_probability'] is not None else 0
+                health_sc = round(float(query['health_score'] or 0), 1) if query['health_score'] is not None else 0
+                ans = (
+                    f"⚙️ **Most Critical Asset: {query['asset_name']} [{query['asset_code']}]**\n\n"
+                    f"• **Category:** {query['category'] or query['vehicle_type'] or 'Fleet Asset'}\n"
+                    f"• **Current Status:** {str(query['status']).replace('_', ' ').title()}\n"
+                    f"• **Health Band:** ⚠️ {str(query['health_band']).upper()}\n"
+                    f"• **Health Score:** {health_sc}%\n"
+                    f"• **Failure Probability:** 🚨 {fail_pct}%\n"
+                    f"• **Risk Level:** {str(query['risk_level']).title()}\n"
+                    f"• **Predicted Maintenance:** {query['predicted_maintenance_date'] or 'Immediate inspection recommended'}\n\n"
+                    f"*Action recommended: Schedule immediate maintenance inspection.*"
+                )
+                return {
+                    "answer": ans,
+                    "action_buttons": [
+                        {"label": f"View {query['asset_code']}", "path": f"/admin/assets/{query['asset_code']}"},
+                        {"label": "Assets Dashboard", "path": "/admin/assets"}
+                    ]
+                }
+        except Exception as e:
+            log.error("Critical asset fast-path failed: %s", e)
+
+    # ── Fast-Path B: Category Breakdown & Count Queries ───────────────────────
+    breakdown_triggers = [
+        "how many ticket", "how many asset", "how many user", "number of ticket", "number of asset",
+        "number of user", "total ticket", "total asset", "total user", "count of ticket", "count of asset",
+        "count of user", "by category", "by sub category", "by sub categories", "by status", "by priority",
+        "by role", "by health", "breakdown", "all sub categories"
+    ]
+    is_count_breakdown = any(t in q_lower for t in breakdown_triggers)
+
+    if is_count_breakdown:
+        try:
+            # 1. Standard User Scoping
+            if ctx.role not in ["admin", "super_admin"]:
+                if "user" in q_lower and not ("ticket" in q_lower or "asset" in q_lower):
+                    return {
+                        "answer": "🔒 You do not have permission to view team user accounts. You can only view your own profile and assigned tickets.",
+                        "action_buttons": [{"label": "My Profile", "path": "/user/profile"}]
+                    }
+                
+                # User's tickets
+                user_tickets = ctx.db.execute(text(
+                    "SELECT status, count(*) FROM tickets WHERE created_by = :uid OR assigned_to = :uid GROUP BY status"
+                ), {"uid": ctx.user_id}).fetchall()
+                total_t = sum(c for _, c in user_tickets)
+                
+                t_lines = [f"• **{str(s).replace('_', ' ').title()}:** {c}" for s, c in user_tickets]
+                breakdown_str = "\n".join(t_lines) if t_lines else "• No active tickets found."
+                
+                return {
+                    "answer": (
+                        f"🎫 **Your Support Tickets: {total_t} total**\n\n"
+                        f"Here is the status breakdown of tickets created by or assigned to you:\n\n"
+                        f"{breakdown_str}\n\n"
+                        f"*Let me know if you would like details on any specific ticket! 😊*"
+                    ),
+                    "action_buttons": [{"label": "View My Tickets", "path": "/user/tickets"}]
+                }
+
+            # 2. Admin System / Warehouse Breakdown
+            w_clause_t = " WHERE warehouse_id = :wid " if ctx.warehouse_id else ""
+            w_clause_a = " WHERE warehouse_id = :wid " if ctx.warehouse_id else ""
+            w_clause_p = " WHERE (warehouse_id = :wid OR warehouse_id IS NULL) " if ctx.warehouse_id else ""
+            params = {"wid": ctx.warehouse_id} if ctx.warehouse_id else {}
+
+            is_t = "ticket" in q_lower or "all sub categories" in q_lower
+            is_a = "asset" in q_lower or "all sub categories" in q_lower
+            is_u = "user" in q_lower or "all sub categories" in q_lower
+            if not (is_t or is_a or is_u):
+                is_t = is_a = is_u = True
+
+            output_sections = []
+
+            # Ticket Breakdown
+            if is_t:
+                t_status = ctx.db.execute(text(f"SELECT status, count(*) FROM tickets{w_clause_t} GROUP BY status"), params).fetchall()
+                t_prio = ctx.db.execute(text(f"SELECT priority, count(*) FROM tickets{w_clause_t} GROUP BY priority"), params).fetchall()
+                t_cat = ctx.db.execute(text(f"SELECT COALESCE(final_category, predicted_category), count(*) FROM tickets{w_clause_t} GROUP BY COALESCE(final_category, predicted_category)"), params).fetchall()
+                total_t = sum(c for _, c in t_status)
+
+                status_items = ", ".join([f"{str(s).replace('_', ' ').title()}: {c}" for s, c in t_status if s])
+                prio_items = ", ".join([f"{str(p).title()}: {c}" for p, c in t_prio if p])
+                cat_items = ", ".join([f"{str(cat).title()}: {c}" for cat, c in t_cat if cat])
+
+                output_sections.append(
+                    f"🎫 **Tickets Breakdown (Total: {total_t:,})**\n\n"
+                    f"• **By Status:** {status_items or 'None'}\n"
+                    f"• **By Priority:** {prio_items or 'None'}\n"
+                    f"• **By Category:** {cat_items or 'None'}"
+                )
+
+            # Asset Breakdown
+            if is_a:
+                a_health = ctx.db.execute(text(f"SELECT health_band, count(*) FROM assets{w_clause_a} GROUP BY health_band"), params).fetchall()
+                a_status = ctx.db.execute(text(f"SELECT status, count(*) FROM assets{w_clause_a} GROUP BY status"), params).fetchall()
+                a_cat = ctx.db.execute(text(f"SELECT category, count(*) FROM assets{w_clause_a} GROUP BY category ORDER BY count(*) DESC LIMIT 6"), params).fetchall()
+                total_a = sum(c for _, c in a_status)
+
+                health_items = ", ".join([f"{str(h).title()}: {c}" for h, c in a_health if h])
+                status_items = ", ".join([f"{str(s).replace('_', ' ').title()}: {c}" for s, c in a_status if s])
+                cat_items = ", ".join([f"{str(cat)}: {c}" for cat, c in a_cat if cat])
+
+                output_sections.append(
+                    f"⚙️ **Assets Breakdown (Total: {total_a:,})**\n\n"
+                    f"• **By Health Band:** {health_items or 'None'}\n"
+                    f"• **By Status:** {status_items or 'None'}\n"
+                    f"• **By Vehicle Type / Category:** {cat_items or 'None'}"
+                )
+
+            # User Breakdown
+            if is_u:
+                u_role = ctx.db.execute(text(f"SELECT role, count(*) FROM profiles{w_clause_p} GROUP BY role"), params).fetchall()
+                u_status = ctx.db.execute(text(f"SELECT status, count(*) FROM profiles{w_clause_p} GROUP BY status"), params).fetchall()
+                total_u = sum(c for _, c in u_role)
+
+                role_items = ", ".join([f"{str(r).replace('_', ' ').title()}: {c}" for r, c in u_role if r])
+                status_items = ", ".join([f"{str(s).replace('_', ' ').title()}: {c}" for s, c in u_status if s])
+
+                output_sections.append(
+                    f"👥 **Users Breakdown (Total: {total_u:,})**\n\n"
+                    f"• **By Role:** {role_items or 'None'}\n"
+                    f"• **By Status:** {status_items or 'None'}"
+                )
+
+            final_answer = "\n\n".join(output_sections) + "\n\n*Let me know if you need specific details on any category or record! 😊*"
+            return {
+                "answer": final_answer,
+                "action_buttons": [
+                    {"label": "View Assets", "path": "/admin/assets"},
+                    {"label": "View Tickets", "path": "/admin/tickets"},
+                    {"label": "Manage Users", "path": "/admin/users"}
+                ]
+            }
+        except Exception as e:
+            log.error("Breakdown fast-path failed: %s", e)
 
     # ── Step 0: Dashboard/Overview Fast-Path (100% UI Parity) ─────────────────
-    q_lower = question.lower()
-    
-    # Check if this is a general stats summary request (e.g. details about X)
     general_summary_keywords = ["summary", "overview", "stats", "dashboard stats", "all stats"]
     is_general_summary = any(w in q_lower for w in general_summary_keywords)
     is_details_summary = any(
@@ -563,21 +747,31 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             ).replace("{user_id}", ctx.user_id)
 
         sql_prompt = (
-            f"You are a PostgreSQL expert. Write a query to answer: \"{question}\"\n"
+            f"You are a PostgreSQL expert for the PredictiX Smart Asset Management System.\n"
+            f"Write a PostgreSQL query to answer the user's question: \"{question}\"\n"
             f"Use ONLY these tables: {selected_tables}\n"
             f"Schema:\n{schema_str}\n"
             f"{role_instructions}\n"
-            "CRITICAL INSTRUCTIONS:\n"
-            "1. If the user asks for 'details', 'info', or queries a specific record (like a specific Ticket ID, Asset Name, or User), you MUST use `SELECT *` so the ID and all fields are returned. DO NOT use `COUNT(*)` or aggregate functions for specific record lookups.\n"
-            "2. Respond ONLY with raw valid PostgreSQL SQL. No markdown formatting, no backticks, no explanations.\n"
-            "3. If the question cannot be answered using the schema, or violates the security rule, output EXACTLY: 'ERROR: reason'"
+            "CRITICAL QUERY RULES:\n"
+            "1. Most critical asset / highest risk asset / lowest health / urgent maintenance:\n"
+            "   - If querying critical or failing assets, query `assets` joined with `pdm_batch_predictions` on `assets.id = pdm_batch_predictions.asset_id`\n"
+            "   - Select columns: `assets.id, assets.asset_name, assets.asset_code, assets.category, assets.vehicle_type, assets.status, assets.health_band, pdm_batch_predictions.failure_probability, pdm_batch_predictions.health_score, pdm_batch_predictions.risk_level, pdm_batch_predictions.predicted_maintenance_date`\n"
+            "   - Order by: `pdm_batch_predictions.failure_probability DESC, pdm_batch_predictions.health_score ASC` or `assets.criticality_score DESC` LIMIT 1\n"
+            "2. Count / Breakdown / Category queries:\n"
+            "   - For ticket counts/breakdowns: `SELECT status, count(*) as count FROM tickets GROUP BY status;` or `SELECT priority, count(*) as count FROM tickets GROUP BY priority;` or `SELECT final_category, count(*) as count FROM tickets GROUP BY final_category;`\n"
+            "   - For asset counts/breakdowns: `SELECT category, count(*) as count FROM assets GROUP BY category;` or `SELECT health_band, count(*) as count FROM assets GROUP BY health_band;` or `SELECT status, count(*) as count FROM assets GROUP BY status;`\n"
+            "   - For user counts/breakdowns: `SELECT role, count(*) as count FROM profiles GROUP BY role;` or `SELECT status, count(*) as count FROM profiles GROUP BY status;`\n"
+            "3. Single record lookup: Always return `SELECT *` or all essential fields including `id` so the system can render a rich record card.\n"
+            "4. Respond ONLY with raw valid PostgreSQL SQL. No markdown, no backticks, no explanations.\n"
+            "5. If the question cannot be answered using the schema, output EXACTLY: 'ERROR: reason'"
         )
 
         try:
+            from app.ai.services.llm_service import MODEL_COMPOUND
             raw_sql, fb = call_groq(
                 messages=[{"role": "user", "content": sql_prompt}],
-                model="llama-3.3-70b-versatile",
-                max_tokens=350,
+                model=MODEL_COMPOUND,
+                max_tokens=300,
                 temperature=0.1,
             )
             if fb and not fallback_msg: fallback_msg = fb
@@ -721,15 +915,19 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
         return "\n".join(lines)
 
     summarizer_prompt = (
-        f"You are PredictiX Assistant. A user asked: \"{question}\"\n"
+        f"You are Sidekick, the PredictiX AI Assistant. A user asked: \"{question}\"\n"
         f"The database returned this data: {row_str}\n\n"
-        "INSTRUCTIONS — follow these EXACTLY:\n"
-        "1. If the user asks for details of a SPECIFIC record (like a specific ticket, asset, or user) and there is only 1 record returned, output its details clearly in a bulleted list (e.g. Title, Status, Description, Priority). Do NOT just output aggregate counts.\n"
-        "2. If the user asks for general stats, start with a ONE-LINE summary of the TOTAL count, then list the breakdown of categories with their exact count (e.g. 🎫 **Open Tickets:** 5 items).\n"
-        "3. Use 👥 for users, 🎫 for tickets, ⚙️ for assets, 📊 for general stats.\n"
-        "4. Quote EXACT numbers and data — never round or approximate.\n"
-        "5. Never expose raw UUIDs unless the user explicitly provided one in their question.\n"
-        "6. End with a polite, helpful closing sentence."
+        "FORMATTING & RESPONSE INSTRUCTIONS:\n"
+        "1. Specific/Critical Asset Lookups (e.g. most critical asset, highest risk asset):\n"
+        "   - Give a clear, highlighted title with the Asset Name & Code (e.g. ⚙️ **Most Critical Asset: Delivery Van (1.5T) [LL-VAN-001]**).\n"
+        "   - List all important health indicators: Health Score (%), Failure Probability (%), Health Band/Status, Risk Level, and Predicted Maintenance Date in bullet points.\n"
+        "2. Count & Breakdown Queries (e.g. number of tickets, users, assets by sub-category):\n"
+        "   - Start with a clear ONE-LINE summary of the TOTAL count (e.g. 🎫 **Total Support Tickets: 935**).\n"
+        "   - Present the breakdown with clean bullet points, bold category names, and exact counts (e.g. • **Open:** 83 tickets).\n"
+        "3. Use professional emojis (🎫 for tickets, ⚙️ for assets, 👥 for users, 📊 for stats, ⚠️ for critical/high risk).\n"
+        "4. Quote EXACT numbers from the data — never invent, round, or approximate numbers.\n"
+        "5. Never expose raw UUIDs unless the user provided one.\n"
+        "6. End with a polite closing sentence (e.g. '*Let me know if you would like more details on any specific record! 😊*')."
     )
     try:
         summary, fb = call_groq(
