@@ -46,6 +46,17 @@ def train_one(train_raw: pd.DataFrame, test_raw: pd.DataFrame,
     fit_df[C.DURATION_COL] = dur_tr.values
     fit_df[C.EVENT_COL]    = evt_tr.values
 
+    # Resample to address the extremely low event rate (2-4%) for non-oil components.
+    # We downsample the censored snapshots so that the event rate is ~20%,
+    # bringing the median_days prediction into a realistic range.
+    events_df = fit_df[fit_df[C.EVENT_COL] == 1]
+    censored_df = fit_df[fit_df[C.EVENT_COL] == 0]
+    
+    target_censored = int(4 * len(events_df))
+    if target_censored < len(censored_df):
+        censored_sampled = censored_df.sample(n=target_censored, random_state=42)
+        fit_df = pd.concat([events_df, censored_sampled]).sample(frac=1, random_state=42).reset_index(drop=True)
+
     aft = WeibullAFTFitter(penalizer=penalizer)
     aft.fit(fit_df, duration_col=C.DURATION_COL, event_col=C.EVENT_COL)
 
