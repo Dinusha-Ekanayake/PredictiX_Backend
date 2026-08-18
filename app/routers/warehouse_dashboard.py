@@ -569,30 +569,30 @@ def get_maintenance_schedule(
 
         schedule = []
         for asset, pred in rows:
-            predicted_weeks = round(float(pred.predicted_days_until_maintenance) / 7, 2)
+            predicted_days = round(float(pred.predicted_days_until_maintenance), 1)
 
             # Scheduled: project from last actual service + fleet avg interval
-            scheduled_weeks = None
+            scheduled_days = None
             last_svc = last_performed.get(asset.id)
             if last_svc:
                 last_date = last_svc.date() if hasattr(last_svc, "date") else last_svc
                 from datetime import timedelta as td
                 next_proj = last_date + td(days=avg_interval_days)
                 days_to_sched = (next_proj - today).days
-                scheduled_weeks = round(max(0, days_to_sched) / 7, 2)
+                scheduled_days = round(max(0, days_to_sched), 1)
             elif asset.last_service_date:
                 from datetime import timedelta as td
                 next_proj = asset.last_service_date + td(days=avg_interval_days)
                 days_to_sched = (next_proj - today).days
-                scheduled_weeks = round(max(0, days_to_sched) / 7, 2)
+                scheduled_days = round(max(0, days_to_sched), 1)
 
-            if scheduled_weeks is None:
+            if scheduled_days is None:
                 continue
 
             schedule.append({
                 "asset": asset.asset_name,
-                "predicted": predicted_weeks,
-                "scheduled": scheduled_weeks,
+                "predicted": predicted_days,
+                "scheduled": scheduled_days,
             })
 
         schedule.sort(key=lambda x: x["predicted"] - x["scheduled"])

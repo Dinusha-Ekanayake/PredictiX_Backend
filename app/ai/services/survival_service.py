@@ -423,7 +423,7 @@ def fleet_survival_summary(db: Session, max_assets: int = 25,
             db.query(Asset.asset_code, Asset.id, PdmBatchPrediction.predicted_days_until_maintenance)
             .join(PdmBatchPrediction, Asset.id == PdmBatchPrediction.asset_id)
             .filter(PdmBatchPrediction.status == "ok", PdmBatchPrediction.health_score.isnot(None))
-            .order_by(PdmBatchPrediction.health_score.asc())
+            .order_by(PdmBatchPrediction.predicted_days_until_maintenance.asc())
             .limit(max_assets)
             .all()
         )
@@ -455,13 +455,7 @@ def fleet_survival_summary(db: Session, max_assets: int = 25,
         ps7, ps30 = _p_service(f7), _p_service(f30)
         ps7_bounds, ps30_bounds = _p_service_bounds(f7), _p_service_bounds(f30)
         cost = cost_map.get(code)
-        e7 = ps7 * cost if cost is not None else None
-        e30 = ps30 * cost if cost is not None else None
-        if e7:
-            exp_spend_7 += e7
-        if e30:
-            exp_spend_30 += e30
-
+        
         # Risk thresholds
         fp_30 = ps30
         if fp_30 > 0.6: risk = "Critical"
@@ -488,8 +482,16 @@ def fleet_survival_summary(db: Session, max_assets: int = 25,
         if bucket_rul == bucket_rul: # check nan
             if bucket_rul <= 7:
                 at_risk_7[c_soonest] += 1
+                if cost is not None:
+                    exp_spend_7 += cost
             if bucket_rul <= 30:
                 at_risk_30[c_soonest] += 1
+                if cost is not None:
+                    exp_spend_30 += cost
+
+        # Individual expected costs to pass to frontend
+        e7 = cost if (bucket_rul == bucket_rul and bucket_rul <= 7) else 0.0
+        e30 = cost if (bucket_rul == bucket_rul and bucket_rul <= 30) else 0.0
 
         assets_out.append({
             "asset":              code,
