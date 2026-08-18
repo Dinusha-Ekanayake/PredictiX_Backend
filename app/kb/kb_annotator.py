@@ -191,7 +191,7 @@ def compute_benchmark_alerts(ctx: dict) -> list[dict]:
         alerts.append({
             "type": "HIGH_ALERT",
             "message": (
-                f"{hp_pct}% of active tickets ({hp_tickets} of {active_tickets}) are High-priority — "
+                f"{hp_pct}% of active tickets ({hp_tickets} of {active_tickets}) are High-priority - "
                 f"exceeds the {threshold:g}% threshold, indicating systemic maintenance backlog "
                 f"or recurring failure modes."
             ),
