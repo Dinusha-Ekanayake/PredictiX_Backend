@@ -36,9 +36,9 @@ MODEL_COMPOUND = "groq/compound"
 MODEL_COMPOUND_MINI = "groq/compound-mini"
 
 FAST_MODELS = [
+    os.getenv("WH_GROQ_MODEL", "llama-3.3-70b-versatile"),
     "groq/compound-mini",
     "groq/compound",
-    "llama-3.3-70b-versatile",
     "qwen/qwen3.6-27b",
 ]
 
@@ -50,9 +50,10 @@ HEAVY_MODELS = [
 ]
 
 MODEL_CASCADE = [
+    os.getenv("WH_GROQ_MODEL", "llama-3.3-70b-versatile"),
+    "llama-3.1-8b-instant",
     "groq/compound-mini",
     "groq/compound",
-    "llama-3.3-70b-versatile",
     "qwen/qwen3.6-27b",
     "openai/gpt-oss-120b",
 ]

@@ -155,9 +155,12 @@ def get_my_profile(
     return _profile_to_response(current_user, db)
 
 
+from fastapi import BackgroundTasks
+
 @router.put("/me")
 def update_my_profile(
     payload: UserProfileUpdate,
+    background_tasks: BackgroundTasks,
     current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -215,11 +218,28 @@ def update_my_profile(
             log.exception("Profile update failed")
             raise HTTPException(status_code=500, detail="Profile update failed")
 
-        # Best-effort admin notification email via Brevo — never blocks the save.
-        try:
-            NotificationService.notify_on_profile_update(db, str(current_user.id))
-        except Exception:
-            log.exception("Profile-update notification failed (non-fatal)")
+        def send_notifications():
+            # Best-effort admin notification email via Brevo — never blocks the save.
+            try:
+                NotificationService.notify_on_profile_update(db, str(current_user.id))
+            except Exception:
+                log.exception("Profile-update notification failed (non-fatal)")
+
+            # In-app bell notification for admins
+            try:
+                from app.services.in_app_notification_service import InAppNotificationService
+                InAppNotificationService.notify_admins(
+                    db=db,
+                    title="Profile Updated",
+                    message=f"{current_user.full_name} has updated their profile information.",
+                    priority="low",
+                    notification_type="system",
+                    warehouse_id=str(current_user.warehouse_id) if current_user.warehouse_id else None
+                )
+            except Exception:
+                log.exception("Profile-update in-app notification failed (non-fatal)")
+
+        background_tasks.add_task(send_notifications)
 
     return _profile_to_response(current_user, db)
 

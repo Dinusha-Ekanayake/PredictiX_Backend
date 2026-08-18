@@ -5,8 +5,9 @@ sparse matrix has no single truth value, so `if not self._matrix` raises
 ValueError instead of answering the question, and every call fails once
 documents are loaded.
 
-These tests fit a real TF-IDF index over a small in-memory corpus, so they need
-no database and no network.
+retrieve() tries pgvector first and falls back to TF-IDF. The guard lives in
+that fallback, so these pin the store to it and fit a real TF-IDF index over a
+small in-memory corpus, needing no database and no network.
 """
 import pytest
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -29,6 +30,7 @@ CORPUS = [
 def _loaded_store() -> KBVectorStore:
     """A store with its index already fitted, bypassing the Supabase load."""
     store = KBVectorStore()
+    store.use_pgvector = False       # exercise the TF-IDF fallback
     store._docs = CORPUS
     store._ids = [d["id"] for d in CORPUS]
     store._texts = [d["text"] for d in CORPUS]
@@ -65,6 +67,7 @@ def test_retrieve_returns_empty_when_nothing_is_indexed():
     """An empty corpus leaves _matrix as None, which must read as "no index"
     rather than raising or being mistaken for a fitted one."""
     store = KBVectorStore()
+    store.use_pgvector = False       # exercise the TF-IDF fallback
     store._docs = []
     store._texts = []
     store._vectorizer = None
