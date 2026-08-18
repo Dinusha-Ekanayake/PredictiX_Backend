@@ -70,3 +70,10 @@ venv/
 # Row-level backups written before a seeding script updates the database. They
 # carry reading ids from one environment and cannot be replayed against another.
 scripts/backups/
+
+# Local debugging scripts. Two of these carried live Groq keys, so the whole
+# directory stays untracked rather than relying on review to catch the next one.
+app/chatbot/scratch/
+
+# Exported user reports carry names, emails and phone numbers.
+*_report.csv
