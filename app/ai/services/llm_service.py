@@ -32,23 +32,55 @@ log = logging.getLogger("predictix.llm")
 # kept as a fallback: a key with broader access would use it, and on this key it
 # is simply never reached. Re-probe before trusting these notes — the point of
 # the cascade is that Groq retires models faster than this file gets edited.
-MODEL_CASCADE = [
+MODEL_COMPOUND = "groq/compound"
+MODEL_COMPOUND_MINI = "groq/compound-mini"
+
+FAST_MODELS = [
+    "groq/compound-mini",
+    "groq/compound",
     "llama-3.3-70b-versatile",
+    "qwen/qwen3.6-27b",
 ]
 
-# The model every caller starts from unless it asks for a specific one. Callers
-# used to hardcode "llama-3.1-8b-instant" individually, which meant each one
-# spent a 403 before the cascade rescued it — and each was a separate place to
-# edit when Groq retired a model. Pointing them at the head of the cascade keeps
-# that decision in exactly one place.
-DEFAULT_MODEL = MODEL_CASCADE[0]
+HEAVY_MODELS = [
+    "groq/compound",
+    "groq/compound-mini",
+    "llama-3.3-70b-versatile",
+    "openai/gpt-oss-120b",
+]
+
+MODEL_CASCADE = [
+    "groq/compound-mini",
+    "groq/compound",
+    "llama-3.3-70b-versatile",
+    "qwen/qwen3.6-27b",
+    "openai/gpt-oss-120b",
+]
+
+DEFAULT_MODEL = MODEL_COMPOUND_MINI
 
 
-def _client() -> Groq:
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        raise RuntimeError("GROQ_API_KEY is not configured")
-    return Groq(api_key=api_key)
+def _get_api_keys() -> list[str]:
+    """Retrieve all configured Groq API keys in priority order."""
+    keys: list[str] = []
+    for var in ["CHATBOT_GROQ_API_KEY", "WH_GROQ_API_KEY", "GROQ_API_KEY"]:
+        val = os.getenv(var)
+        if val and val.strip() and val.strip() not in keys:
+            keys.append(val.strip())
+    return keys
+
+
+_ACTIVE_KEY_INDEX = 0
+
+
+def _get_client(key_index: Optional[int] = None) -> tuple[Groq, int]:
+    """Returns a Groq client for the given or currently active API key index."""
+    global _ACTIVE_KEY_INDEX
+    keys = _get_api_keys()
+    if not keys:
+        raise RuntimeError("No Groq API keys configured in environment")
+    idx = (key_index if key_index is not None else _ACTIVE_KEY_INDEX) % len(keys)
+    return Groq(api_key=keys[idx]), idx
 
 
 def call_groq(
@@ -61,14 +93,18 @@ def call_groq(
     tools: Optional[list] = None,
     tool_choice: Optional[str] = None,
 ) -> tuple[str | dict, str]:
-    """Call Groq with automatic retry and model cascade on block/rate-limit.
+    """Call Groq with automatic multi-key failover, model cascade, and retry.
 
     Returns:
         (result, fallback_msg): 
           - result: str if no tools, dict if tools used.
           - fallback_msg: empty string if successful on first try, or a friendly message if fallback occurred.
     """
-    client = _client()
+    global _ACTIVE_KEY_INDEX
+    keys = _get_api_keys()
+    current_key_idx = _ACTIVE_KEY_INDEX
+    client, current_key_idx = _get_client(current_key_idx)
+
     kwargs: dict = {
         "model": model,
         "messages": messages,
@@ -82,14 +118,7 @@ def call_groq(
 
     last_err: Exception | None = None
     fallback_message = ""
-
     current_model = model
-    # Models already attempted, so the cascade never retries a known-bad one.
-    # This used to be positional — it took the caller's model's index in
-    # MODEL_CASCADE and only considered entries after it — which silently
-    # disabled fallback whenever a caller started from a model near the end of
-    # the list (or one not in it at all, where index() raised and the -1 meant
-    # "start from the top" and could re-try the failing model forever).
     tried: set[str] = {model}
     attempt = 0
 
@@ -115,8 +144,24 @@ def call_groq(
                 or ("model" in err_str and "not found" in err_str)
             )
 
+            # 1. Multi-key failover: switch to backup Groq key on rate limit (429)
+            if is_rate_limit and len(keys) > 1:
+                current_key_idx = (current_key_idx + 1) % len(keys)
+                _ACTIVE_KEY_INDEX = current_key_idx
+                log.warning(
+                    "Groq API key rate-limited (429). Seamlessly switching to backup Groq key (%d/%d)...",
+                    current_key_idx + 1,
+                    len(keys),
+                )
+                client, _ = _get_client(current_key_idx)
+                continue
+
+            # 2. Model cascade on block/decommission
             if is_model_blocked:
-                next_model = next((m for m in MODEL_CASCADE if m not in tried), None)
+                pool = HEAVY_MODELS if current_model in HEAVY_MODELS else FAST_MODELS
+                next_model = next((m for m in pool if m not in tried), None)
+                if not next_model:
+                    next_model = next((m for m in MODEL_CASCADE if m not in tried), None)
                 if next_model:
                     log.warning(
                         "Model %s blocked. Falling back to %s.",

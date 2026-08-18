@@ -767,10 +767,11 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
         )
 
         try:
+            from app.ai.services.llm_service import MODEL_COMPOUND
             raw_sql, fb = call_groq(
                 messages=[{"role": "user", "content": sql_prompt}],
-                model="llama-3.3-70b-versatile",
-                max_tokens=350,
+                model=MODEL_COMPOUND,
+                max_tokens=300,
                 temperature=0.1,
             )
             if fb and not fallback_msg: fallback_msg = fb
