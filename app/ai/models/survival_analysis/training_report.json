@@ -1,5 +1,5 @@
 {
-  "trained_at": "2026-07-11T10:28:56.604373Z",
+  "trained_at": "2026-08-18T05:20:46.728506Z",
   "version": "survival-v3.0",
   "dataset": "srilanka_single_warehouse_vehicle_maintenance_dataset_v11_realistic.csv",
   "penalizer": 0.02,
@@ -9,38 +9,38 @@
       "component": "brake",
       "n_train_rows": 77521,
       "n_test_rows": 19306,
-      "n_train_events": 3011,
-      "n_test_events": 719,
-      "event_rate_train": 0.0388,
+      "n_train_events": 7743,
+      "n_test_events": 1912,
+      "event_rate_train": 0.0999,
       "n_features": 35,
-      "log_likelihood": -23208.72,
-      "AIC": 46491.44,
+      "log_likelihood": -46873.75,
+      "AIC": 93821.5,
       "weibull_rho": NaN,
-      "test_concordance": 0.7882,
+      "test_concordance": 0.865,
       "top_covariates": [
         {
           "feature": "brake_health_pct",
-          "coef": 0.7947
-        },
-        {
-          "feature": "active_fault_code_count",
-          "coef": -0.4354
-        },
-        {
-          "feature": "vehicle_type_Heavy_Truck_16T",
-          "coef": -0.2613
-        },
-        {
-          "feature": "vehicle_type_Mini_Truck_1T",
-          "coef": -0.2257
+          "coef": 0.9549
         },
         {
           "feature": "vehicle_type_Forklift_3.0T",
-          "coef": 0.1932
+          "coef": 0.2968
         },
         {
-          "feature": "vehicle_type_Forklift_2.5T",
-          "coef": 0.1795
+          "feature": "vehicle_role_last_mile_delivery",
+          "coef": -0.1811
+        },
+        {
+          "feature": "lifetime_service_count",
+          "coef": -0.1763
+        },
+        {
+          "feature": "vehicle_type_Heavy_Truck_16T",
+          "coef": -0.1612
+        },
+        {
+          "feature": "engine_hours_since_last_service",
+          "coef": -0.1583
         }
       ]
     },
@@ -48,38 +48,38 @@
       "component": "tire",
       "n_train_rows": 77521,
       "n_test_rows": 19306,
-      "n_train_events": 1904,
-      "n_test_events": 429,
-      "event_rate_train": 0.0246,
+      "n_train_events": 5373,
+      "n_test_events": 1265,
+      "event_rate_train": 0.0693,
       "n_features": 35,
-      "log_likelihood": -15604.76,
-      "AIC": 31283.52,
+      "log_likelihood": -31024.86,
+      "AIC": 62123.72,
       "weibull_rho": NaN,
-      "test_concordance": 0.7859,
+      "test_concordance": 0.9137,
       "top_covariates": [
         {
           "feature": "tire_health_pct",
-          "coef": 0.5994
-        },
-        {
-          "feature": "active_fault_code_count",
-          "coef": -0.3978
-        },
-        {
-          "feature": "vehicle_type_Heavy_Truck_16T",
-          "coef": -0.3152
-        },
-        {
-          "feature": "vehicle_role_heavy_cargo_transport",
-          "coef": -0.2724
-        },
-        {
-          "feature": "vehicle_type_Medium_Truck_7T",
-          "coef": -0.2367
+          "coef": 1.129
         },
         {
           "feature": "vehicle_type_Forklift_3.0T",
-          "coef": 0.1973
+          "coef": 0.2285
+        },
+        {
+          "feature": "vehicle_type_Forklift_2.5T",
+          "coef": 0.1994
+        },
+        {
+          "feature": "vehicle_role_internal_material_handling",
+          "coef": 0.1994
+        },
+        {
+          "feature": "vehicle_type_Heavy_Truck_16T",
+          "coef": -0.1227
+        },
+        {
+          "feature": "lifetime_service_count",
+          "coef": -0.1178
         }
       ]
     },
@@ -87,38 +87,38 @@
       "component": "battery",
       "n_train_rows": 77521,
       "n_test_rows": 19306,
-      "n_train_events": 1584,
-      "n_test_events": 377,
-      "event_rate_train": 0.0204,
+      "n_train_events": 2736,
+      "n_test_events": 732,
+      "event_rate_train": 0.0353,
       "n_features": 35,
-      "log_likelihood": -13484.71,
-      "AIC": 27043.42,
+      "log_likelihood": -14910.53,
+      "AIC": 29895.06,
       "weibull_rho": NaN,
-      "test_concordance": 0.7763,
+      "test_concordance": 0.942,
       "top_covariates": [
         {
           "feature": "battery_health_pct",
-          "coef": 0.5246
-        },
-        {
-          "feature": "active_fault_code_count",
-          "coef": -0.358
-        },
-        {
-          "feature": "vehicle_type_Mini_Truck_1T",
-          "coef": -0.125
+          "coef": 1.4625
         },
         {
           "feature": "lifetime_service_count",
-          "coef": -0.1224
+          "coef": -0.1855
         },
         {
-          "feature": "engine_hours_total",
-          "coef": -0.0859
+          "feature": "vehicle_type_Forklift_3.0T",
+          "coef": 0.1016
         },
         {
-          "feature": "vehicle_age_years",
-          "coef": -0.0851
+          "feature": "vehicle_role_last_mile_delivery",
+          "coef": -0.0995
+        },
+        {
+          "feature": "engine_hours_since_last_service",
+          "coef": -0.096
+        },
+        {
+          "feature": "vibration_rms_mm_s",
+          "coef": 0.0939
         }
       ]
     },
@@ -126,38 +126,38 @@
       "component": "oil",
       "n_train_rows": 77521,
       "n_test_rows": 19306,
-      "n_train_events": 13273,
-      "n_test_events": 3334,
-      "event_rate_train": 0.1712,
+      "n_train_events": 4564,
+      "n_test_events": 1071,
+      "event_rate_train": 0.0589,
       "n_features": 35,
-      "log_likelihood": -76814.81,
-      "AIC": 153703.63,
+      "log_likelihood": -25990.03,
+      "AIC": 52054.06,
       "weibull_rho": NaN,
-      "test_concordance": 0.7956,
+      "test_concordance": 0.9042,
       "top_covariates": [
         {
           "feature": "oil_life_pct",
-          "coef": 1.5579
+          "coef": 1.1766
         },
         {
-          "feature": "downtime_hours_last_90d",
-          "coef": 0.3286
+          "feature": "vehicle_type_Forklift_3.0T",
+          "coef": 0.1909
         },
         {
-          "feature": "days_since_last_service",
-          "coef": 0.3046
+          "feature": "vibration_rms_mm_s",
+          "coef": 0.1623
         },
         {
           "feature": "vehicle_age_years",
-          "coef": 0.294
-        },
-        {
-          "feature": "active_fault_code_count",
-          "coef": -0.2593
+          "coef": 0.1199
         },
         {
           "feature": "lifetime_service_count",
-          "coef": -0.2253
+          "coef": -0.1172
+        },
+        {
+          "feature": "vehicle_type_Heavy_Truck_16T",
+          "coef": -0.0995
         }
       ]
     },
@@ -165,38 +165,38 @@
       "component": "hydraulic",
       "n_train_rows": 77521,
       "n_test_rows": 19306,
-      "n_train_events": 1487,
-      "n_test_events": 421,
-      "event_rate_train": 0.0192,
+      "n_train_events": 4345,
+      "n_test_events": 1237,
+      "event_rate_train": 0.056,
       "n_features": 35,
-      "log_likelihood": -11526.52,
-      "AIC": 23127.05,
+      "log_likelihood": -24990.09,
+      "AIC": 50054.18,
       "weibull_rho": NaN,
-      "test_concordance": 0.8925,
+      "test_concordance": 0.9081,
       "top_covariates": [
         {
           "feature": "hydraulic_health_pct",
-          "coef": 0.6656
-        },
-        {
-          "feature": "vehicle_type_Forklift_3.0T",
-          "coef": -0.631
-        },
-        {
-          "feature": "vehicle_type_Forklift_2.5T",
-          "coef": -0.3856
-        },
-        {
-          "feature": "vehicle_role_internal_material_handling",
-          "coef": -0.3856
+          "coef": 1.0043
         },
         {
           "feature": "vehicle_role_last_mile_delivery",
-          "coef": 0.3168
+          "coef": 0.5139
         },
         {
-          "feature": "active_fault_code_count",
-          "coef": -0.2913
+          "feature": "vehicle_type_Forklift_3.0T",
+          "coef": -0.3879
+        },
+        {
+          "feature": "vehicle_role_internal_material_handling",
+          "coef": -0.233
+        },
+        {
+          "feature": "vehicle_type_Forklift_2.5T",
+          "coef": -0.233
+        },
+        {
+          "feature": "lifetime_service_count",
+          "coef": -0.1846
         }
       ]
     }

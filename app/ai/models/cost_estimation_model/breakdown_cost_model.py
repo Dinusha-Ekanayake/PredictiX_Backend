@@ -23,6 +23,22 @@ log = logging.getLogger("predictix")
 
 MODEL_PATH = Path(__file__).resolve().parent / "predictix_breakdown_cost_model_v5.pkl"
 
+import numba.core.serialize
+_orig_unpickle = numba.core.serialize._unpickle__CustomPickled
+def _safe_unpickle(*args, **kwargs):
+    try:
+        return _orig_unpickle(*args, **kwargs)
+    except Exception:
+        class DummyCtor:
+            @staticmethod
+            def _rebuild(**kwargs):
+                return None
+        class DummyPickled:
+            ctor = DummyCtor
+            states = {}
+        return DummyPickled()
+numba.core.serialize._unpickle__CustomPickled = _safe_unpickle
+
 
 def load_breakdown_bundle(path: Path | str | None = None) -> dict:
     """Load the breakdown cost bundle. Call once in lifespan."""

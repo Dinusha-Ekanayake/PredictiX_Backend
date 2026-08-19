@@ -429,7 +429,7 @@ def compute_benchmark_alerts(ctx: dict) -> list[dict]:
         alerts.append({
             "type": "HIGH_ALERT",
             "message": (
-                f"{hp_pct}% of active tickets ({hp_tickets} of {active_tickets}) are High-priority — "
+                f"{hp_pct}% of active tickets ({hp_tickets} of {active_tickets}) are High-priority - "
                 f"exceeds the {threshold:g}% threshold, indicating systemic maintenance backlog "
                 f"or recurring failure modes."
             ),
@@ -452,13 +452,16 @@ def get_ticket_category_kb(category_breakdown: dict) -> list[dict]:
 
     for cat, count in sorted(category_breakdown.items(), key=lambda x: -x[1]):
         lookup = cat.lower().strip()
+        if lookup in ("general", "uncategorized"):
+            continue
+            
         result.append({
             "category":    cat.title(),
             "count":       count,
             "pct_open":    round(count / total * 100, 1),
             "kb_guidance": TICKET_CATEGORY_KB.get(
                 lookup,
-                "Review and classify per maintenance type — inspect related SHAP drivers"
+                "Review and classify per maintenance type — inspect related primary indicators"
             ),
         })
 
@@ -523,8 +526,8 @@ def generate_recommendations(ctx: dict) -> dict:
                 "in the 60–69% health band to receive a full lifecycle assessment."
             ),
             (
-                "Leverage the PM ratio strength to build predictive work orders triggered by SHAP "
-                "feature thresholds rather than fixed calendar intervals for higher-utilisation assets."
+                "Leverage the PM ratio strength to build predictive work orders triggered by "
+                "predictive primary indicator thresholds rather than fixed calendar intervals for higher-utilisation assets."
             ),
             (
                 "Expand reference documentation with vehicle-specific service bulletins (OEM manuals for each of the "

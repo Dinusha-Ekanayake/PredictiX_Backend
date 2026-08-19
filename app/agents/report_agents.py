@@ -24,6 +24,7 @@ import json
 import re
 from typing import Any
 from langchain_groq import ChatGroq
+from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from sqlalchemy.orm import Session
 from sqlalchemy import func, text
@@ -38,11 +39,10 @@ from app.models import (
 # ── Health bands ─────────────────────────────────────────────────
 # Named locally so the count expressions below stay readable, but the values
 # come from the one shared definition rather than being restated here.
-from app.services.health_bands import HEALTH_BAND_THRESHOLDS as _HB
-_BAND_EXCELLENT = _HB[0][1]   # >= 60
-_BAND_GOOD      = _HB[1][1]   # >= 50  — "healthy" for reporting purposes
-_BAND_MODERATE  = _HB[2][1]   # >= 38
-_BAND_CRITICAL  = _HB[3][1]   # <  25 is critical
+_BAND_EXCELLENT = 80.0   # >= 80
+_BAND_GOOD      = 70.0   # >= 70  — "healthy" for reporting purposes
+_BAND_MODERATE  = 50.0   # >= 50
+_BAND_CRITICAL  = 30.0   # <  30 is critical
 
 # ── KB Integration ───────────────────────────────────────────────
 from app.kb.kb_vector_store import get_kb_store
@@ -77,6 +77,7 @@ def _get_llm(temperature: float = 0.3) -> ChatGroq:
         groq_api_key=api_key,
         model_name=os.getenv("WH_GROQ_MODEL", "groq/compound"),
         temperature=temperature,
+        max_tokens=2048,
     )
 
 
@@ -194,12 +195,12 @@ def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
     warehouse_active = warehouse.is_active if warehouse else True
 
     # Departments
-    dept_count = db.execute(text("SELECT COUNT(*) FROM departments")).scalar() or 0
+    dept_count = db.execute(text("SELECT COUNT(*) FROM departments WHERE warehouse_id = :w"), {"w": warehouse_id}).scalar() or 0
 
     # ── ASSETS ────────────────────────────────────────────
-    total_assets = db.query(func.count(Asset.id)).scalar() or 0
+    total_assets = db.query(func.count(Asset.id)).filter(Asset.warehouse_id == warehouse_id).scalar() or 0
 
-    asset_status_rows = db.query(Asset.status, func.count(Asset.id)).group_by(Asset.status).all()
+    asset_status_rows = db.query(Asset.status, func.count(Asset.id)).filter(Asset.warehouse_id == warehouse_id).group_by(Asset.status).all()
     asset_status_breakdown = {
         str(s).replace("_", " ").title() if s else "Unknown": c for s, c in asset_status_rows
     }
@@ -208,17 +209,17 @@ def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
     under_maintenance = asset_status_breakdown.get("Under Maintenance", 0)
     retired_assets    = asset_status_breakdown.get("Retired", 0)
 
-    asset_type_rows = db.query(Asset.vehicle_type, func.count(Asset.id)).group_by(Asset.vehicle_type).all()
+    asset_type_rows = db.query(Asset.vehicle_type, func.count(Asset.id)).filter(Asset.warehouse_id == warehouse_id).group_by(Asset.vehicle_type).all()
     asset_type_breakdown = {
         str(t).replace("_", " ").title() if t else "Other": c for t, c in asset_type_rows
     }
 
-    asset_category_rows = db.query(Asset.category, func.count(Asset.id)).group_by(Asset.category).all()
+    asset_category_rows = db.query(Asset.category, func.count(Asset.id)).filter(Asset.warehouse_id == warehouse_id).group_by(Asset.category).all()
     asset_category_breakdown = {
         str(c).replace("_", " ").title() if c else "General": cnt for c, cnt in asset_category_rows
     }
 
-    avg_vehicle_age = db.query(func.avg(Asset.vehicle_age_years)).scalar() or 0
+    avg_vehicle_age = db.query(func.avg(Asset.vehicle_age_years)).filter(Asset.warehouse_id == warehouse_id).scalar() or 0
 
     # ── HEALTH & FAILURE PREDICTIONS ─────────────────────
     # pdm_batch_predictions is the single source of truth for PdM output —
@@ -231,10 +232,11 @@ def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
     # from it here silently produced a stale/empty risk breakdown.
     latest_preds = db.execute(text("""
         SELECT
-            asset_id, health_score, failure_probability, risk_level, predicted_days_until_maintenance
-        FROM pdm_batch_predictions
-        WHERE status = 'ok'
-    """)).fetchall()
+            p.asset_id, p.health_score, p.failure_probability, p.risk_level, p.predicted_days_until_maintenance
+        FROM pdm_batch_predictions p
+        JOIN assets a ON p.asset_id = a.id
+        WHERE p.status = 'ok' AND a.warehouse_id = :w
+    """), {"w": warehouse_id}).fetchall()
 
     health_vals = [float(r[1]) for r in latest_preds if r[1] is not None]
     scored_assets = len(health_vals)
@@ -316,11 +318,12 @@ def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
     # falling through to what was really the only working path — so this
     # is that path directly, not a fallback.
     rows = db.execute(text("""
-        SELECT top_explanations
-        FROM pdm_batch_predictions
-        WHERE status = 'ok' AND health_score < 60
+        SELECT p.top_explanations
+        FROM pdm_batch_predictions p
+        JOIN assets a ON p.asset_id = a.id
+        WHERE p.status = 'ok' AND p.health_score < 60 AND a.warehouse_id = :w
         LIMIT 50
-    """)).fetchall()
+    """), {"w": warehouse_id}).fetchall()
     feat_counts: dict[str, int] = {}
     for (explanations,) in rows:
         if isinstance(explanations, str):
@@ -352,13 +355,13 @@ def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
     # PDF export filters these client-side with parseFloat(bucket) and
     # bucket.includes('Below'), and kb_annotator matches them against
     # HEALTH_BAND_KB's band strings.
-    health_buckets = {"60-100%": 0, "50-59%": 0, "38-49%": 0, "25-37%": 0, "Below 25%": 0}
+    health_buckets = {"80-100%": 0, "70-79%": 0, "50-69%": 0, "30-49%": 0, "Below 30%": 0}
     for score in health_vals:
-        if score >= _BAND_EXCELLENT:  health_buckets["60-100%"] += 1
-        elif score >= _BAND_GOOD:     health_buckets["50-59%"] += 1
-        elif score >= _BAND_MODERATE: health_buckets["38-49%"] += 1
-        elif score >= _BAND_CRITICAL: health_buckets["25-37%"] += 1
-        else:                         health_buckets["Below 25%"] += 1
+        if score >= _BAND_EXCELLENT:  health_buckets["80-100%"] += 1
+        elif score >= _BAND_GOOD:     health_buckets["70-79%"] += 1
+        elif score >= _BAND_MODERATE: health_buckets["50-69%"] += 1
+        elif score >= _BAND_CRITICAL: health_buckets["30-49%"] += 1
+        else:                         health_buckets["Below 30%"] += 1
 
     # Worst assets by health score. pdm_batch_predictions already holds
     # exactly one (current) row per asset, so no per-asset dedup is needed.
@@ -374,10 +377,10 @@ def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
             p.top_explanations
         FROM pdm_batch_predictions p
         JOIN assets a ON a.id = p.asset_id
-        WHERE p.status = 'ok'
+        WHERE p.status = 'ok' AND a.warehouse_id = :w
         ORDER BY CASE WHEN a.asset_code LIKE 'SIM-%' THEN 0 ELSE 1 END, p.health_score ASC
         LIMIT 25
-    """)).fetchall()
+    """), {"w": warehouse_id}).fetchall()
     def _fp_pct(v) -> str:
         fp = float(v or 0)
         return f"{min(round(fp * 100 if fp <= 1.0 else fp, 1), 100.0)}%"
@@ -413,7 +416,8 @@ def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
             COALESCE(MAX(max_cost_lkr), 0)       AS max_cost
         FROM pdm_batch_predictions
         WHERE status = 'ok'
-    """)).fetchone()
+          AND asset_id IN (SELECT id FROM assets WHERE warehouse_id = :w)
+    """), {'w': warehouse_id}).fetchone()
     total_estimated_cost = float(cost_row[0] or 0)
     avg_cost_per_asset   = float(cost_row[1] or 0)
     min_cost_estimate    = float(cost_row[2] or 0)
@@ -434,7 +438,7 @@ def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
     def _next_month(d: datetime) -> datetime:
         return _month_floor(_month_floor(d) + timedelta(days=32))
 
-    _latest_evt = db.query(func.max(MaintenanceEvent.performed_at)).scalar()
+    _latest_evt = db.query(func.max(MaintenanceEvent.performed_at)).join(Asset).filter(Asset.warehouse_id == warehouse_id).scalar()
     _anchors = [d for d in (_latest_evt,) if d is not None]
     # Strip tzinfo so the anchor matches the naive `now` used elsewhere.
     anchor = max(_anchors).replace(tzinfo=None) if _anchors else now
@@ -453,11 +457,13 @@ def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
     monthly_maintenance = []
     for ms in month_starts:
         me = _next_month(ms)
-        m_cost = db.query(func.sum(MaintenanceEvent.cost_amount)).filter(
+        m_cost = db.query(func.sum(MaintenanceEvent.cost_amount)).join(Asset).filter(
+            Asset.warehouse_id == warehouse_id,
             MaintenanceEvent.performed_at >= ms,
             MaintenanceEvent.performed_at <  me,
         ).scalar() or 0
-        m_count = db.query(func.count(MaintenanceEvent.id)).filter(
+        m_count = db.query(func.count(MaintenanceEvent.id)).join(Asset).filter(
+            Asset.warehouse_id == warehouse_id,
             MaintenanceEvent.performed_at >= ms,
             MaintenanceEvent.performed_at <  me,
         ).scalar() or 0
@@ -471,14 +477,16 @@ def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
     total_maintenance_3m = sum(m["events"] for m in monthly_maintenance)
     actual_cost_3m       = sum(m["cost"]   for m in monthly_maintenance)
 
-    avg_downtime = db.query(func.avg(MaintenanceEvent.downtime_hours)).filter(
+    avg_downtime = db.query(func.avg(MaintenanceEvent.downtime_hours)).join(Asset).filter(
+        Asset.warehouse_id == warehouse_id,
         MaintenanceEvent.performed_at >= period_start,
         MaintenanceEvent.performed_at <  period_end,
     ).scalar() or 0
 
     maintenance_type_rows = db.query(
         MaintenanceEvent.event_type, func.count(MaintenanceEvent.id)
-    ).filter(
+    ).join(Asset).filter(
+        Asset.warehouse_id == warehouse_id,
         MaintenanceEvent.performed_at >= period_start,
         MaintenanceEvent.performed_at <  period_end,
     ).group_by(MaintenanceEvent.event_type).all()
@@ -488,8 +496,10 @@ def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
 
     # Canonical PM ratio = preventive events / all events (clamped ≤100%). Single
     # source so prose, KPI cards and benchmark box never disagree on the figure.
-    _mtb_lower = {str(k).lower(): v for k, v in maintenance_type_breakdown.items()}
-    _preventive_events = _mtb_lower.get("preventive", 0) + _mtb_lower.get("scheduled", 0)
+    _preventive_events = sum(
+        v for k, v in maintenance_type_breakdown.items() 
+        if "preventive" in str(k).lower() or "scheduled" in str(k).lower()
+    )
     _total_events_typed = sum(maintenance_type_breakdown.values())
     pm_ratio_pct = round(min(_preventive_events / _total_events_typed * 100, 100.0), 1) if _total_events_typed else 0.0
 
@@ -509,27 +519,28 @@ def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
     )
 
     # ── TICKETS ───────────────────────────────────────────
-    total_tickets    = db.query(func.count(Ticket.id)).scalar() or 0
-    open_tickets     = db.execute(text("SELECT COUNT(*) FROM tickets WHERE status = 'open'")).scalar() or 0
-    in_progress      = db.execute(text("SELECT COUNT(*) FROM tickets WHERE status = 'in_progress'")).scalar() or 0
-    resolved_tickets = db.execute(text("SELECT COUNT(*) FROM tickets WHERE status = 'resolved'")).scalar() or 0
-    closed_tickets   = db.execute(text("SELECT COUNT(*) FROM tickets WHERE status = 'closed'")).scalar() or 0
+    total_tickets    = db.query(func.count(Ticket.id)).join(Asset).filter(Asset.warehouse_id == warehouse_id).scalar() or 0
+    open_tickets     = db.execute(text("SELECT COUNT(tickets.id) FROM tickets JOIN assets ON tickets.asset_id = assets.id WHERE assets.warehouse_id = :w AND tickets.status = 'open'"), {'w': warehouse_id}).scalar() or 0
+    in_progress      = db.execute(text("SELECT COUNT(tickets.id) FROM tickets JOIN assets ON tickets.asset_id = assets.id WHERE assets.warehouse_id = :w AND tickets.status = 'in_progress'"), {'w': warehouse_id}).scalar() or 0
+    resolved_tickets = db.execute(text("SELECT COUNT(tickets.id) FROM tickets JOIN assets ON tickets.asset_id = assets.id WHERE assets.warehouse_id = :w AND tickets.status = 'resolved'"), {'w': warehouse_id}).scalar() or 0
+    closed_tickets   = db.execute(text("SELECT COUNT(tickets.id) FROM tickets JOIN assets ON tickets.asset_id = assets.id WHERE assets.warehouse_id = :w AND tickets.status = 'closed'"), {'w': warehouse_id}).scalar() or 0
     active_tickets   = open_tickets + in_progress
 
-    priority_rows = db.query(Ticket.priority, func.count(Ticket.id)).group_by(Ticket.priority).all()
+    priority_rows = db.query(Ticket.priority, func.count(Ticket.id)).join(Asset).filter(Asset.warehouse_id == warehouse_id).group_by(Ticket.priority).all()
     priority_breakdown = {str(p).title() if p else "Unset": c for p, c in priority_rows}
 
-    final_priority_rows = db.query(Ticket.final_priority, func.count(Ticket.id)).group_by(Ticket.final_priority).all()
+    final_priority_rows = db.query(Ticket.final_priority, func.count(Ticket.id)).join(Asset).filter(Asset.warehouse_id == warehouse_id).group_by(Ticket.final_priority).all()
     final_priority_breakdown = {str(p).title() if p else "Unset": c for p, c in final_priority_rows}
 
-    category_rows = db.query(Ticket.final_category, func.count(Ticket.id)).group_by(Ticket.final_category).all()
-    category_breakdown = {str(c).title() if c else "General": cnt for c, cnt in category_rows}
+    category_rows = db.query(Ticket.final_category, func.count(Ticket.id)).join(Asset).filter(Asset.warehouse_id == warehouse_id).group_by(Ticket.final_category).all()
+    category_breakdown = {str(c).title() if c else "Uncategorized": cnt for c, cnt in category_rows}
 
     # Monthly ticket volumes over the SAME 3 calendar months as the maintenance trend.
     ticket_trend = []
     for ms in month_starts:
         me = _next_month(ms)
-        count = db.query(func.count(Ticket.id)).filter(
+        count = db.query(func.count(Ticket.id)).join(Asset).filter(
+                Asset.warehouse_id == warehouse_id,
             Ticket.created_at >= ms,
             Ticket.created_at < me,
         ).scalar() or 0
@@ -537,14 +548,14 @@ def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
 
     # High priority active tickets
     high_priority_active = db.execute(
-        text("SELECT COUNT(*) FROM tickets WHERE status NOT IN ('closed','resolved') AND (priority = 'high' OR final_priority = 'high')")
+        text("SELECT COUNT(t.id) FROM tickets t JOIN assets a ON t.asset_id = a.id WHERE t.status NOT IN ('closed','resolved') AND (t.priority = 'high' OR t.final_priority = 'high') AND a.warehouse_id = :w"), {'w': warehouse_id}
     ).scalar() or 0
 
     # ── USERS ─────────────────────────────────────────────
-    total_users    = db.query(func.count(Profile.id)).scalar() or 0
-    active_users   = db.execute(text("SELECT COUNT(*) FROM profiles WHERE status = 'active'")).scalar() or 0
+    total_users    = db.query(func.count(Profile.id)).filter(Profile.warehouse_id == warehouse_id).scalar() or 0
+    active_users   = db.execute(text("SELECT COUNT(*) FROM profiles WHERE warehouse_id = :w AND status = 'active'"), {'w': warehouse_id}).scalar() or 0
     inactive_users = total_users - active_users
-    admin_users    = db.execute(text("SELECT COUNT(*) FROM profiles WHERE role = 'admin'")).scalar() or 0
+    admin_users    = db.execute(text("SELECT COUNT(*) FROM profiles WHERE role = 'admin' AND warehouse_id = :w"), {'w': warehouse_id}).scalar() or 0
     standard_users = total_users - admin_users
 
     # ── MONTHLY TREND SUMMARY (3m) ───────────────────────
@@ -562,7 +573,7 @@ def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
     fleet_age_distribution = {"0-3 yrs": 0, "4-6 yrs": 0, "7-10 yrs": 0, "10+ yrs": 0}
     try:
         age_rows = db.query(Asset.manufacture_year, func.count(Asset.id))\
-            .filter(Asset.manufacture_year.isnot(None)).group_by(Asset.manufacture_year).all()
+            .filter(Asset.manufacture_year.isnot(None), Asset.warehouse_id == warehouse_id).group_by(Asset.manufacture_year).all()
         for yr, cnt in age_rows:
             age = current_year - int(yr)
             band = "0-3 yrs" if age <= 3 else "4-6 yrs" if age <= 6 else "7-10 yrs" if age <= 10 else "10+ yrs"
@@ -589,7 +600,8 @@ def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
             WHERE warranty_expiry_date IS NOT NULL
               AND warranty_expiry_date >= :today
               AND warranty_expiry_date <= :cutoff
-        """), {"today": today_date, "cutoff": expiry_cutoff}).scalar() or 0
+              AND warehouse_id = :w
+        """), {"today": today_date, "cutoff": expiry_cutoff, "w": warehouse_id}).scalar() or 0
     except Exception:
         pass
 
@@ -613,15 +625,16 @@ def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
                 ROUND(AVG(active_fault_code_count)::numeric, 2) AS avg_faults,
                 COUNT(*)::int                                  AS monitored_assets
             FROM (
-                SELECT DISTINCT ON (asset_id)
-                    asset_id, tire_health_pct, brake_health_pct,
-                    battery_health_pct, oil_life_pct, hydraulic_health_pct,
-                    active_fault_code_count
-                FROM sensor_readings
-                WHERE recorded_at IS NOT NULL
-                ORDER BY asset_id, recorded_at DESC
+                SELECT DISTINCT ON (s.asset_id)
+                    s.asset_id, s.tire_health_pct, s.brake_health_pct,
+                    s.battery_health_pct, s.oil_life_pct, s.hydraulic_health_pct,
+                    s.active_fault_code_count
+                FROM sensor_readings s
+                JOIN assets a ON s.asset_id = a.id
+                WHERE s.recorded_at IS NOT NULL AND a.warehouse_id = :w
+                ORDER BY s.asset_id, s.recorded_at DESC
             ) latest
-        """)).fetchone()
+        """), {"w": warehouse_id}).fetchone()
         if comp_row:
             component_health = {
                 "avg_tire":     float(comp_row[0] or 0),
@@ -640,16 +653,18 @@ def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
     vendor_breakdown: list[dict] = []
     try:
         vendor_rows = db.execute(text("""
-            SELECT vendor_name,
+            SELECT m.vendor_name,
                    COUNT(*)::int                            AS event_count,
-                   COALESCE(SUM(cost_amount), 0)::numeric  AS total_cost
-            FROM maintenance_events
-            WHERE vendor_name IS NOT NULL AND vendor_name <> ''
-              AND performed_at >= :cutoff
-            GROUP BY vendor_name
+                   COALESCE(SUM(m.cost_amount), 0)::numeric  AS total_cost
+            FROM maintenance_events m
+            JOIN assets a ON m.asset_id = a.id
+            WHERE m.vendor_name IS NOT NULL AND m.vendor_name <> ''
+              AND m.performed_at >= :cutoff
+              AND a.warehouse_id = :w
+            GROUP BY m.vendor_name
             ORDER BY event_count DESC
             LIMIT 6
-        """), {"cutoff": three_months_ago}).fetchall()
+        """), {"cutoff": three_months_ago, "w": warehouse_id}).fetchall()
         vendor_breakdown = [
             {"vendor": r[0], "events": int(r[1]), "cost": float(r[2])}
             for r in vendor_rows
@@ -664,23 +679,25 @@ def build_warehouse_context(db: Session, warehouse_id: str) -> dict[str, Any]:
     try:
         mttr_row = db.execute(text("""
             SELECT
-                ROUND(AVG(EXTRACT(EPOCH FROM (resolved_at - opened_at)) / 3600)::numeric,  1) AS avg_hours,
-                ROUND(AVG(EXTRACT(EPOCH FROM (resolved_at - opened_at)) / 86400)::numeric, 1) AS avg_days
-            FROM tickets
-            WHERE resolved_at IS NOT NULL AND opened_at IS NOT NULL
-        """)).fetchone()
+                ROUND(AVG(EXTRACT(EPOCH FROM (t.resolved_at - t.opened_at)) / 3600)::numeric,  1) AS avg_hours,
+                ROUND(AVG(EXTRACT(EPOCH FROM (t.resolved_at - t.opened_at)) / 86400)::numeric, 1) AS avg_days
+            FROM tickets t
+            JOIN assets a ON t.asset_id = a.id
+            WHERE t.resolved_at IS NOT NULL AND t.opened_at IS NOT NULL AND a.warehouse_id = :w
+        """), {"w": warehouse_id}).fetchone()
         if mttr_row:
             avg_resolution_hours = float(mttr_row[0] or 0)
             avg_resolution_days  = float(mttr_row[1] or 0)
 
         prio_rows = db.execute(text("""
-            SELECT COALESCE(final_priority, priority, 'Unknown') AS priority,
-                   ROUND(AVG(EXTRACT(EPOCH FROM (resolved_at - opened_at)) / 3600)::numeric, 1) AS avg_hours
-            FROM tickets
-            WHERE resolved_at IS NOT NULL AND opened_at IS NOT NULL
-            GROUP BY COALESCE(final_priority, priority, 'Unknown')
+            SELECT COALESCE(t.final_priority, t.priority, 'Unknown') AS priority,
+                   ROUND(AVG(EXTRACT(EPOCH FROM (t.resolved_at - t.opened_at)) / 3600)::numeric, 1) AS avg_hours
+            FROM tickets t
+            JOIN assets a ON t.asset_id = a.id
+            WHERE t.resolved_at IS NOT NULL AND t.opened_at IS NOT NULL AND a.warehouse_id = :w
+            GROUP BY COALESCE(t.final_priority, t.priority, 'Unknown')
             ORDER BY avg_hours DESC
-        """)).fetchall()
+        """), {"w": warehouse_id}).fetchall()
         mttr_by_priority = [
             {"priority": str(r[0]).title(), "avg_hours": float(r[1] or 0)}
             for r in prio_rows
@@ -830,8 +847,8 @@ def _context_to_prompt_text(ctx: dict) -> str:
 ▶ HEALTH & PREDICTIVE ANALYTICS
   Average Fleet Health Score: {ctx['avg_health_pct']}%
   Average Failure Probability: {ctx['avg_failure_prob_pct']}%
-  Health Distribution: Healthy (≥50%): {ctx['healthy_count']} | Moderate (38-49%): {ctx['moderate_count']} | At-Risk (<38%): {ctx['at_risk_count']} | Critical (<25%): {ctx['critical_count']}
-  Critical Rate: {ctx['critical_rate_pct']}% ({ctx['critical_count']} of {ctx['total_assets']} assets, <25% health) | At-Risk Rate: {ctx['at_risk_rate_pct']}% (<38% health)
+  Health Distribution: Healthy (≥70%): {ctx['healthy_count']} | Moderate (50-69%): {ctx['moderate_count']} | At-Risk (<50%): {ctx['at_risk_count']} | Critical (<30%): {ctx['critical_count']}
+  Critical Rate: {ctx['critical_rate_pct']}% ({ctx['critical_count']} of {ctx['total_assets']} assets, <30% health) | At-Risk Rate: {ctx['at_risk_rate_pct']}% (<50% health)
   (Use these EXACT pre-computed rates when stating critical/at-risk percentages — do not recompute.)
   Risk Level Distribution: {kv(ctx['risk_breakdown'])}
   Assets Needing Urgent Service (≤7 days): {ctx['urgent_maintenance_count']}
@@ -906,24 +923,24 @@ Section instructions (each must be 4-6 sentences, professional analytical tone):
    if it exceeds it. Mention specific numbers from the data.
 
 2. risk_analysis:
-   Analyse the risk landscape using the KB context. State the critical/at-risk counts and use the provided
-   "Critical Rate" / "At-Risk Rate" values verbatim (do not recompute), comparing to the ISO 55000 / SMRP 5% benchmark. Name the top AI-identified SHAP failure drivers
-   and their KB-defined thresholds. Apply FMEA/FMECA criticality reasoning where the data warrants — a
-   high-occurrence SHAP driver on a high-severity component (brakes, hydraulics, cooling) is a top-criticality
+   Analyse the risk landscape using the KB context. Use an Executive, Action-Oriented tone designed for management. DO NOT use technical jargon like "SHAP" or "KB-defined". State the critical/at-risk counts and use the provided
+   "Critical Rate" / "At-Risk Rate" values verbatim. Name the primary indicators of equipment failure
+   and their industry-standard safety and operational thresholds. Apply FMEA/FMECA criticality reasoning where the data warrants — a
+   high-occurrence failure indicator on a high-severity component (brakes, hydraulics, cooling) is a top-criticality
    item to ground first. Identify which asset types are most critical. Where the Colombo climate profile is
    relevant (heat/humidity raising coolant, battery or corrosion risk), note it. Comment on failure probability
    and urgency — reference assets needing service within 7 days.
 
 3. maintenance_intelligence:
-   Outline the maintenance workload using KB standards. How many assets need urgent attention (≤7 days)?
+   Outline the maintenance workload using KB standards. Use an Executive, Action-Oriented tone. Focus on business impact, operational readiness, and compliance rather than just listing numbers. How many assets need urgent attention (≤7 days) and what is the risk to readiness?
    Compare the provided "PM Ratio" value (use it verbatim; do not recompute) against the SMRP 90% gold standard.
    When comparing predicted cost vs actual 3M spend, describe the gap factually (forecast conservatism or
    deferred maintenance are possible causes) — do not assert it as "savings" or "underspend" without basis.
-   Describe maintenance event breakdown and note average downtime. Reference KB service interval standards
+   Describe maintenance event breakdown and note average downtime, framing it in terms of operational impact. Reference KB service interval standards
    for the most common asset types, citing OEM schedules where relevant (Toyota forklifts every 500 engine
    hours with 8h/40h/170h tiers; Tata heavy trucks ~1000 hours or annually; vans every 60 days). Where lifting
    equipment is involved, note the statutory Factories Ordinance obligation (hoists/lifts examined every 12
-   months, lifting tackle every 6 months) as a binding floor independent of OEM intervals.
+   months, lifting tackle every 6 months) as a binding floor independent of OEM intervals to emphasize compliance.
 
 4. pattern_and_trend:
    Describe observable trends over the reporting period. Treat MAINTENANCE EVENTS and TICKETS as TWO SEPARATE
@@ -933,7 +950,7 @@ Section instructions (each must be 4-6 sentences, professional analytical tone):
    CRITICAL: if the data carries a "DATA NOTE" that the maintenance history is concentrated in one month, you MUST
    describe the month-over-month change as a data-loading artifact of demonstration data and explicitly NOT
    attribute it to operational efficiency or genuine workload reduction. Note patterns in ticket categories
-   (electrical/mechanical/general) and their link to SHAP failure drivers.
+   (electrical/mechanical/general) and their link to the primary indicators of equipment failure.
 
 5. conclusion:
    Write a comprehensive 3-month warehouse summary. Note the PM ratio strength (use the provided "PM Ratio"
@@ -1003,14 +1020,15 @@ def _guard_narrative(ai_sections: dict, ctx: dict) -> dict:
             contradiction = True
 
     note = (
-        f"Data-grounded trend ({period}): maintenance event volume is {evt_dir}, maintenance cost is "
-        f"{cost_dir}, and support-ticket volume is {tkt_dir}. Maintenance events and tickets are separate "
-        f"series and must not be used interchangeably."
+        f"Data Validation Note ({period}): Trailing 3-month trends indicate a {evt_dir} volume "
+        f"in maintenance events, a {cost_dir} trajectory in maintenance spend, and a {tkt_dir} "
+        f"volume of support tickets."
     )
     if concentrated:
         note += (
-            " The maintenance history is concentrated in a single month (demonstration data), so these "
-            "month-over-month changes are a data-loading artifact and do not indicate improved operational efficiency."
+            " Please note: As the maintenance history is heavily concentrated in a single month "
+            "(initial data seeding), these month-over-month variances currently represent system "
+            "artifacting rather than a genuine shift in operational efficiency."
         )
     if contradiction:
         note = "Correction — " + note
@@ -1041,11 +1059,26 @@ def run_warehouse_agent(db: Session, warehouse_id: str | None = None) -> dict:
 
     # ── Step 2: KB Vector Store retrieval ─────────────────────
     kb_store = get_kb_store()
-    # Inject the FULL source-grouped KB. The curated corpus (26 chunks spanning
-    # statutory law, OEM schedules, ISO 55000/55001, SMRP, FMEA and Colombo climate)
-    # is small enough to inject completely, guaranteeing no standard is dropped by
-    # top-k retrieval — the strongest lever for grounded, high-quality report prose.
-    kb_full_context = kb_store.build_full_kb_context()
+    
+    # Dynamically build a query based on the warehouse's top issues to pull relevant RAG context
+    top_shap = ctx.get("top_shap_features", [])
+    shap_names = [s[0] for s in top_shap]
+    query_str = "warehouse maintenance safety standards " + " ".join(shap_names)
+    
+    # Retrieve top 12 most relevant chunks from the pgvector database
+    relevant_chunks = kb_store.retrieve(query_str, top_k=12)
+    
+    lines = [
+        "=" * 64,
+        "PREDICTIX KNOWLEDGE BASE - RETRIEVED MAINTENANCE STANDARDS",
+        "=" * 64,
+    ]
+    for chunk in relevant_chunks:
+        source = chunk['tags'][1] if chunk.get('tags') and len(chunk['tags']) > 1 else chunk['id']
+        lines.append(f"\n[Source: {source}]")
+        lines.append(chunk['text'])
+        
+    kb_full_context = "\n".join(lines)
 
     # ── Step 3: KB Annotations (deterministic — no LLM) ───────
     shap_enriched     = annotate_shap_features(ctx.get("top_shap_features", []))

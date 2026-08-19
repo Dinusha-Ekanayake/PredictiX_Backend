@@ -1,8 +1,7 @@
 from sqlalchemy import Column, String, Text, Integer, Boolean, Date, DateTime, ForeignKey, Numeric
 from sqlalchemy.dialects.postgresql import ENUM, UUID, JSONB
-from sqlalchemy import Boolean, Column, Date, DateTime, ForeignKey, Integer, String, Text, func
-from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
+from pgvector.sqlalchemy import Vector
 from app.db import Base
 import uuid
 
@@ -20,6 +19,15 @@ TicketCategoryEnum = ENUM(
     "electrical", "mechanical", "software",
     name="ticket_category", create_type=False,
 )
+
+
+class KBDocument(Base):
+    __tablename__ = "kb_documents"
+
+    id = Column(String, primary_key=True)
+    text = Column(Text, nullable=False)
+    tags = Column(JSONB, default=list)
+    embedding = Column(Vector(384))  # 384 dimensions for all-MiniLM-L6-v2
 
 
 class Warehouse(Base):

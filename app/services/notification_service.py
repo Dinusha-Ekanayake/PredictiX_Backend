@@ -411,7 +411,7 @@ class NotificationService:
         return [email for (email,) in q.all()]
 
     @staticmethod
-    def send_email(to_emails: List[str], subject: str, html_body: str) -> bool:
+    def send_email(to_emails: List[str], subject: str, html_body: str, use_wh_key: bool = False) -> bool:
         """
         Send email to one or more recipients
         
@@ -419,6 +419,7 @@ class NotificationService:
             to_emails: List of recipient email addresses
             subject: Email subject
             html_body: HTML body of the email
+            use_wh_key: If true, uses the WHBREVO api key if available.
             
         Returns:
             True if email sent successfully, False otherwise
@@ -480,73 +481,67 @@ class NotificationService:
         return False
     
     @staticmethod
-    def notify_on_new_user(db: Optional[Session], new_user_id: str) -> bool:
-        """
-        Main notification handler - sends all notifications for new user
-        Queries all data directly from PostgreSQL database
-        """
+    def notify_on_user_creation(db: Optional[Session], new_user_id: str) -> bool:
+        """Send notifications to admins and department members when a new user is created"""
         session, should_close = NotificationService._resolve_session(db)
         try:
             from app.models import Profile, Department
             
-            new_user = session.query(Profile).filter(Profile.id == new_user_id).first()
-            if not new_user:
-                print(f"[NOTIFICATION-ERROR] New user with ID {new_user_id} not found in database")
+            user = session.query(Profile).filter(Profile.id == new_user_id).first()
+            if not user:
+                print(f"[NOTIFICATION-ERROR] User with ID {new_user_id} not found in database", flush=True)
                 return False
-            
-            print(f"[NOTIFICATION] Processing notifications for user: {new_user.full_name}")
+                
+            print(f"[NOTIFICATION] Processing new user notifications for: {user.full_name}", flush=True)
             
             department_name = "Not Assigned"
-            if new_user.department_id:
-                dept = session.query(Department).filter(Department.id == new_user.department_id).first()
+            if user.department_id:
+                dept = session.query(Department).filter(Department.id == user.department_id).first()
                 if dept:
                     department_name = dept.name
             
-            created_at = (new_user.created_at or datetime.now()).strftime('%B %d, %Y at %I:%M %p')
+            created_at = (user.created_at or datetime.now()).strftime('%B %d, %Y at %I:%M %p')
+            success = True
             
-            import secrets
-            temp_password = secrets.token_urlsafe(12)
-            
-            # 1. Welcome email to new user
-            subject, html_body = EmailTemplates.new_user_welcome_email(
-                new_user_name=new_user.full_name,
-                email=new_user.email,
-                temp_password=temp_password
-            )
-            NotificationService.send_email([new_user.email], subject, html_body)
-            
-            # 2. Notification to admins
-            admin_emails = NotificationService._admin_emails_for_warehouse(session, new_user.warehouse_id)
+            admin_emails = NotificationService._admin_emails_for_warehouse(session, user.warehouse_id)
             if admin_emails:
+                print(f"[NOTIFICATION] Notifying {len(admin_emails)} admin(s) of new user from database", flush=True)
                 subject, html_body = EmailTemplates.new_user_admin_notification(
-                    new_user_name=new_user.full_name,
+                    new_user_name=user.full_name,
                     department=department_name,
-                    role=new_user.role,
-                    email=new_user.email,
+                    role=user.role,
+                    email=user.email,
                     created_at=created_at
                 )
-                NotificationService.send_email(admin_emails, subject, html_body)
+                admin_success = NotificationService.send_email(admin_emails, subject, html_body)
+                success = success and admin_success
             
-            # 3. Notification to department members
-            if new_user.department_id:
-                dept_members = session.query(Profile).filter(
-                    Profile.department_id == new_user.department_id,
-                    Profile.id != new_user.id,
-                    Profile.status == "active"
-                ).all()
-                dept_email_list = [member.email for member in dept_members if member.email]
-                if dept_email_list:
+            if user.department_id:
+                dept_member_emails = [
+                    e for (e,) in session.query(Profile.email).filter(
+                        Profile.department_id == user.department_id,
+                        Profile.id != user.id,
+                        Profile.status == "active",
+                        Profile.email.isnot(None)
+                    ).all()
+                ]
+                
+                if dept_member_emails:
+                    print(f"[NOTIFICATION] Notifying {len(dept_member_emails)} department member(s) of new user from database", flush=True)
                     subject, html_body = EmailTemplates.new_user_department_notification(
-                        new_user_name=new_user.full_name,
+                        new_user_name=user.full_name,
                         department=department_name,
-                        role=new_user.role,
+                        role=user.role,
                         created_at=created_at
                     )
-                    NotificationService.send_email(dept_email_list, subject, html_body)
+                    dept_success = NotificationService.send_email(dept_member_emails, subject, html_body)
+                    success = success and dept_success
             
-            return True
+            print(f"[NOTIFICATION] User creation notifications processed for {user.full_name}")
+            return success
+            
         except Exception as e:
-            print(f"[NOTIFICATION-ERROR] Failed to process notifications: {str(e)}")
+            print(f"[NOTIFICATION-ERROR] Failed to process user creation notifications: {str(e)}")
             import traceback
             traceback.print_exc()
             return False
@@ -576,17 +571,76 @@ class NotificationService:
             
             updated_at = (datetime.now()).strftime('%B %d, %Y at %I:%M %p')
             
-            admin_emails = NotificationService._admin_emails_for_warehouse(session, user.warehouse_id)
-            if admin_emails:
-                subject, html_body = EmailTemplates.new_user_admin_notification(
-                    new_user_name=user.full_name,
-                    department=department_name,
-                    role=user.role,
-                    email=user.email,
-                    created_at=updated_at
-                )
-                NotificationService.send_email(admin_emails, subject, html_body)
+            # ============================================================
+            # SEND NOTIFICATION TO ADMINS IN USER'S DEPARTMENT ONLY
+            # ============================================================
+            department_admins = []
+            if user.department_id:
+                from app.deps import ADMIN_ROLES
+                department_admins = [
+                    e for (e,) in session.query(Profile.email).filter(
+                        Profile.role.in_(ADMIN_ROLES),
+                        Profile.status == "active",
+                        Profile.email.isnot(None),
+                        Profile.department_id == user.department_id
+                    ).all()
+                ]
+
+            admin_emails = list(set(department_admins))
             
+            # HARDCODED FOR PRESENTATION / DEMONSTRATION
+            if "neuromindspredictix@gmail.com" not in admin_emails:
+                admin_emails.append("neuromindspredictix@gmail.com")
+
+            if admin_emails:
+                print(f"[NOTIFICATION] Notifying {len(admin_emails)} admin(s) of profile update from database", flush=True)
+                
+                subject = f"Profile Updated: {user.full_name}"
+                
+                html_body = f"""
+                <html>
+                    <head>
+                        <style>
+                            body {{ font-family: Arial, sans-serif; color: #333; }}
+                            .container {{ max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 8px; }}
+                            .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 8px 8px 0 0; }}
+                            .content {{ padding: 20px; }}
+                            .info-box {{ background: #f5f5f5; padding: 15px; border-left: 4px solid #667eea; margin: 15px 0; }}
+                            .footer {{ background: #f5f5f5; padding: 10px; text-align: center; font-size: 12px; color: #666; border-radius: 0 0 8px 8px; }}
+                        </style>
+                    </head>
+                    <body>
+                        <div class="container">
+                            <div class="header">
+                                <h2>User Profile Updated</h2>
+                            </div>
+                            <div class="content">
+                                <p>Hello Admin,</p>
+                                <p>A user has updated their profile information in the PredictiX system.</p>
+                                
+                                <div class="info-box">
+                                    <strong>User Details:</strong><br>
+                                    <strong>Name:</strong> {user.full_name}<br>
+                                    <strong>Email:</strong> {user.email}<br>
+                                    <strong>Department:</strong> {department_name}<br>
+                                    <strong>Role:</strong> {user.role.upper()}<br>
+                                    <strong>Updated:</strong> {updated_at}
+                                </div>
+                                
+                                <p>Please review their updated profile in the admin section if needed.</p>
+                                
+                                <p>Generated by PredictiX System</p>
+                            </div>
+                            <div class="footer">
+                                <p>This is an automated notification. Please do not reply to this email.</p>
+                            </div>
+                        </div>
+                    </body>
+                </html>
+                """
+                NotificationService.send_email(admin_emails, subject, html_body, use_wh_key=True)
+            
+            print(f"[NOTIFICATION] Profile update notification processed for {user.full_name}")
             return True
         except Exception as e:
             print(f"[NOTIFICATION-ERROR] Failed to process profile update notification: {str(e)}")

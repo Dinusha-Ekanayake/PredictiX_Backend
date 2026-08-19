@@ -42,7 +42,7 @@ from sqlalchemy.orm import Session
 # Existing imports (UNCHANGED)
 from app.services.report_service import ReportService
 from app.services.pdf_render import PDFRenderService
-from app.deps import get_db, require_user, require_admin, get_current_user, is_admin_role, active_warehouse_id, assert_asset_in_scope
+from app.deps import get_db, require_user, require_admin, get_current_user, is_admin_role, active_warehouse_id, assert_asset_in_scope, user_can_view_asset
 from app.models import Asset, Profile, Report, Ticket, Warehouse
 from app.schemas.report import ReportCreate, ReportUpdate, ReportOut
 from app.core.config import allowed_frontend_origins
@@ -211,8 +211,15 @@ def create_report(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    if payload.asset_id and not db.query(Asset).filter(Asset.id == payload.asset_id).first():
-        raise HTTPException(status_code=404, detail="Asset not found")
+    if payload.asset_id:
+        asset = db.query(Asset).filter(Asset.id == payload.asset_id).first()
+        if not asset:
+            raise HTTPException(status_code=404, detail="Asset not found")
+        if is_admin_role(current_user):
+            assert_asset_in_scope(asset, current_user)
+        elif not user_can_view_asset(asset, current_user):
+            raise HTTPException(status_code=404, detail="Asset not found")
+            
     if payload.warehouse_id and not db.query(Warehouse).filter(Warehouse.id == payload.warehouse_id).first():
         raise HTTPException(status_code=404, detail="Warehouse not found")
     if payload.ticket_id and not db.query(Ticket).filter(Ticket.id == payload.ticket_id).first():
@@ -223,6 +230,13 @@ def create_report(
     # validated to be a real profile, but never forced to equal the caller,
     # so a user could attribute a report they generated to someone else.
     data["generated_by"] = current_user.id
+    
+    if is_admin_role(current_user):
+        scoped_wh = active_warehouse_id(current_user)
+        if scoped_wh:
+            data["warehouse_id"] = scoped_wh
+    else:
+        data["warehouse_id"] = getattr(current_user, "warehouse_id", None)
 
     obj = Report(**data)
     db.add(obj)
@@ -299,7 +313,11 @@ def update_report(
     # generator or an admin may modify it — matches the owner-or-admin edit
     # pattern used elsewhere in this app (tickets, comments). Previously any
     # authenticated user could overwrite any warehouse's report content.
-    if not is_admin_role(current_user) and str(obj.generated_by) != str(getattr(current_user, "id", "")):
+    if is_admin_role(current_user):
+        wh_id = active_warehouse_id(current_user)
+        if wh_id and str(obj.warehouse_id) != wh_id and obj.warehouse_id is not None:
+            raise HTTPException(status_code=404, detail="Report not found")
+    elif str(obj.generated_by) != str(getattr(current_user, "id", "")):
         raise HTTPException(status_code=403, detail="You can only edit reports you generated.")
 
     for key, value in payload.model_dump(exclude_unset=True).items():
@@ -311,9 +329,17 @@ def update_report(
 
 
 @reports_router.delete("/{report_id}", dependencies=[Depends(require_admin)])
-def delete_report(report_id: uuid.UUID, db: Session = Depends(get_db)):
+def delete_report(
+    report_id: uuid.UUID, 
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
     obj = db.query(Report).filter(Report.id == report_id).first()
     if not obj:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    wh_id = active_warehouse_id(current_user)
+    if wh_id and str(obj.warehouse_id) != wh_id and obj.warehouse_id is not None:
         raise HTTPException(status_code=404, detail="Report not found")
 
     db.delete(obj)

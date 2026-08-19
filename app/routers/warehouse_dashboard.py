@@ -98,7 +98,7 @@ def _build_warehouse_summary(db: Session, warehouse_id: str | None = None):
             (SELECT ROUND(AVG(health_score)::numeric, 1) FROM pdm_batch_predictions
              WHERE status = 'ok' AND {_assets_in})                                 AS avg_health,
             (SELECT COUNT(*) FROM pdm_batch_predictions
-             WHERE status = 'ok' AND {_assets_in} AND health_score >= 80)          AS healthy_assets,
+             WHERE status = 'ok' AND {_assets_in} AND health_score >= 70)          AS healthy_assets,
             (SELECT COUNT(*) FROM pdm_batch_predictions
              WHERE status = 'ok' AND {_assets_in} AND health_score < 60)           AS at_risk_assets,
             (SELECT COUNT(*) FROM assets {_assets_where})                          AS total_assets,
@@ -116,7 +116,7 @@ def _build_warehouse_summary(db: Session, warehouse_id: str | None = None):
     total_tickets_count  = int(kpi_row[5] or 0)
     total_cost           = int(kpi_row[6] or 0)
 
-    avg_health_pct   = f"{int(avg_health_score)}%" if avg_health_score else "N/A"
+    avg_health_pct   = f"{avg_health_score:.1f}%" if avg_health_score else "N/A"
     total_assets_str = f"{healthy_assets} of {total_assets} total" if total_assets else "0 of 0 total"
     formatted_cost   = f"Rs.{total_cost:,}"
 
@@ -151,7 +151,7 @@ def _build_warehouse_summary(db: Session, warehouse_id: str | None = None):
 
     asset_status       = [{"name": s.title() if s else "Unknown",                                "value": c} for s, c in status_counts]
     ticket_priority    = [{"name": p.title() if p else "Unassigned",                             "value": c} for p, c in priority_counts]
-    tickets_by_category = [{"category": c.title() if c else "General",                           "count": cnt} for c, cnt in category_counts]
+    tickets_by_category = [{"category": c.title(),                                               "count": cnt} for c, cnt in category_counts if c is not None]
     assets_by_type     = [{"type": str(t).replace("_", " ").title() if t else "Other",           "count": c} for t, c in type_counts]
 
     # 6. Health Score Distribution — bucketed in SQL over pdm_batch_predictions,
@@ -506,7 +506,10 @@ def get_departments_overview(
 
 
 @warehouse_dashboard_router.get("/maintenance-schedule")
-def get_maintenance_schedule(db: Session = Depends(get_db)):
+def get_maintenance_schedule(
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
     """
     Returns predictive maintenance schedule from real Supabase database data.
     predicted  = PdmBatchPrediction.predicted_days_until_maintenance (ML regressor output)
@@ -514,25 +517,30 @@ def get_maintenance_schedule(db: Session = Depends(get_db)):
                  (computed entirely from maintenance_events table — no hardcoded values)
     """
     try:
+        warehouse_id = active_warehouse_id(current_user)
         today = datetime.utcnow().date()
 
         # ── Fleet average maintenance interval from real maintenance history ──
+        # Scoped to the warehouse to get a more accurate local interval
+        _wh = {"wh": warehouse_id} if warehouse_id else {}
         avg_interval_row = db.execute(text("""
             SELECT AVG(gap_days)::int FROM (
                 SELECT
-                    EXTRACT(EPOCH FROM (performed_at - LAG(performed_at)
-                        OVER (PARTITION BY asset_id ORDER BY performed_at))) / 86400 AS gap_days
-                FROM maintenance_events
-                WHERE performed_at IS NOT NULL
+                    EXTRACT(EPOCH FROM (me.performed_at - LAG(me.performed_at)
+                        OVER (PARTITION BY me.asset_id ORDER BY me.performed_at))) / 86400 AS gap_days
+                FROM maintenance_events me
+                JOIN assets a ON me.asset_id = a.id
+                WHERE me.performed_at IS NOT NULL
+                  AND (a.warehouse_id = :wh OR :wh IS NULL)
             ) sub
             WHERE gap_days > 0 AND gap_days < 365
-        """)).scalar()
+        """), _wh).scalar()
         avg_interval_days = int(avg_interval_row) if avg_interval_row else 90
 
         # pdm_batch_predictions already holds exactly one (current) row per
         # asset — no "most recent per asset" subquery/self-join needed here,
         # unlike the old asset_failure_predictions history table this replaced.
-        rows = (
+        q = (
             db.query(Asset, PdmBatchPrediction)
             .join(PdmBatchPrediction, Asset.id == PdmBatchPrediction.asset_id)
             .filter(
@@ -541,10 +549,11 @@ def get_maintenance_schedule(db: Session = Depends(get_db)):
                 PdmBatchPrediction.predicted_days_until_maintenance.isnot(None),
                 PdmBatchPrediction.predicted_days_until_maintenance > 0,
             )
-            .order_by(PdmBatchPrediction.predicted_days_until_maintenance.asc())
-            .limit(50)
-            .all()
         )
+        if warehouse_id:
+            q = q.filter(Asset.warehouse_id == warehouse_id)
+
+        rows = q.order_by(PdmBatchPrediction.predicted_days_until_maintenance.asc()).limit(50).all()
 
         # ── Most recent performed_at per asset (for interval projection) ──
         last_performed = {
@@ -560,30 +569,30 @@ def get_maintenance_schedule(db: Session = Depends(get_db)):
 
         schedule = []
         for asset, pred in rows:
-            predicted_weeks = round(float(pred.predicted_days_until_maintenance) / 7, 2)
+            predicted_days = round(float(pred.predicted_days_until_maintenance), 1)
 
             # Scheduled: project from last actual service + fleet avg interval
-            scheduled_weeks = None
+            scheduled_days = None
             last_svc = last_performed.get(asset.id)
             if last_svc:
                 last_date = last_svc.date() if hasattr(last_svc, "date") else last_svc
                 from datetime import timedelta as td
                 next_proj = last_date + td(days=avg_interval_days)
                 days_to_sched = (next_proj - today).days
-                scheduled_weeks = round(max(0, days_to_sched) / 7, 2)
+                scheduled_days = round(max(0, days_to_sched), 1)
             elif asset.last_service_date:
                 from datetime import timedelta as td
                 next_proj = asset.last_service_date + td(days=avg_interval_days)
                 days_to_sched = (next_proj - today).days
-                scheduled_weeks = round(max(0, days_to_sched) / 7, 2)
+                scheduled_days = round(max(0, days_to_sched), 1)
 
-            if scheduled_weeks is None:
+            if scheduled_days is None:
                 continue
 
             schedule.append({
                 "asset": asset.asset_name,
-                "predicted": predicted_weeks,
-                "scheduled": scheduled_weeks,
+                "predicted": predicted_days,
+                "scheduled": scheduled_days,
             })
 
         schedule.sort(key=lambda x: x["predicted"] - x["scheduled"])

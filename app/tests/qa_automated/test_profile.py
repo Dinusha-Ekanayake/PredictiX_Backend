@@ -30,33 +30,41 @@ def client(profile_app):
     return TestClient(profile_app)
 
 def test_get_my_profile(client, profile_app):
+    """GET /profiles/me returns the caller's own profile.
+
+    The handler reads the identity straight off current_user, which
+    get_current_user has already loaded, and resolves the department name,
+    warehouse name and assigned-asset count in a single db.execute(). It used
+    to re-select the profile by email and then run three more ORM queries;
+    against Supabase each of those was a separate ~250ms round trip.
+    """
     fake_db = profile_app.dependency_overrides[get_db]()
     fake_user = profile_app.dependency_overrides[get_current_user]()
-    
-    mock_profile = SimpleNamespace(
-        id=fake_user.id,
-        email="john@example.com",
-        full_name="John Doe",
-        phone="1234",
-        status="active",
-        role="user",
-        employee_id="EMP-001",
-        department_id=uuid.uuid4(),
-        warehouse_id=uuid.uuid4(),
-        avatar_url=None,
-        meta={}
-    )
-    
-    mock_dept = SimpleNamespace(id=mock_profile.department_id, name="Eng")
-    mock_wh = SimpleNamespace(id=mock_profile.warehouse_id, name="Colombo")
-    
-    # First query fetches Profile, second fetches Department, third fetches Warehouse
-    fake_db.query.return_value.filter.return_value.first.side_effect = [mock_profile, mock_dept, mock_wh]
-    fake_db.query.return_value.filter.return_value.all.return_value = []
-    
+
+    # current_user is the source of identity now, so the fixture carries it.
+    fake_user.email = "john@example.com"
+    fake_user.full_name = "John Doe"
+    fake_user.phone = "1234"
+    fake_user.status = "active"
+    fake_user.role = "user"
+    fake_user.employee_id = "EMP-001"
+    fake_user.department_id = uuid.uuid4()
+    fake_user.warehouse_id = uuid.uuid4()
+    fake_user.avatar_url = None
+    fake_user.meta = {}
+
+    # One statement returns (department_name, warehouse_name, asset_count).
+    fake_db.execute.return_value.first.return_value = ("Eng", "Colombo", 0)
+
     resp = client.get("/profiles/me")
-    
+
     assert resp.status_code == 200
     data = resp.json()
     assert data["email"] == "john@example.com"
     assert data["firstName"] == "John"
+    assert data["department"] == "Eng"
+    assert data["warehouse"] == "Colombo"
+    assert data["assignedAssetsCount"] == 0
+    # The point of the change: one round trip, not four.
+    assert fake_db.execute.call_count == 1, (
+        f"expected a single statement, got {fake_db.execute.call_count}")
