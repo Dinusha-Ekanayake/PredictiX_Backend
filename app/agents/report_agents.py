@@ -65,17 +65,17 @@ from app.kb.kb_annotator import (
 # ═══════════════════════════════════════════════════════════════
 
 def _get_llm(temperature: float = 0.3) -> ChatGroq:
-    """Return ChatGroq (Llama 3.3) — raises RuntimeError if key missing."""
-    api_key = os.getenv("GROQ_API_KEY")
+    """Return ChatGroq — raises RuntimeError if key missing."""
+    api_key = os.getenv("WH_GROQ_API_KEY") or os.getenv("GROQ_API_KEY") or os.getenv("CHATBOT_GROQ_API_KEY")
     if not api_key:
         raise RuntimeError(
-            "GROQ_API_KEY is not set in your .env file. "
+            "No Groq API key configured in .env file. "
             "Get a free key at https://console.groq.com and add: "
-            "GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxxx"
+            "WH_GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxxx"
         )
     return ChatGroq(
         groq_api_key=api_key,
-        model_name="llama-3.3-70b-versatile",
+        model_name=os.getenv("WH_GROQ_MODEL", "groq/compound"),
         temperature=temperature,
     )
 

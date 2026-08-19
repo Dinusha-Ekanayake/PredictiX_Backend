@@ -834,7 +834,7 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                 )
                 corrected_sql_raw, _ = call_groq(
                     messages=[{"role": "user", "content": fix_prompt}],
-                    model="llama-3.3-70b-versatile",
+                    model=MODEL_COMPOUND,
                     max_tokens=350,
                     temperature=0.1,
                 )
