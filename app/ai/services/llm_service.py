@@ -50,9 +50,13 @@ DEFAULT_MODEL = MODEL_COMPOUND
 
 
 def _get_api_keys() -> list[str]:
-    """Retrieve all configured Groq API keys in priority order."""
+    """Retrieve all configured Groq API keys in priority order:
+    1. WH_GROQ_API_KEY (Primary - always tried first)
+    2. CHATBOT_GROQ_API_KEY (Secondary fallback)
+    3. GROQ_API_KEY (Tertiary fallback)
+    """
     keys: list[str] = []
-    for var in ["WH_GROQ_API_KEY", "GROQ_API_KEY", "CHATBOT_GROQ_API_KEY"]:
+    for var in ["WH_GROQ_API_KEY", "CHATBOT_GROQ_API_KEY", "GROQ_API_KEY"]:
         val = os.getenv(var)
         if val and val.strip() and val.strip() not in keys:
             keys.append(val.strip())

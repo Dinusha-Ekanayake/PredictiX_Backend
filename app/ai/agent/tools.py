@@ -383,6 +383,56 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
     fallback_msg = ""
     q_lower = question.lower()
 
+    # ── Fast-Path 0: Direct Ticket Details Lookup ────────────────────────────
+    import re
+    from datetime import datetime
+    from app.models import Ticket, Profile, Asset
+    ticket_match = re.search(r"\b(TKT-\d{4}-\d+|\bT-\d+|\bTKT-\d+|#\d+|\bT\d{3,5}\b)\b", question, re.IGNORECASE)
+    is_ticket_query = "ticket" in q_lower or ticket_match is not None
+    if is_ticket_query and (ticket_match or "detail" in q_lower or "show" in q_lower or "info" in q_lower or "status of" in q_lower):
+        try:
+            target_num = ticket_match.group(0).replace("#", "").strip() if ticket_match else None
+            t = None
+            if target_num:
+                t = ctx.db.query(Ticket).filter(Ticket.ticket_number.ilike(f"%{target_num}%")).first()
+            if not t and "detail" in q_lower:
+                t = ctx.db.query(Ticket).order_by(Ticket.created_at.desc()).first()
+
+            if t:
+                creator = ctx.db.query(Profile).filter(Profile.id == t.created_by).first() if t.created_by else None
+                creator_name = creator.full_name if creator else "System / User"
+                
+                assignee = ctx.db.query(Profile).filter(Profile.id == t.assigned_to).first() if t.assigned_to else None
+                assignee_name = assignee.full_name if assignee else "Unassigned"
+                
+                asset = ctx.db.query(Asset).filter(Asset.id == t.asset_id).first() if t.asset_id else None
+                asset_info = f"{asset.asset_name} (`{asset.asset_code}`)" if asset else "Not linked to specific asset"
+                
+                created_date = (t.created_at or datetime.now()).strftime('%B %d, %Y at %I:%M %p')
+                base_path = "/admin/tickets" if ctx.is_admin else "/user/tickets"
+                
+                ans = (
+                    f"🎫 **Ticket Details: {t.ticket_number}**\n\n"
+                    f"• **Title:** {t.title}\n"
+                    f"• **Status:** `{str(t.status).upper()}`\n"
+                    f"• **Priority:** `{str(t.priority or 'MEDIUM').upper()}`\n"
+                    f"• **Category:** {str(t.final_category or t.predicted_category or 'General').title()}\n"
+                    f"• **Asset:** {asset_info}\n"
+                    f"• **Created By:** {creator_name}\n"
+                    f"• **Assigned To:** {assignee_name}\n"
+                    f"• **Created Date:** {created_date}\n\n"
+                    f"**Description:**\n{t.description or 'No description provided.'}"
+                )
+                return {
+                    "answer": ans,
+                    "action_buttons": [
+                        {"label": f"Open Ticket {t.ticket_number}", "path": f"{base_path}?ticket_id={t.id}"},
+                        {"label": "Tickets Dashboard", "path": base_path}
+                    ]
+                }
+        except Exception as e:
+            log.error("Direct ticket lookup failed: %s", e)
+
     # ── Fast-Path A: Critical Asset Lookups ───────────────────────────────────
     if any(k in q_lower for k in ["critical asset", "most critical", "highest risk", "most at risk", "urgent asset", "lowest health"]):
         try:
