@@ -71,7 +71,7 @@ class LoginResponse(BaseModel):
     warehouse_id: Optional[str] = None
     warehouse_name: Optional[str] = None
     avatar_url: Optional[str] = None
-    # Set only for super_admin — frontend shows the warehouse picker.
+    # Set only for super_admin, frontend shows the warehouse picker.
     requires_warehouse_selection: bool = False
     selection_token: Optional[str] = None   # short-lived token for step 2
     warehouses: Optional[list[WarehouseOption]] = None
@@ -323,7 +323,7 @@ def _lookup_profile(email: str):
     try:
         db = SessionLocal()
     except Exception as e:
-        # DB not configured at all (broken/dev environment) — demo fallback is
+        # DB not configured at all (broken/dev environment), demo fallback is
         # the intended path here.
         log.warning("[LOGIN] DB session unavailable (non-fatal): %s", e)
         return None
@@ -334,7 +334,7 @@ def _lookup_profile(email: str):
         # DB is configured but unreachable (e.g. Supabase pooler saturated).
         # This must NOT fall through to the demo fallback: the account may have
         # a real profile row, and the fallback would silently issue a JWT with
-        # a synthesized user-id — a fabricated identity that then resolves
+        # a synthesized user-id, a fabricated identity that then resolves
         # MockProfile on every request until the token expires.
         log.error("[LOGIN] DB unreachable during profile lookup: %s", e)
         raise HTTPException(

@@ -8,7 +8,7 @@ Method: for each component (tire, brake, battery, oil, hydraulic), fit a
 simple linear trend of that asset's own sensor_readings health-percentage
 history over time, then extrapolate forward to the day the trend crosses
 that component's failure threshold. This is a per-asset statistical
-estimate computed fresh from that asset's own data — there is no per-
+estimate computed fresh from that asset's own data, there is no per-
 component failure-event label in the training data (the v11 dataset only
 labels a whole-asset "next maintenance" outcome), so a real per-component
 ML model cannot be trained today. See docs/rul-methodology.md-equivalent
@@ -17,7 +17,7 @@ an oversight.
 
 Model grounding (hybrid approach)
 ----------------------------------
-A 4-point OLS trend is statistically thin — projections from it can swing
+A 4-point OLS trend is statistically thin, projections from it can swing
 from "1 year left" to "8 years left" for the same asset depending on
 reading-to-reading noise alone. Rather than presenting that raw extrapolation
 with false confidence, every component RUL here is cross-checked against the
@@ -28,13 +28,13 @@ row, which SHAP already explains in terms of these same health-pct fields):
     years) is clamped and flagged, mirroring the regressor's own
     horizon_saturated treatment instead of showing e.g. a 2034 failure date.
   - `model_corroborated`: True if this component's health field is among the
-    regressor's top SHAP factors for THIS asset — i.e. the trained model
+    regressor's top SHAP factors for THIS asset, i.e. the trained model
     independently considers this component's reading important to the
     overall maintenance timeline, not just the local 4-point trend.
   - `model_days_ceiling`: the regressor's own predicted_days_until_maintenance
     for the whole asset. A component cannot credibly need service *later*
     than the model's overall next-maintenance estimate by an implausible
-    margin — if the OLS trend disagrees sharply with the model here, the
+    margin, if the OLS trend disagrees sharply with the model here, the
     component is flagged for review rather than the OLS number being trusted
     silently.
 
@@ -58,7 +58,7 @@ from app.models import Asset, PdmBatchPrediction, SensorReading
 # considered failed/due for replacement). Safety-critical components that
 # degrade to a hard failure (tire, brake, hydraulic) are given a higher
 # (more conservative) threshold than components with a softer failure mode
-# (oil life, battery) — these are documented starting assumptions, not
+# (oil life, battery), these are documented starting assumptions, not
 # fitted values; see the module docstring.
 FAILURE_THRESHOLD_PCT: dict[str, float] = {
     "tire": 30.0,
@@ -70,13 +70,13 @@ FAILURE_THRESHOLD_PCT: dict[str, float] = {
 MIN_POINTS_FOR_TREND = 2
 
 # A component-level RUL beyond this is not a meaningful "prediction" given
-# only 4 monthly readings — it's noise extrapolated a decade out. Clamp and
+# only 4 monthly readings, it's noise extrapolated a decade out. Clamp and
 # flag instead of showing e.g. "3096 days left" / a 2034 failure date.
 MAX_HORIZON_DAYS = 730
 
 # A jump this large between two consecutive monthly readings (e.g. oil life
 # jumping from 53% to 85%) is almost certainly a maintenance/service event,
-# not gradual physical change — a straight-line fit across it produces a
+# not gradual physical change, a straight-line fit across it produces a
 # large slope that is real (not noise) but describes a one-time step, not
 # an ongoing trend. Detected and relabelled rather than blended into the fit.
 SERVICE_EVENT_JUMP_PCT = 15.0
@@ -106,7 +106,7 @@ class ComponentRul:
     model_days_ceiling: Optional[int] = None
     disagrees_with_model: bool = False
     # True when this estimate was refit on the window *since* a detected
-    # service-event jump rather than the asset's full reading history —
+    # service-event jump rather than the asset's full reading history, 
     # i.e. "recently serviced, and here's the trend since then" instead of
     # "recently serviced, no post-service trend available yet".
     post_service: bool = False
@@ -116,8 +116,7 @@ def _linear_fit_with_se(xs: list[float], ys: list[float]) -> tuple[float, float,
     """OLS slope/intercept plus the standard error of the slope.
 
     The SE lets us turn a single point estimate into an honest uncertainty
-    band instead of presenting a bare day-count as if it were precise —
-    with only 4 observations that band is wide, which is the point: it
+    band instead of presenting a bare day-count as if it were precise, with only 4 observations that band is wide, which is the point: it
     should look uncertain, because it is.
     """
     n = len(xs)
@@ -169,7 +168,7 @@ def _fit_trend_from_points(
 ) -> ComponentRul:
     """OLS-fit a trend on `points` and classify it into a ComponentRul.
 
-    Shared by the whole-history fit and the post-service-jump refit — same
+    Shared by the whole-history fit and the post-service-jump refit, same
     significance test and RUL/uncertainty-band logic either way, just a
     different (and possibly shorter) window of readings.
     """
@@ -181,7 +180,7 @@ def _fit_trend_from_points(
     last_health = ys[-1]
 
     # A slope within its own standard error of zero is not evidence of a
-    # real trend in either direction — with only a handful of points,
+    # real trend in either direction, with only a handful of points,
     # "slightly positive" and "slightly negative" are both indistinguishable
     # from noise. Labelling that "Improving" (or extrapolating a failure
     # date from it) claims a confidence the data doesn't support; the honest
@@ -204,7 +203,7 @@ def _fit_trend_from_points(
         )
 
     if slope >= 0:
-        # Genuinely improving (e.g. component condition recovering) — the
+        # Genuinely improving (e.g. component condition recovering), the
         # slope clears the noise floor and points upward, a real signal.
         return ComponentRul(
             component=component,
@@ -224,7 +223,7 @@ def _fit_trend_from_points(
 
     # Uncertainty band from the slope's standard error (±1 SE on the slope,
     # propagated through the same extrapolation). With few points this is
-    # necessarily wide — that width is the honest signal, not a defect.
+    # necessarily wide, that width is the honest signal, not a defect.
     rul_low, rul_high = rul_days, rul_days
     if se_slope > 0:
         slope_low = slope - se_slope   # steeper decline → shorter RUL
@@ -234,7 +233,7 @@ def _fit_trend_from_points(
         if slope_high < 0:
             rul_low = _rul_from_slope(last_health, threshold, slope_high) or rul_days
         else:
-            rul_low = rul_days  # shallow-side SE flips to improving — can't bound further out
+            rul_low = rul_days  # shallow-side SE flips to improving, can't bound further out
         rul_low, rul_high = min(rul_low, rul_high), max(rul_low, rul_high)
 
     capped = rul_days > MAX_HORIZON_DAYS
@@ -280,7 +279,7 @@ def _estimate_component(
     current_health = points[-1][1]
 
     if len(points) < MIN_POINTS_FOR_TREND:
-        # Not enough history for a trend — fall back to a generic, clearly
+        # Not enough history for a trend. Fall back to a generic, clearly
         # low-confidence degradation assumption (0.05%/day, ~20 years to
         # threshold from 100%) so the UI still has *something* to show,
         # honestly labelled and still subject to the same horizon cap.
@@ -312,7 +311,7 @@ def _estimate_component(
     # would produce a slope that IS statistically real (not noise) but
     # describes that one-time step rather than an ongoing trend. Rather
     # than just flagging and giving up, refit the trend using only the
-    # readings from that event onward — that's the component's actual
+    # readings from that event onward, that's the component's actual
     # current trajectory, not one blended with its stale pre-service history.
     jump_idx = _detect_jump_index(points)
     if jump_idx is not None:
@@ -320,7 +319,7 @@ def _estimate_component(
         if len(post_service_points) >= MIN_POINTS_FOR_TREND:
             return _fit_trend_from_points(component, threshold, post_service_points, post_service=True)
 
-        # Only one reading since the service event — can't fit a line yet,
+        # Only one reading since the service event, can't fit a line yet,
         # so there's genuinely no trend to report, just the fact of the
         # recent service and its single follow-up reading.
         return ComponentRul(
@@ -351,7 +350,7 @@ def _apply_model_grounding(
       relevant to the maintenance timeline.
     - disagrees_with_model: this component's trend claims to be fine
       substantially *longer* than the whole-asset model's own maintenance
-      timeline — the model is trained on 96,827 rows and already consumes
+      timeline, the model is trained on 96,827 rows and already consumes
       this component's reading as one of its 58 features, so when the
       4-point trend is far more optimistic than the model, that's the trend
       likely being wrong (noise), not the model. Surfaced rather than
@@ -360,7 +359,7 @@ def _apply_model_grounding(
 
       Uses a proportional gap (component RUL more than double the model's
       ceiling, plus a fixed absolute floor) rather than a fixed "only when
-      the model says <=60 days" cutoff — a component claiming 730+ days
+      the model says <=60 days" cutoff, a component claiming 730+ days
       while the model's own ceiling is 98 days is just as much a real
       disagreement as one claiming 200 days while the model says 20.
     """
@@ -381,7 +380,7 @@ def _apply_model_grounding(
             continue
 
         # Flag when the component's own trend claims a runway meaningfully
-        # longer than the model's whole-asset ceiling — both an absolute
+        # longer than the model's whole-asset ceiling, both an absolute
         # margin (so a 35d vs 20d gap isn't flagged as "disagreement") and a
         # relative one (so the gap scales with the model's own horizon).
         gap = r.rul_days - model_days
@@ -400,7 +399,7 @@ def compute_asset_component_rul(
     ``batch_prediction`` lets a caller that already fetched the asset's
     PdmBatchPrediction row (e.g. the asset detail page's own prediction
     lookup) pass it straight in instead of this function re-querying the
-    same row — pass ``None`` (the default) to have it fetched here.
+    same row, pass ``None`` (the default) to have it fetched here.
     """
     asset = db.query(Asset.id).filter(Asset.id == asset_id).first()
     if asset is None:

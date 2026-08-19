@@ -1,4 +1,4 @@
-"""Manual debug script — check for a pgrst pre_request hook in Postgres settings.
+"""Manual debug script, check for a pgrst pre_request hook in Postgres settings.
 
 Run with: python -m scripts.manual.test_log_api
 """

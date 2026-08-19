@@ -168,7 +168,7 @@ def delete_notification(
 
 
 # Path is "" to match the GET above. It was "/", which registered this at
-# "/notifications/" while the list endpoint sat at "/notifications" — so
+# "/notifications/" while the list endpoint sat at "/notifications", so
 # "GET /notifications/" matched this route by path and returned 405 Method Not
 # Allowed instead of being redirected to the list. Both now live at the same
 # path, and Starlette redirects the trailing-slash form as normal.

@@ -41,7 +41,7 @@ from app.services.notification_service import NotificationService
 router = APIRouter(prefix="/tickets", tags=["Tickets"])
 log = logging.getLogger(__name__)
 
-# Supabase enums are lowercase — normalize incoming values
+# Supabase enums are lowercase, normalize incoming values
 VALID_STATUSES = {"open", "in_progress", "pending", "resolved", "closed", "cancelled"}
 VALID_PRIORITIES = {"low", "medium", "high"}
 VALID_CATEGORIES = {"electrical", "mechanical", "software"}
@@ -98,7 +98,7 @@ def create_ticket(
         data["predicted_category"] = _normalize_category(data["predicted_category"])
 
     # Tag the ticket with a warehouse so it shows up in warehouse-scoped
-    # ticket lists — prefer the linked asset's warehouse (authoritative),
+    # ticket lists, prefer the linked asset's warehouse (authoritative),
     # falling back to the creating admin's active warehouse. Without this,
     # tickets silently had a NULL warehouse_id and were invisible to the
     # scoped list/status-count endpoints.
@@ -143,7 +143,7 @@ def get_ticket_status_counts(
 ):
     """Aggregate ticket counts by status for dashboards.
     Everyone (users, admins, super_admins) sees counts scoped to their own
-    warehouse — same visibility as list_tickets/list_tickets_paginated/
+    warehouse, same visibility as list_tickets/list_tickets_paginated/
     get_ticket. Users additionally see tickets assigned to or created by
     them even if those fall outside their own warehouse.
     """
@@ -153,7 +153,7 @@ def get_ticket_status_counts(
     if is_admin_role(current_user):
         wh_id = active_warehouse_id(current_user)
         if wh_id:
-            # Tickets with no warehouse_id (orphaned — e.g. created without
+            # Tickets with no warehouse_id (orphaned, e.g. created without
             # an asset) stay visible to every admin rather than vanishing
             # from everyone's counts. Matches list_tickets/list_tickets_paginated.
             q = q.filter((Ticket.warehouse_id == wh_id) | (Ticket.warehouse_id.is_(None)))
@@ -196,7 +196,7 @@ def list_tickets(
 ):
     q = db.query(Ticket)
 
-    # Role-based scoping — matches /paginated and get_ticket: everyone
+    # Role-based scoping. Matches /paginated and get_ticket: everyone
     # (users, admins, super_admins) can see every ticket in their own
     # warehouse and can comment on it; only owners/admins may edit one
     # (enforced separately in update_my_ticket/update_ticket). Users also
@@ -218,7 +218,7 @@ def list_tickets(
             )
     else:
         # Pin to the admin's active warehouse, overriding any
-        # client-supplied warehouse_id — same pattern as departments.py.
+        # client-supplied warehouse_id, same pattern as departments.py.
         # Tickets with no warehouse_id (orphaned) stay visible to every
         # admin rather than becoming invisible to everyone.
         scoped_wh = active_warehouse_id(current_user)
@@ -262,7 +262,7 @@ def list_tickets_paginated(
 
     q = db.query(Ticket)
 
-    # Role-based scoping — see list_tickets.
+    # Role-based scoping, see list_tickets.
     if not is_admin_role(current_user):
         uid = str(getattr(current_user, "id", ""))
         user_wh_id = getattr(current_user, "warehouse_id", None)
@@ -279,7 +279,7 @@ def list_tickets_paginated(
             )
     else:
         # Pin to the admin's active warehouse, overriding any
-        # client-supplied warehouse_id — same pattern as departments.py.
+        # client-supplied warehouse_id, same pattern as departments.py.
         # Tickets with no warehouse_id (orphaned) stay visible to every
         # admin rather than becoming invisible to everyone.
         scoped_wh = active_warehouse_id(current_user)
@@ -341,7 +341,7 @@ def list_tickets_paginated(
 # (get_current_user): only the ticket's creator or an admin may modify it.
 
 def _is_admin(user: Profile) -> bool:
-    # Includes super_admin — see app.deps.is_admin_role.
+    # Includes super_admin, see app.deps.is_admin_role.
     return is_admin_role(user)
 
 
@@ -428,7 +428,7 @@ def create_my_ticket(
         status="open",
         priority=_normalize_priority(payload.priority) or "medium",
         predicted_category=_normalize_category(payload.category) or "mechanical",
-        created_by=str(current_user.id),  # forced — cannot be spoofed
+        created_by=str(current_user.id),  # forced, cannot be spoofed
     )
     db.add(obj)
     db.commit()
@@ -738,7 +738,7 @@ def preview_ticket(payload: TicketPreviewRequest, _: object = Depends(get_curren
 # Admin-gated, not user-gated: this forwards free text straight to a Hugging
 # Face Space, so any account could use it as an unmetered proxy to that Space
 # and exhaust it for the ticket-creation path that actually needs it. Ticket
-# creation is unaffected — it calls categorize_ticket_text() directly (see
+# creation is unaffected, it calls categorize_ticket_text() directly (see
 # create_ticket above) rather than going through this route, and no frontend
 # code calls this endpoint at all.
 @router.post(

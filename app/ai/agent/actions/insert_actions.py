@@ -18,8 +18,7 @@ _VALID_STATUSES = {"open", "in_progress", "pending", "resolved", "closed", "canc
 
 def _normalize_priority(raw: Optional[str]) -> str:
     """Best-effort normalization of the LLM's free-text priority guess.
-    Falls back to 'medium' for anything unrecognized rather than raising —
-    this is chat-agent output, not a strict API contract, so a silent
+    Falls back to 'medium' for anything unrecognized rather than raising, this is chat-agent output, not a strict API contract, so a silent
     fallback beats surfacing a generic error for a minor LLM quirk."""
     v = (raw or "medium").strip().lower()
     if v in {"critical", "urgent", "severe"}:
@@ -28,7 +27,7 @@ def _normalize_priority(raw: Optional[str]) -> str:
 
 
 def _normalize_status(raw: Optional[str]) -> Optional[str]:
-    """Same best-effort approach as _normalize_priority — returns None
+    """Same best-effort approach as _normalize_priority. Returns None
     (meaning "don't change it") for anything unrecognized instead of
     letting an invalid enum value hit the DB and fail the whole commit."""
     v = (raw or "").strip().lower().replace(" ", "_")

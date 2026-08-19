@@ -34,7 +34,7 @@ def generate(today: date | None = None, seed: int = C.RANDOM_SEED) -> dict[str, 
     dept_id = _dept_lookup(departments)
 
     assets, trajectories = fleet.build_fleet(source, today, rng)
-    # Vehicles are Logistics assets — that is the department that operates them.
+    # Vehicles are Logistics assets, that is the department that operates them.
     for a in assets:
         a["department_id"] = dept_id[(a["_warehouse_short"], "LOG")]
 
@@ -116,7 +116,7 @@ def write_csvs(tables: dict[str, list[dict]], out_dir: str = C.OUT_DIR) -> Path:
     """Write one CSV per table as the record of exactly what was generated.
 
     Internal helper keys (leading underscore) are dropped, and passwords are
-    never written — the roster CSV is a personnel record, not a credential dump.
+    never written, the roster CSV is a personnel record, not a credential dump.
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)

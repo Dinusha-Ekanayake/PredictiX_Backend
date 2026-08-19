@@ -1,4 +1,4 @@
-"""Manual debug script — inspect the log_api_request PostgREST function/policies.
+"""Manual debug script, inspect the log_api_request PostgREST function/policies.
 
 Run with: python -m scripts.manual.test_pgrst
 """

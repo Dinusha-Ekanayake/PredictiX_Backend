@@ -1,4 +1,4 @@
-"""PredictiX Chatbot – V3 Token-Optimized Router Agent.
+"""PredictiX Chatbot, V3 Token-Optimized Router Agent.
 
 Pipeline:
   1. ROUTER (8b-instant, ~80 tokens)  → classify intent into one of 7 categories
@@ -75,7 +75,7 @@ def _classify_intent(question: str) -> str:
     if q.startswith("faq") or "frequently asked" in q:
         return INTENT_FAQ
 
-    # Fast-path: navigation phrases — "open X", "go to X", "take me to X", "navigate to X"
+    # Fast-path: navigation phrases, "open X", "go to X", "take me to X", "navigate to X"
     NAV_TRIGGERS = (
         "open ", "go to ", "take me to ", "navigate to ", "show me the ",
         "bring me to ", "launch ", "redirect to ", "i want to go to ",

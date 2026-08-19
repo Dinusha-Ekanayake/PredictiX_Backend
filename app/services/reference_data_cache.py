@@ -5,8 +5,7 @@ to resolve an id -> name (user lists, asset lists, etc.) was paying a full
 DB round-trip (~150-800ms to the remote Supabase region) just to re-fetch a
 handful of rows that were almost certainly unchanged since the last request.
 
-This is a plain TTL cache (not a full-response cache like DashboardCache) —
-it only holds the {id: name} maps, rebuilt on demand when stale. Safe to call
+This is a plain TTL cache (not a full-response cache like DashboardCache), it only holds the {id: name} maps, rebuilt on demand when stale. Safe to call
 from any request path; on a cache miss it costs one query, same as before.
 """
 from __future__ import annotations

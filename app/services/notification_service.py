@@ -419,7 +419,8 @@ class NotificationService:
             to_emails: List of recipient email addresses
             subject: Email subject
             html_body: HTML body of the email
-            use_wh_key: If true, uses the WHBREVO api key if available.
+            use_wh_key: Send on the warehouse account (WH_BREVO_API_KEY),
+                which is what warehouse report mail goes out on.
             
         Returns:
             True if email sent successfully, False otherwise
@@ -450,7 +451,16 @@ class NotificationService:
 
         # 2. Secondary Fallback: Brevo API
         if use_wh_key:
-            api_key = os.getenv("WHBREVO") or os.getenv("BREVO_API_KEY")
+            api_key = os.getenv("WH_BREVO_API_KEY") or os.getenv("WHBREVO")
+            if not api_key:
+                # Falling back means warehouse report mail goes out on the
+                # general account. That is better than not sending, but it is
+                # not what was asked for, so it is stated rather than silent.
+                api_key = os.getenv("BREVO_API_KEY")
+                if api_key:
+                    print("[NOTIFICATION-WARNING] No warehouse Brevo key set "
+                          "(WH_BREVO_API_KEY/WHBREVO); sending on the general "
+                          "BREVO_API_KEY instead.", flush=True)
         else:
             api_key = os.getenv("BREVO_API_KEY")
 
@@ -644,7 +654,7 @@ class NotificationService:
                     </body>
                 </html>
                 """
-                NotificationService.send_email(admin_emails, subject, html_body, use_wh_key=True)
+                NotificationService.send_email(admin_emails, subject, html_body)
             
             print(f"[NOTIFICATION] Profile update notification processed for {user.full_name}")
             return True

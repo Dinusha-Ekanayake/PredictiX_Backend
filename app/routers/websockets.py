@@ -14,9 +14,9 @@ router = APIRouter()
 def _verify_ws_token(token: Optional[str], user_id: str) -> bool:
     """Return True only if `token` is a valid JWT whose subject matches user_id.
 
-    The notification socket used to trust the path user_id alone, so anyone
-    could subscribe to anyone else's stream. Now the caller must present their
-    own JWT (as a ?token= query param) and it must belong to that same user.
+    The path user_id alone proves nothing, so trusting it would let anyone
+    subscribe to anyone else's stream. The caller must present their own JWT
+    (as a ?token= query param) and it must belong to that same user.
     """
     if not token:
         return False
@@ -75,12 +75,12 @@ async def websocket_endpoint(
         # reach the browser: Starlette/ASGI closing a WebSocket that was
         # never accepted just fails the HTTP-level upgrade handshake, which
         # every browser reports to JS as the generic code 1006 (abnormal
-        # closure) — the real 1008 we send here never arrives client-side.
-        # Confirmed live: before this fix, an intentionally-invalid token
-        # produced `ws.onclose` with code 1006, indistinguishable from a
-        # plain network drop, which defeats the frontend's ability to tell
-        # "your session is dead, log in again" apart from "transient
-        # blip, just retry" (see NotificationBell.tsx). No message is ever
+        # closure), the real 1008 we send here never arrives client-side.
+        # Rejecting before accept therefore reaches the browser as 1006,
+        # indistinguishable from a plain network drop, which defeats the
+        # frontend's ability to tell "your session is dead, log in again"
+        # apart from "transient blip, just retry" (see NotificationBell.tsx).
+        # No message is ever
         # sent or received in the brief accepted-then-closed window, so
         # this doesn't grant an unauthenticated caller any real access.
         await websocket.accept()

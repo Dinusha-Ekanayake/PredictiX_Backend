@@ -5,7 +5,7 @@ maintenance tickets. Status transitions, assignment, deletion and viewing
 other users' tickets all live in the admin tickets router and are NOT exposed
 here.
 
-Inspired by — but deliberately separate from — ``app/routers/tickets.py`` so
+Inspired by, but deliberately separate from, ``app/routers/tickets.py`` so
 the admin section can keep evolving independently.
 """
 
@@ -39,7 +39,7 @@ router = APIRouter(prefix="/user/tickets", tags=["User - Tickets"])
 
 
 # ---------------------------------------------------------------------------
-# Phase 1 — listing & details
+# Phase 1, listing & details
 # ---------------------------------------------------------------------------
 
 
@@ -123,7 +123,7 @@ def get_my_ticket(
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 — create & update
+# Phase 2, create & update
 # ---------------------------------------------------------------------------
 
 
@@ -133,7 +133,7 @@ def get_my_ticket(
 )
 def preview_my_ticket_ai(
     payload: UserTicketPreviewRequest,
-    current_user: Profile = Depends(get_current_user),  # noqa: ARG001 — auth gate only
+    current_user: Profile = Depends(get_current_user),  # noqa: ARG001, auth gate only
     db: Session = Depends(get_db),
 ):
     """Run the AI models on the ticket draft and return predictions.
@@ -245,7 +245,7 @@ def update_my_ticket(
 
 
 # ---------------------------------------------------------------------------
-# Phase 3 — comments
+# Phase 3, comments
 # ---------------------------------------------------------------------------
 
 

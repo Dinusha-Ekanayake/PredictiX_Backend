@@ -12,7 +12,7 @@ router = APIRouter(
 
 
 def _can_view_ticket(ticket: Ticket, current_user: Profile) -> bool:
-    """Same rule as tickets.py's get_ticket/list scoping — see there for
+    """Same rule as tickets.py's get_ticket/list scoping, see there for
     the full rationale."""
     if is_admin_role(current_user):
         return True
@@ -24,8 +24,8 @@ def _can_view_ticket(ticket: Ticket, current_user: Profile) -> bool:
 
 
 # Status history is an audit trail. This endpoint took no caller identity, so
-# any authenticated user could append arbitrary transitions to any ticket —
-# including ones they cannot even view — and attribute them to whoever they
+# any authenticated user could append arbitrary transitions to any ticket, 
+# including ones they cannot even view, and attribute them to whoever they
 # liked. The application writes history itself when a ticket actually changes
 # (see the ticket services), so nothing in the product posts here.
 @router.post("/", response_model=TicketStatusHistoryOut, dependencies=[Depends(require_admin)])
@@ -47,9 +47,9 @@ def list_ticket_status_history(
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
-    # A ticket_id is required so this can be scoped — without one, any
-    # authenticated user could previously pull every ticket's status
-    # history fleet-wide, leaking cross-warehouse ticket activity.
+    # A ticket_id is required so this can be scoped. Without one, any
+    # authenticated user could pull every ticket's status history fleet-wide,
+    # leaking cross-warehouse ticket activity.
     if not ticket_id:
         raise HTTPException(status_code=400, detail="ticket_id is required")
 

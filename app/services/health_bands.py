@@ -11,7 +11,7 @@ reported 161 critical assets for Colombo; the assets list read
 Two separate problems caused that:
 
 1. **The dashboard thresholds were never calibrated.** ``health_score`` is
-   ``_compute_health_score`` in the batch service — the mean of five component
+   ``_compute_health_score`` in the batch service, the mean of five component
    health percentages *minus* a penalty for failure probability and urgency. It
    is therefore systematically lower than raw component health. Observed across
    the fleet: min 0.0, p25 35.0, median 42.6, p75 50.9, max **79.0**. Against a
@@ -20,8 +20,7 @@ Two separate problems caused that:
    rendered as Poor or Critical. An alert that fires on nine assets in ten is
    not an alert.
 
-2. **``assets.health_band`` had no owner.** Nothing in the backend wrote it —
-   it was set once at seed time and read forever after, so it could only drift.
+2. **``assets.health_band`` had no owner.** Nothing in the backend wrote it, it was set once at seed time and read forever after, so it could only drift.
    ``batch_prediction_service`` now maintains it from the same score through
    :func:`band_for`, which is what makes the two screens agree by construction
    rather than by coincidence.
@@ -39,7 +38,7 @@ band means something and every band is reachable:
 
 Cross-checked against the model's own decision layer
 (``pdm_decision_service.build_decision``), which independently puts ~30% of the
-fleet at ``urgent`` — consistent with the ~35% landing in poor/critical here,
+fleet at ``urgent``, consistent with the ~35% landing in poor/critical here,
 and with the 29% positive rate the v7 classifier was trained on.
 
 These bands describe *relative fleet condition*, not an absolute engineering
@@ -72,7 +71,7 @@ CRITICAL_THRESHOLD: float = HEALTH_BAND_THRESHOLDS[-1][1]
 
 
 def band_for(score: float | int | None) -> str | None:
-    """Band a health score. ``None`` in, ``None`` out — an asset with no
+    """Band a health score. ``None`` in, ``None`` out, an asset with no
     completed prediction has no band, which is distinct from a bad one."""
     if score is None:
         return None

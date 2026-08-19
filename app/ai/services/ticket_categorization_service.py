@@ -1,4 +1,4 @@
-"""Ticket categorization service — calls the PredictiX Gradio Space API."""
+"""Ticket categorization service, calls the PredictiX Gradio Space API."""
 
 import json
 import os

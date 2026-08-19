@@ -150,7 +150,7 @@ def test_as_09_asset_summary(client, auth, ctx, requires_hf):
     assert text_out, "an empty summary was returned"
 
     # The response now says which path produced the text. The expectation is a
-    # model-generated summary, so a template means the Space did not answer —
+    # model-generated summary, so a template means the Space did not answer, 
     # reported rather than smoothed over, because model_version is stamped
     # either way and would otherwise imply a model wrote this.
     assert body.get("source") == "model", (

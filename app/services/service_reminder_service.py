@@ -1,4 +1,4 @@
-"""Service reminder logic — autonomous sweep + manual admin trigger.
+"""Service reminder logic, autonomous sweep + manual admin trigger.
 
 Reads next_service_date from the assets table. The same _send_and_log()
 function is used by both the daily cron job and the admin button.
@@ -49,7 +49,7 @@ def _already_sent_auto(
 
 
 def _already_sent_auto_keys(db: Session, asset_ids: list[UUID]) -> set[tuple[UUID, date, int]]:
-    """Batch version of _already_sent_auto — one query for the whole sweep
+    """Batch version of _already_sent_auto, one query for the whole sweep
     instead of one query per due asset."""
     if not asset_ids:
         return set()
@@ -143,7 +143,7 @@ def _send_and_log(
     )
     db.commit()
 
-    # In-app notification is independent of email deliverability — a bounced
+    # In-app notification is independent of email deliverability, a bounced
     # email must not also suppress the in-app alert, and vice versa.
     try:
         InAppNotificationService.notify_user(
@@ -205,7 +205,7 @@ def send_manual_reminder(
 
 
 def run_auto_reminder_sweep(db: Session) -> dict:
-    """Daily job — find assets where next_service_date is close and email assignees."""
+    """Daily job, find assets where next_service_date is close and email assignees."""
     offsets = _get_reminder_offsets()
     today = date.today()
     target_dates = {today + timedelta(days=n): n for n in offsets}
@@ -228,8 +228,8 @@ def run_auto_reminder_sweep(db: Session) -> dict:
         log.info("Service reminder sweep complete — %s", stats)
         return stats
 
-    # Batch both lookups that were previously issued once per due asset:
-    # already-sent dedup checks and assignee profile resolution.
+    # Both lookups are batched rather than issued once per due asset: the
+    # already-sent dedup check and assignee profile resolution.
     already_sent_keys = _already_sent_auto_keys(db, [a.id for a in due_assets])
     assignee_ids = {a.assigned_to for a in due_assets if a.assigned_to is not None}
     profiles_by_id = {

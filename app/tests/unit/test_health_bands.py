@@ -1,8 +1,8 @@
 """Health bands are the one definition every screen bands a score with.
 
-Several parts of the system used to carry their own thresholds, which put the
-same asset in different bands depending on which screen you looked at. These
-tests pin the shared definition and the two places that derive from it.
+Thresholds kept in more than one place put the same asset in different bands
+depending on the screen. These tests pin the shared definition and the two
+places that derive from it.
 """
 import pytest
 

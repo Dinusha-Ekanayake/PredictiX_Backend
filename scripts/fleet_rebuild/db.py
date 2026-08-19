@@ -39,7 +39,7 @@ def connect(env: dict[str, str] | None = None):
     return conn
 
 
-# Columns that are jsonb in the database — Python dict/list must be serialised.
+# Columns that are jsonb in the database. Python dict/list must be serialised.
 JSON_COLUMNS = {"metadata", "meta", "reading_payload", "contributing_factors",
                 "top_explanations", "feature_snapshot"}
 

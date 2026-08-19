@@ -10,7 +10,7 @@ same way regardless of which model generation is loaded.
 Categorical handling: LightGBM boosters trained on a pandas DataFrame with
 ``pandas_categorical`` metadata require inference-time categorical columns
 to be ``pd.Categorical`` with the *same* category vocabulary (order
-included) as training — passing raw strings/ints raises "train and valid
+included) as training, passing raw strings/ints raises "train and valid
 dataset categorical_feature do not match". ``LgbModelBundle.categories``
 holds that vocabulary, extracted once at load time via
 ``Booster.pandas_categorical``, and ``build_frame()`` applies it.

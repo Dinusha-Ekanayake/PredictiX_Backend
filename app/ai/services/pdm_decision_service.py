@@ -1,15 +1,15 @@
-"""PdM decision layer — reconciles classifier + regressor + health score into
+"""PdM decision layer, reconciles classifier + regressor + health score into
 one tiered recommendation instead of three independently-speaking numbers.
 
-Problem this solves: the classifier, regressor, and health score each answer
-a different question (should we act? / when? / how healthy is it overall?),
-but were previously surfaced to the UI independently — producing confusing
-combinations like "maintenance not required" next to a specific hard date.
+The classifier, regressor, and health score each answer a different question
+(should we act? / when? / how healthy is it overall?). Surfaced to the UI
+independently they produce contradictory pairings, such as "maintenance not
+required" next to a specific hard date.
 
 This module makes the classifier the gatekeeper: it decides whether a date
 is even actionable. The regressor's date is only shown as a hard commitment
 when the classifier agrees action is needed soon; otherwise it's demoted to
-a soft "no service expected for ~N months" framing. Purely additive — it
+a soft "no service expected for ~N months" framing. Purely additive, it
 does not change what the classifier/regressor/health-score compute, only how
 their outputs are interpreted together.
 """
@@ -44,7 +44,7 @@ def _classifier_tier(failure_probability: float, urgent_threshold: float) -> str
 def classifier_only_tier(failure_probability: float, clf_threshold: float) -> str:
     """The classifier-alone tier ("urgent" | "watch" | "healthy"), for
     callers that don't have a health_score available to run the full
-    build_decision reconciliation below — e.g. the standalone
+    build_decision reconciliation below, e.g. the standalone
     /predictions/classification debug endpoint. Uses the exact same
     threshold boundaries build_decision does, so a probability-only
     estimate can never disagree with the fully-reconciled one for the
@@ -80,8 +80,8 @@ def build_decision(
 
     Returns a dict with:
       - tier: "urgent" | "watch" | "healthy" | "conflict"
-      - agreement: bool — do the classifier-derived and health-derived tiers match?
-      - display_mode: "date" | "soft_estimate" | "horizon" — how the UI should
+      - agreement: bool, do the classifier-derived and health-derived tiers match?
+      - display_mode: "date" | "soft_estimate" | "horizon", how the UI should
         render the regressor's predicted_maintenance_date.
       - horizon_text: human copy to show when display_mode != "date"
       - recommended_action: short actionable string
@@ -92,7 +92,7 @@ def build_decision(
     if clf_tier == "urgent":
         tier = "urgent"
     elif clf_tier == "healthy" and health_tier == "urgent":
-        # Classifier says fine, health score says critical — the two most
+        # Classifier says fine, health score says critical, the two most
         # information-dense signals disagree. Surface it rather than average
         # it away; this is exactly the case a human should look at.
         tier = "conflict"

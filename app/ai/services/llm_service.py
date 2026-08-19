@@ -23,20 +23,28 @@ log = logging.getLogger("predictix.llm")
 #
 # Probed against the live API 2026-08-12 with the deployed key:
 #   llama-3.3-70b-versatile   OK
-#   llama-3.1-8b-instant      403 — listed in models.list() but not permitted
+#   llama-3.1-8b-instant      403, listed in models.list() but not permitted
 #                                   for this key's tier
-#   llama3-8b-8192            400 — decommissioned
-#   llama-3.1-70b-versatile   400 — decommissioned
+#   llama3-8b-8192            400, decommissioned
+#   llama-3.1-70b-versatile   400, decommissioned
 #
 # The 403 is a key/tier property, not a property of the model, so 8b-instant is
 # kept as a fallback: a key with broader access would use it, and on this key it
-# is simply never reached. Re-probe before trusting these notes — the point of
+# is simply never reached. Re-probe before trusting these notes, the point of
 # the cascade is that Groq retires models faster than this file gets edited.
+# The chatbot's first-choice model. WH_GROQ_MODEL is still read so a
+# deployment already carrying that name keeps the model it was configured with.
+CHATBOT_MODEL = (
+    os.getenv("CHATBOT_GROQ_MODEL")
+    or os.getenv("WH_GROQ_MODEL")
+    or "llama-3.3-70b-versatile"
+)
+
 MODEL_COMPOUND = "groq/compound"
 MODEL_COMPOUND_MINI = "groq/compound-mini"
 
 FAST_MODELS = [
-    os.getenv("WH_GROQ_MODEL", "llama-3.3-70b-versatile"),
+    CHATBOT_MODEL,
     "groq/compound-mini",
     "groq/compound",
     "qwen/qwen3.6-27b",
@@ -50,7 +58,7 @@ HEAVY_MODELS = [
 ]
 
 MODEL_CASCADE = [
-    os.getenv("WH_GROQ_MODEL", "llama-3.3-70b-versatile"),
+    CHATBOT_MODEL,
     "llama-3.1-8b-instant",
     "groq/compound-mini",
     "groq/compound",
@@ -62,7 +70,13 @@ DEFAULT_MODEL = MODEL_COMPOUND_MINI
 
 
 def _get_api_keys() -> list[str]:
-    """Retrieve all configured Groq API keys in priority order."""
+    """Groq keys this service may use, in priority order.
+
+    Groq backs the chatbot and nothing else: warehouse report generation runs
+    on OpenRouter (see app/agents/report_agents._get_llm). Every Groq key in
+    the environment therefore serves this one purpose, and the extras act as
+    failover when the first is rate-limited.
+    """
     keys: list[str] = []
     for var in ["CHATBOT_GROQ_API_KEY", "WH_GROQ_API_KEY", "GROQ_API_KEY"]:
         val = os.getenv(var)
@@ -187,7 +201,7 @@ def call_groq(
 
 
 def ask_llm(context: str, question: str) -> str:
-    """Legacy RAG LLM call – kept for backwards compatibility with /chatbot/ask."""
+    """Legacy RAG LLM call, kept for backwards compatibility with /chatbot/ask."""
     try:
         res, msg = call_groq(
             messages=[
