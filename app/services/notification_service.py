@@ -449,13 +449,9 @@ class NotificationService:
             print(f"[NOTIFICATION-WARNING] Direct SMTP failed: {smtp_err}, trying Brevo API...", flush=True)
 
         # 2. Secondary Fallback: Brevo API
-        if use_wh_key:
-            api_key = os.getenv("WHBREVO") or os.getenv("BREVO_API_KEY")
-        else:
-            api_key = os.getenv("BREVO_API_KEY")
-
-        sender_email = os.getenv("BREVO_SENDER_EMAIL", "neuromindspredictix@gmail.com")
-        sender_name = os.getenv("BREVO_SENDER_NAME", "PredictiX System")
+        api_key = os.getenv("BREVO_API_KEY")
+        sender_email = os.getenv("BREVO_SENDER_EMAIL", "neuromindspredictix@11453287.brevosend.com")
+        sender_name = os.getenv("BREVO_SENDER_NAME", "PredictiX Admin")
 
         if api_key:
             try:
@@ -480,9 +476,7 @@ class NotificationService:
                     return True
                 print(f"[NOTIFICATION-ERROR] Brevo API returned {resp.status_code}: {resp.text[:200]}", flush=True)
             except Exception as brevo_err:
-                print(f"[NOTIFICATION-ERROR] Brevo API call failed: {brevo_err}", flush=True)
-        else:
-            print("[NOTIFICATION] Email service disabled - BREVO_API_KEY not configured")
+                print(f"[NOTIFICATION-ERROR] Brevo sending failed: {brevo_err}", flush=True)
 
         return False
     

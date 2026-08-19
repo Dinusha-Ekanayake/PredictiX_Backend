@@ -1,11 +1,12 @@
 import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import String, cast
 from sqlalchemy.orm import Session
 from uuid import UUID
 
-from ..deps import get_db, get_current_user
+from ..deps import get_db, get_current_user, is_admin_role
 from ..models import Notification, Profile
 from ..schemas.notification import NotificationCreate, NotificationOut
 
@@ -107,9 +108,13 @@ def mark_notification_read(
         raise HTTPException(status_code=404, detail="Notification not found")
 
     notification.status = "read"
+    # read_at is what the UI sorts and groups by, so a status change without a
+    # timestamp leaves the row looking unread to anything that reads the date.
+    if notification.read_at is None:
+        notification.read_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(notification)
-    
+
     return notification
 
 
@@ -122,10 +127,13 @@ def mark_all_notifications_read(
     db.query(Notification).filter(
         (Notification.user_id == current_user.id)
         & (cast(Notification.status, String) == "unread")
-    ).update({"status": "read"}, synchronize_session=False)
-    
+    ).update(
+        {"status": "read", "read_at": datetime.now(timezone.utc)},
+        synchronize_session=False,
+    )
+
     db.commit()
-    
+
     return {"message": "All notifications marked as read"}
 
 
@@ -181,13 +189,32 @@ async def create_notification(
     if notif_type == "system_toast":
         notif_type = "system"
 
+    # Every field NotificationCreate declares is stored: user_id, channel and
+    # the three related_* ids. A field accepted by the schema and then dropped
+    # would leave the caller with no sign that it was ignored.
+    #
+    # Targeting another user is an admin action. Without this check any signed
+    # in account could post into anyone else's feed.
+    target_user_id = current_user.id
+    if data.user_id and str(data.user_id) != str(current_user.id):
+        if not is_admin_role(current_user):
+            raise HTTPException(
+                status_code=403,
+                detail="Only admins can create notifications for another user",
+            )
+        target_user_id = data.user_id
+
     notification = Notification(
-        user_id=current_user.id,
+        user_id=target_user_id,
         title=data.title,
         message=data.message,
         type=notif_type,
+        channel=data.channel or "in_app",
+        related_asset_id=data.related_asset_id,
+        related_ticket_id=data.related_ticket_id,
+        related_report_id=data.related_report_id,
         meta=meta_data,
-        status="unread"
+        status="unread",
     )
     
     try:

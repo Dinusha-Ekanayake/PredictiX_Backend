@@ -13,7 +13,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from sqlalchemy import text
+from sqlalchemy import text, or_, and_, func, cast, String
 from sqlalchemy.orm import Session
 
 from app.db.supabase_client import supabase
@@ -382,6 +382,210 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
     # Collect fallback messages from models
     fallback_msg = ""
     q_lower = question.lower()
+
+    # ── Fast-Path 0: Direct Ticket Details Lookup ────────────────────────────
+    import re
+    from datetime import datetime
+    from app.models import Ticket, Profile, Asset
+    ticket_match = re.search(r"\b(TKT-\d{4}-\d+|\bT-\d+|\bTKT-\d+|#\d+|\bT\d{3,5}\b)\b", question, re.IGNORECASE)
+    is_ticket_query = "ticket" in q_lower or ticket_match is not None
+    if is_ticket_query and (ticket_match or "detail" in q_lower or "show" in q_lower or "info" in q_lower or "status of" in q_lower):
+        try:
+            target_num = ticket_match.group(0).replace("#", "").strip() if ticket_match else None
+            t = None
+            if target_num:
+                t = ctx.db.query(Ticket).filter(Ticket.ticket_number.ilike(f"%{target_num}%")).first()
+            if not t and "detail" in q_lower:
+                t = ctx.db.query(Ticket).order_by(Ticket.created_at.desc()).first()
+
+            if t:
+                creator = ctx.db.query(Profile).filter(Profile.id == t.created_by).first() if t.created_by else None
+                creator_name = creator.full_name if creator else "System / User"
+                
+                assignee = ctx.db.query(Profile).filter(Profile.id == t.assigned_to).first() if t.assigned_to else None
+                assignee_name = assignee.full_name if assignee else "Unassigned"
+                
+                asset = ctx.db.query(Asset).filter(Asset.id == t.asset_id).first() if t.asset_id else None
+                asset_info = f"{asset.asset_name} (`{asset.asset_code}`)" if asset else "Not linked to specific asset"
+                
+                created_date = (t.created_at or datetime.now()).strftime('%B %d, %Y at %I:%M %p')
+                base_path = "/admin/tickets" if ctx.is_admin else "/user/tickets"
+                
+                ans = (
+                    f"🎫 **Ticket Details: {t.ticket_number}**\n\n"
+                    f"• **Title:** {t.title}\n"
+                    f"• **Status:** `{str(t.status).upper()}`\n"
+                    f"• **Priority:** `{str(t.priority or 'MEDIUM').upper()}`\n"
+                    f"• **Category:** {str(t.final_category or t.predicted_category or 'General').title()}\n"
+                    f"• **Asset:** {asset_info}\n"
+                    f"• **Created By:** {creator_name}\n"
+                    f"• **Assigned To:** {assignee_name}\n"
+                    f"• **Created Date:** {created_date}\n\n"
+                    f"**Description:**\n{t.description or 'No description provided.'}"
+                )
+                return {
+                    "answer": ans,
+                    "action_buttons": [
+                        {"label": f"Open Ticket {t.ticket_number}", "path": f"{base_path}?ticket_id={t.id}"},
+                        {"label": "Tickets Dashboard", "path": base_path}
+                    ]
+                }
+        except Exception as e:
+            log.error("Direct ticket lookup failed: %s", e)
+
+    # ── Fast-Path 0.1: Specific User Details Lookup with RBAC Enforcement ──────
+    from app.models import Department, Warehouse, PdmBatchPrediction
+    user_detail_triggers = ["user ", "profile of", "details of user", "about user", "who is ", "employee "]
+    if any(ut in q_lower for ut in user_detail_triggers) and not any(k in q_lower for k in ["how many user", "total user", "count of user", "number of user", "create user"]):
+        # 1. RBAC Check: Only admins can view other users' profiles
+        if not ctx.is_admin:
+            return {
+                "answer": (
+                    "🔒 **Access Restricted**\n\n"
+                    "Only administrators have permission to view other team members' full profile details, contact information, and assigned asset rosters.\n\n"
+                    "You can view your own profile and assigned assets in the **My Profile** section."
+                ),
+                "action_buttons": [{"label": "Go to My Profile", "path": "/user/profile"}]
+            }
+
+        # 2. Extract search term
+        clean_user = re.sub(r'^(give me|show me|details of|info on|about|user|profile of|\s|")+|"+$', '', question, flags=re.IGNORECASE).strip()
+        clean_user = re.sub(r'\b(user|profile|details|info)\b', '', clean_user, flags=re.IGNORECASE).strip(' "\'')
+        
+        if clean_user and len(clean_user) >= 2:
+            target_user = ctx.db.query(Profile).filter(
+                or_(
+                    Profile.full_name.ilike(f"%{clean_user}%"),
+                    Profile.email.ilike(f"%{clean_user}%"),
+                    Profile.employee_id.ilike(f"%{clean_user}%")
+                )
+            ).first()
+
+            if target_user:
+                # Resolve department and warehouse
+                dept = ctx.db.query(Department).filter(Department.id == target_user.department_id).first() if target_user.department_id else None
+                dept_name = dept.name if dept else "Not Assigned"
+                
+                wh = ctx.db.query(Warehouse).filter(Warehouse.id == target_user.warehouse_id).first() if target_user.warehouse_id else None
+                wh_name = wh.name if wh else "Fleet-Wide"
+                
+                # Fetch assigned assets
+                assigned_assets = ctx.db.query(Asset).filter(Asset.assigned_to == target_user.id).all()
+                if assigned_assets:
+                    asset_lines = "\n".join([f"• **{a.asset_name}** (`{a.asset_code}`) — {str(a.category or a.vehicle_type or 'Vehicle').title()} [Status: `{str(a.status).upper()}`]" for a in assigned_assets])
+                else:
+                    asset_lines = "• *No assets currently assigned.*"
+                    
+                # Fetch active assigned tickets
+                assigned_tickets = ctx.db.query(Ticket).filter(
+                    Ticket.assigned_to == target_user.id,
+                    Ticket.status.notin_(('closed', 'cancelled'))
+                ).all()
+                if assigned_tickets:
+                    ticket_lines = "\n".join([f"• **{t.ticket_number}:** {t.title} [Priority: `{str(t.priority).upper()}`, Status: `{str(t.status).upper()}`]" for t in assigned_tickets[:5]])
+                else:
+                    ticket_lines = "• *No active tickets currently assigned.*"
+
+                role_label = str(target_user.role).replace('_', ' ').upper()
+                status_badge = "✅ ACTIVE" if target_user.status == "active" else "❌ " + str(target_user.status).upper()
+
+                ans = (
+                    f"👤 **User Profile: {target_user.full_name}**\n\n"
+                    f"• **Employee ID:** `{target_user.employee_id or 'N/A'}`\n"
+                    f"• **Email:** {target_user.email}\n"
+                    f"• **Role:** `{role_label}`\n"
+                    f"• **Status:** `{status_badge}`\n"
+                    f"• **Department:** {dept_name}\n"
+                    f"• **Warehouse:** {wh_name}\n"
+                    f"• **Phone:** {target_user.phone or 'Not provided'}\n\n"
+                    f"🚗 **Assigned Assets ({len(assigned_assets)}):**\n"
+                    f"{asset_lines}\n\n"
+                    f"🎫 **Active Assigned Tickets ({len(assigned_tickets)}):**\n"
+                    f"{ticket_lines}"
+                )
+                return {
+                    "answer": ans,
+                    "action_buttons": [
+                        {"label": f"View {target_user.full_name}", "path": f"/admin/users?user_id={target_user.id}"},
+                        {"label": "User Management", "path": "/admin/users"}
+                    ]
+                }
+
+    # ── Fast-Path 0.2: Specific Asset Details Lookup by Name or Code/ID ──────
+    asset_detail_triggers = ["asset ", "details of asset", "about asset", "show asset", "info on asset", "vehicle ", "truck ", "forklift "]
+    asset_code_match = re.search(r"\b(LLX-[A-Z]+-\d+|AST-[A-Z0-9]+|FL-\d+|FL\d+|[A-Z]{2,4}-\d{3,5})\b", question, re.IGNORECASE)
+    if (any(at in q_lower for at in asset_detail_triggers) or asset_code_match is not None) and not any(k in q_lower for k in ["how many asset", "total asset", "count of asset", "number of asset", "create asset", "most critical", "critical asset"]):
+        clean_asset = asset_code_match.group(0).strip() if asset_code_match else ""
+        if not clean_asset:
+            clean_asset = re.sub(r'^(give me|show me|details of|info on|about|asset|vehicle|\s|")+|"+$', '', question, flags=re.IGNORECASE).strip()
+            clean_asset = re.sub(r'\b(asset|vehicle|details|info)\b', '', clean_asset, flags=re.IGNORECASE).strip(' "\'')
+        
+        if clean_asset and len(clean_asset) >= 2:
+            target_asset = ctx.db.query(Asset).filter(
+                or_(
+                    Asset.asset_code.ilike(f"%{clean_asset}%"),
+                    Asset.asset_name.ilike(f"%{clean_asset}%"),
+                    Asset.registration_number.ilike(f"%{clean_asset}%"),
+                    Asset.vin.ilike(f"%{clean_asset}%")
+                )
+            ).first()
+
+            if target_asset:
+                # Assignee details
+                assignee = ctx.db.query(Profile).filter(Profile.id == target_asset.assigned_to).first() if target_asset.assigned_to else None
+                assignee_str = f"{assignee.full_name} ({assignee.email})" if assignee else "Unassigned"
+                
+                # Warehouse details
+                wh = ctx.db.query(Warehouse).filter(Warehouse.id == target_asset.warehouse_id).first() if target_asset.warehouse_id else None
+                wh_name = wh.name if wh else "Central Fleet"
+                
+                # Department details
+                dept = ctx.db.query(Department).filter(Department.id == target_asset.department_id).first() if target_asset.department_id else None
+                dept_name = dept.name if dept else "Operations"
+
+                # Predictive AI Health & Failure Risk
+                pdm = ctx.db.query(PdmBatchPrediction).filter(
+                    PdmBatchPrediction.asset_id == target_asset.id,
+                    PdmBatchPrediction.status == "ok"
+                ).first()
+                
+                health_val = f"{int(round(float(pdm.health_score)))}%" if (pdm and pdm.health_score is not None) else f"{target_asset.criticality_score or 75}%"
+                fail_prob = f"{round(float(pdm.failure_probability or 0) * 100, 1)}%" if (pdm and pdm.failure_probability is not None) else "Low"
+                risk_lvl = str(pdm.risk_level).upper() if (pdm and pdm.risk_level) else str(target_asset.health_band or 'GOOD').upper()
+
+                # Open tickets for this asset
+                open_tickets = ctx.db.query(Ticket).filter(
+                    Ticket.asset_id == target_asset.id,
+                    Ticket.status.notin_(('closed', 'cancelled'))
+                ).all()
+                if open_tickets:
+                    ticket_summary = "\n".join([f"• **{t.ticket_number}:** {t.title} [Priority: `{str(t.priority).upper()}`, Status: `{str(t.status).upper()}`]" for t in open_tickets])
+                else:
+                    ticket_summary = "• *No active open maintenance tickets.*"
+
+                base_path = "/admin/assets" if ctx.is_admin else "/user/assets"
+                
+                ans = (
+                    f"⚙️ **Asset Details: {target_asset.asset_name} [{target_asset.asset_code}]**\n\n"
+                    f"• **Category:** {str(target_asset.category or target_asset.vehicle_type or 'Vehicle').title()}\n"
+                    f"• **Status:** `{str(target_asset.status).replace('_', ' ').upper()}`\n"
+                    f"• **Health Band:** `{risk_lvl}` (Health Score: {health_val})\n"
+                    f"• **Failure Risk:** {fail_prob}\n"
+                    f"• **Assigned To:** {assignee_str}\n"
+                    f"• **Warehouse Location:** {wh_name} ({dept_name})\n"
+                    f"• **Registration / VIN:** `{target_asset.registration_number or target_asset.vin or 'N/A'}`\n"
+                    f"• **Current Mileage:** {target_asset.current_mileage or '0'} km\n"
+                    f"• **Next Scheduled Service:** {target_asset.next_service_date or 'Regular inspection'}\n\n"
+                    f"🎫 **Active Maintenance Tickets ({len(open_tickets)}):**\n"
+                    f"{ticket_summary}"
+                )
+                return {
+                    "answer": ans,
+                    "action_buttons": [
+                        {"label": f"Open {target_asset.asset_code}", "path": f"{base_path}?asset_id={target_asset.id}"},
+                        {"label": "Assets Fleet", "path": base_path}
+                    ]
+                }
 
     # ── Fast-Path A: Critical Asset Lookups ───────────────────────────────────
     if any(k in q_lower for k in ["critical asset", "most critical", "highest risk", "most at risk", "urgent asset", "lowest health"]):
@@ -834,7 +1038,7 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                 )
                 corrected_sql_raw, _ = call_groq(
                     messages=[{"role": "user", "content": fix_prompt}],
-                    model="llama-3.3-70b-versatile",
+                    model=MODEL_COMPOUND,
                     max_tokens=350,
                     temperature=0.1,
                 )

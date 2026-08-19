@@ -153,11 +153,81 @@ jobs:
           DISABLE_HF_MODELS: "true"
         run: pytest app/tests/integration -m integration
 
-  # ── 4. One status check for branch protection to require. ─────────────────
+  # ── 4. Functional test plan. One case per row of the report's tables. ─────
+  functional-tests:
+    name: Functional test plan
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    timeout-minutes: 40
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    environment: ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run the functional suite
+        # Prints the ID / case / expected / status table the project report
+        # carries, and exits non-zero if any case fails.
+        #
+        # HF_HUB_OFFLINE is forced to 0 because app/main.py defaults it to 1.
+        # AS-09 exists specifically to detect the summary Space being
+        # unreachable, and leaving inference off would make it skip rather than
+        # report — which is the thing it was written to catch.
+        env:
+          HF_HUB_OFFLINE: "0"
+          TRANSFORMERS_OFFLINE: "0"
+          DISABLE_HF_MODELS: "false"
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_AI_SPACE_URL: ${{ secrets.HF_AI_SPACE_URL }}
+        run: python scripts/run_functional_tests.py --detail
+
+      - name: Markdown tables for the report
+        if: always()
+        run: |
+          # functional_results.json survives the step above, so this only
+          # reformats it rather than running the suite a second time.
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, pathlib
+          rows = json.loads(pathlib.Path("functional_results.json").read_text("utf-8"))
+          label = {"PASS": "Pass", "FAIL": "**Fail**",
+                   "FRONTEND": "Frontend", "SKIP": "Skipped"}
+          print("## Functional test plan\n")
+          print("| ID | Test Case | Expected Result | Status |")
+          print("| --- | --- | --- | --- |")
+          for r in sorted(rows, key=lambda r: r["cid"]):
+              note = f" — {r['detail'][:80]}" if r["status"] == "FAIL" else ""
+              print(f"| {r['cid']} | {r['title']} | {r['expected']} "
+                    f"| {label[r['status']]}{note} |")
+          PY
+
+      - name: Upload functional results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: functional-results
+          path: functional_results.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  # ── 5. One status check for branch protection to require. ─────────────────
   ci-passed:
     name: CI passed
     runs-on: ubuntu-latest
-    needs: [static-checks, unit-tests, integration-tests]
+    needs: [static-checks, unit-tests, integration-tests, functional-tests]
     if: always()
     steps:
       - name: Fail if any job did not succeed
@@ -165,12 +235,15 @@ jobs:
           echo "static-checks:      ${{ needs.static-checks.result }}"
           echo "unit-tests:         ${{ needs.unit-tests.result }}"
           echo "integration-tests:  ${{ needs.integration-tests.result }}"
-          # "skipped" is acceptable for integration on a fork PR; "failure"
-          # and "cancelled" are not acceptable anywhere.
+          echo "functional-tests:   ${{ needs.functional-tests.result }}"
+          # "skipped" is acceptable for the database-backed jobs on a fork PR;
+          # "failure" and "cancelled" are not acceptable anywhere.
           if [[ "${{ needs.static-checks.result }}" != "success" ]] \
           || [[ "${{ needs.unit-tests.result }}" != "success" ]] \
           || [[ "${{ needs.integration-tests.result }}" == "failure" ]] \
-          || [[ "${{ needs.integration-tests.result }}" == "cancelled" ]]; then
+          || [[ "${{ needs.integration-tests.result }}" == "cancelled" ]] \
+          || [[ "${{ needs.functional-tests.result }}" == "failure" ]] \
+          || [[ "${{ needs.functional-tests.result }}" == "cancelled" ]]; then
             echo "::error::CI failed."
             exit 1
           fi

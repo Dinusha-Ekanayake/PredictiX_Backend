@@ -36,9 +36,63 @@ build cannot reach production.
 | job | needs a database | runs on |
 | --- | --- | --- |
 | `static-checks` | no | every PR and push |
-| `unit-tests` (61 tests) | no | every PR and push |
-| `integration-tests` (30 tests) | yes | non-fork PRs and pushes |
+| `unit-tests` | no | every PR and push |
+| `integration-tests` | yes | non-fork PRs and pushes |
+| `functional-tests` | yes | non-fork PRs and pushes |
 | `ci-passed` | no | aggregates the above |
+
+`functional-tests` runs the module-by-module test plan: one case per row of the
+report's tables in §7.3, keyed by the same ids (AU-01, PM-05, and so on). It
+prints the ID / case / expected / status table, writes the markdown version to
+the job summary, and uploads `functional_results.json` as an artifact.
+
+Run it locally with:
+
+```bash
+python scripts/run_functional_tests.py             # every module
+python scripts/run_functional_tests.py --module PM # one module
+python scripts/run_functional_tests.py --detail    # with failure reasons
+python scripts/run_functional_tests.py --md        # markdown for the report
+```
+
+Three outcomes are possible and they are not interchangeable. `PASS` means the
+expectation held against the live system. `FAIL` means it did not, and is
+reported as a defect rather than smoothed over. `FRONTEND` means the behaviour
+has no server-side surface to assert, so the backend suite does not judge it and
+the frontend suite covers it instead — AU-08, NS-07 and NS-08 are the three.
+
+A case is never marked `PASS` because it was awkward to test.
+
+### Cases that depend on an external model
+
+Three external dependencies decide whether a case can be judged at all, and the
+suite refuses to guess when one is missing.
+
+| dependency | cases | absent → |
+| --- | --- | --- |
+| `GROQ_API_KEY` | CB-01 to CB-07, CB-09 to CB-11, RG-02, RG-07 | skipped |
+| Hugging Face inference | AS-09, TK-05 | skipped |
+| neither | everything else | runs |
+
+Both guards exist for the same reason. Without a Groq key the agent still
+answers, from its non-LLM fallback path. Without Hugging Face the summary
+services still return text, from a deterministic template. A test that only
+checks "something came back" passes in both cases and reports a working model
+that was never called. Skipping says so plainly.
+
+`app/main.py` defaults `HF_HUB_OFFLINE` to `1`, and `.env` additionally sets
+`DISABLE_HF_MODELS` and `TRANSFORMERS_OFFLINE`, so **local runs skip AS-09 and
+TK-05 by default**. The CI job forces all three off so the summary Spaces are
+genuinely exercised there — AS-09 was written to detect those Spaces being
+unreachable, and skipping it in CI would defeat the point.
+
+### Telling a model summary from a template
+
+`AssetSummaryResponse` now carries `source`, either `"model"` or `"template"`.
+It previously stamped `model_version: "1.0"` on both, so a caller could not tell
+whether a model wrote the sentence or the fallback did. AS-09 asserts
+`source == "model"`; without that field the case could only check that a
+non-empty string came back, which the template always satisfies.
 
 `static-checks` compiles every module, fails if `.env` or any `.pem`/`.key` is
 tracked by git, and fails on credential-shaped literals in source. Placeholders
@@ -149,8 +203,9 @@ uncommitted local edits should live on the instance.
 
 ```bash
 # backend
-python scripts/run_tests.py            # everything
-python scripts/run_tests.py --unit     # what a fork PR runs
+python scripts/run_tests.py                 # unit, router and integration
+python scripts/run_tests.py --unit          # what a fork PR runs
+python scripts/run_functional_tests.py      # the §7.3 test plan
 python -m compileall -q app scripts -x "(Seq2Seq|__pycache__)"
 
 # frontend
@@ -158,6 +213,21 @@ npm test
 npx tsc --noEmit
 npm run build
 ```
+
+## What the functional suite writes to the database
+
+Cases that need a row create one, assert against it, and delete it in a
+`finally` block. Everything created carries the `ZZFUNCTEST` prefix in its code
+or email, so anything left behind by an interrupted run is identifiable and
+cannot be mistaken for fleet data:
+
+```sql
+SELECT asset_code FROM assets   WHERE asset_code LIKE 'ZZFUNCTEST%';
+SELECT email      FROM profiles WHERE email      LIKE 'zzfunctest%';
+```
+
+Creating a user also creates a Supabase auth user; `DELETE /users/{id}` removes
+both, which is why the cleanup goes through the API rather than the database.
 
 ## Known gaps
 
