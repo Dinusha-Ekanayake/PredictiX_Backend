@@ -1,4 +1,6 @@
 import logging
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -598,6 +600,17 @@ def update_ticket(
             changed_by=getattr(current_user, "id", None),
         )
         db.add(history)
+
+        # Stamp the lifecycle timestamps the tickets table carries for this
+        # purpose. Without these, resolved_at and closed_at stay null forever
+        # and any resolution-time metric has no data to work from. Only set on
+        # first entry into the state, so reopening and resolving again keeps
+        # the original resolution time rather than overwriting it.
+        now = datetime.now(timezone.utc)
+        if new_status == "resolved" and obj.resolved_at is None:
+            obj.resolved_at = now
+        elif new_status == "closed" and obj.closed_at is None:
+            obj.closed_at = now
 
     db.commit()
     db.refresh(obj)

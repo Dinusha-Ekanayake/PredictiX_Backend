@@ -3,3 +3,10 @@
 #   pytest
 pytest>=8.0
 pytest-cov>=5.0
+# Caps how long a single test may run. The functional suite calls Hugging Face
+# Spaces, and the Gradio client puts a timeout on the call but not on
+# constructing the client, so an unreachable Space can hang the whole run.
+pytest-timeout>=2.3
+# Reads the rendered asset report so RG-01 can check the PDF names the asset
+# it was asked about, rather than only that bytes came back.
+pypdf>=4.0
