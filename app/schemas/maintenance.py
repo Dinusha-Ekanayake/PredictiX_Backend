@@ -15,7 +15,7 @@ class MaintenanceLogRequest(BaseModel):
     ``event_type`` has a sensible default, and ``performed_by`` is taken from
     the authenticated user rather than trusted from the client.
 
-    ``next_service_date`` has no column on ``maintenance_events`` — it belongs
+    ``next_service_date`` has no column on ``maintenance_events``, it belongs
     to the asset. Logging a service is what advances it, which is precisely the
     behaviour the generic insert endpoint cannot express.
     """

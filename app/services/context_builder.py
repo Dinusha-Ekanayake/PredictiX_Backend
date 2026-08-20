@@ -60,7 +60,7 @@ def _get_supabase() -> Client:
 class AssetContextBuilder:
     """
     Builds the full context dict consumed by PDFRenderService.generate_pdf().
-    Uses Supabase REST API — no SQLAlchemy/psycopg2 required.
+    Uses Supabase REST API, no SQLAlchemy/psycopg2 required.
     RLS-blocked tables return None or [] instead of raising errors.
     """
 

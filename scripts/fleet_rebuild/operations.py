@@ -1,6 +1,6 @@
 """Driver assignments, tickets and notifications.
 
-Tickets are raised off real degradation in the generated trajectories — the
+Tickets are raised off real degradation in the generated trajectories, the
 component that was actually worn on the day the ticket opens decides the
 category, the priority and the wording. Sprinkling random tickets across the
 fleet would have produced a helpdesk whose contents contradict the sensor
@@ -198,7 +198,7 @@ def build_tickets(
         # component that is actually most worn on that day. A baseline share is
         # raised independently of sensor_fault_flag, because platform-side
         # problems (gateway offline, ingestion mismatch, ECU logs) do not
-        # require the vehicle itself to be faulty — and v11's sensor_fault_flag
+        # require the vehicle itself to be faulty, and v11's sensor_fault_flag
         # is rare enough on its own to leave a staffed Software department with
         # almost no work, which is not a realistic helpdesk.
         software_trigger = (

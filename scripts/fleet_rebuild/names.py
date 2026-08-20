@@ -95,7 +95,7 @@ def make_person(rng: random.Random) -> tuple[str, str]:
 
 # ── Derived identifiers ───────────────────────────────────────────────────────
 def _slug(text: str) -> str:
-    """Lowercase ASCII, letters only — safe for an email local part."""
+    """Lowercase ASCII, letters only, safe for an email local part."""
     norm = unicodedata.normalize("NFKD", text)
     return "".join(ch for ch in norm if ch.isalpha()).lower()
 

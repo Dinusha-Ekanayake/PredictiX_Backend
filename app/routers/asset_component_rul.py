@@ -41,13 +41,12 @@ def get_asset_component_rul(
     to a component-specific health failure threshold).
 
     Regular users may only fetch RUL data for an asset assigned to them.
-    Admins are scoped to their active warehouse — previously not checked
-    at all here, so any admin could pull component-RUL estimates for an
-    asset in a warehouse they don't manage.
+    Admins are scoped to their active warehouse, so no admin can pull
+    component-RUL estimates for an asset in a warehouse they do not manage.
 
     Deprecated: this OLS trend on 1-4 of the asset's own readings is a much
     weaker method than /survival/{asset_id}'s trained per-component Weibull
-    AFT models (survival_service.py) — same 5 components, fitted on the
+    AFT models (survival_service.py), same 5 components, fitted on the
     fleet's real service-event history, and (unlike this endpoint) doesn't
     degrade to a guessed flat decay rate when an asset has thin reading
     history, which is the common case. The frontend's Component RUL card

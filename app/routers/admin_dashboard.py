@@ -1,4 +1,4 @@
-"""Admin Dashboard router — single aggregate endpoint for the admin overview.
+"""Admin Dashboard router, single aggregate endpoint for the admin overview.
 
 GET /admin-dashboard/summary returns a fully-shaped JSON payload the frontend
 is already typed against. Every list may be empty and every number may be 0;
@@ -103,18 +103,14 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
 
     # ── Query 1: all pdm_batch_predictions aggregates in one pass ──────────────
     # pdm_batch_predictions is the single source of truth for PdM output
-    # (populated by the daily scheduler + the asset-page "Run AI" trigger) —
-    # asset_failure_predictions was the old on-demand-only table, unused by
-    # the asset detail page since the v7/decision-layer unification and left
-    # stale here (~1 month old) until this fix.
-    # "Critical Alerts" previously counted health_score < 60 — which is
-    # actually Poor (40-59) + Critical (<40) combined, per the health
-    # distribution bands computed in this same query. That inflated the KPI
-    # card (438) far above what the "Critical" band in the Health
-    # Distribution chart on the same page shows (267) — the same word
-    # meaning two different things on one screen. Now uses the same <40
-    # cutoff as h_critical below, so the headline number and the chart
-    # agree.
+    # (populated by the daily scheduler + the asset-page "Run AI" trigger), 
+    # Reads pdm_batch_predictions, the table the asset detail page also reads.
+    # asset_failure_predictions is on-demand only and goes stale between runs.
+    #
+    # "Critical Alerts" uses the same <40 cutoff as h_critical below, so the
+    # headline number and the Health Distribution chart on the same page agree.
+    # A <60 cutoff here would be Poor (40-59) and Critical (<40) combined, and
+    # the one word "critical" would mean two different things on one screen.
     pred_agg = db.execute(text(f"""
         SELECT
             COUNT(*)                                                        AS total_preds,
@@ -135,7 +131,7 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
     fleet_health        = int(round(float(avg_health_raw))) if avg_health_raw is not None else 0
     predicted_failures  = int(pred_agg[3] or 0)
     # A brand-new warehouse with zero PdM predictions run yet would show
-    # "0% Fleet Health" indistinguishable from a real, alarming 0% score —
+    # "0% Fleet Health" indistinguishable from a real, alarming 0% score, 
     # this flag lets the frontend show a distinct "no predictions yet"
     # empty state instead of a false alarm.
     has_prediction_data = total_preds > 0
@@ -149,12 +145,12 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
     # ── Query 2: all ticket aggregates + anchors in one pass ──────────────────
     # Real ticket_status enum: open, in_progress, pending, resolved, closed,
     # cancelled. "Open" (operationally still needs attention) excludes both
-    # closed AND cancelled — a cancelled ticket isn't open, but the previous
-    # `status != 'closed'` counted it (and inflated the "Open Tickets" KPI/
-    # banner). Resolution time now falls back to resolved_at when closed_at
-    # isn't set yet, so a ticket sitting in "resolved" status (already
-    # counted in tickets_resolved) isn't silently excluded from the
-    # avg-resolution-days sample that stat is paired with in the footer.
+    # closed AND cancelled. A plain `status != 'closed'` would count cancelled
+    # tickets and inflate the "Open Tickets" KPI and banner. Resolution time
+    # falls back to resolved_at when closed_at is not set yet, so a ticket
+    # sitting in "resolved" status, already counted in tickets_resolved, is
+    # not silently dropped from the avg-resolution-days sample that stat is
+    # paired with in the footer.
     ticket_agg = db.execute(text(f"""
         SELECT
             COUNT(*) FILTER (WHERE status NOT IN ('closed', 'cancelled'))       AS open_tickets,
@@ -186,8 +182,8 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
              FROM pdm_batch_predictions
              WHERE status = 'ok' AND {_assets_in})                    AS est_cost,
             -- SUM skips NULLs, and estimated_cost_lkr is NULL whenever the cost
-            -- model could not score an asset (it no longer substitutes a
-            -- heuristic guess). Without a coverage count a broken cost model
+            -- model could not score an asset, which it reports rather than
+            -- substituting a guess. Without a coverage count a broken cost model
             -- would just look like a cheaper fleet, so report how many assets
             -- the total actually covers and let the UI qualify it.
             (SELECT COUNT(*)
@@ -202,7 +198,7 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
     costed_assets         = int(misc_agg[3] or 0)
 
     # health_distribution's 5 bands only cover assets with a completed
-    # ('ok', non-null health_score) prediction — an asset with a failed
+    # ('ok', non-null health_score) prediction, an asset with a failed
     # prediction run (status='no_data') or no pdm_batch_predictions row at
     # all falls into none of them. That silently made the chart's total
     # (sum of the 5 bands) diverge from totalAssets shown elsewhere on the
@@ -237,13 +233,12 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
     cost_months   = _months_ending_at(maint_anchor_dt, 6)
 
     # ── healthTrend (real historical data, not fabricated) ────────────────────
-    # Previously this repeated the single CURRENT fleet_health value across all
-    # 6 months — a flat line with no real variation, inconsistent with the
-    # ticket/cost/downtime trends right next to it on the same page, which all
-    # plot genuine historical data (#99). pdm_batch_predictions can't supply
-    # real history: it's an upsert table, one row per asset, latest score
+    # Repeating the current fleet_health value across all 6 months would draw
+    # a flat line beside the ticket, cost and downtime trends on the same page,
+    # which all plot genuine history. pdm_batch_predictions cannot supply real
+    # history: it is an upsert table, one row per asset, latest score
     # only. pdm_prediction_history is the append-only log the batch job has
-    # actually been writing to since 2026-07-10 (5000+ real rows) — use that
+    # actually been writing to since 2026-07-10 (5000+ real rows), use that
     # instead. Months with no recorded predictions get a null gap in the line
     # rather than an invented number; if there's no history at all yet, the
     # array comes back empty so the frontend's existing "No health-trend
@@ -284,12 +279,11 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
     for ym, status, cnt in ticket_rows:
         # "opened" = every ticket created that month regardless of current
         # status (a running total, not a same-kind category alongside the
-        # other two) — inProgress/resolved are subsets of it by CURRENT
+        # other two), inProgress/resolved are subsets of it by CURRENT
         # status, not separate buckets that sum to it. Every real status
-        # (open, in_progress, pending, resolved, closed, cancelled) is now
-        # accounted for in at least the "opened" total; previously "open"/
-        # "pending"/"cancelled" tickets silently contributed to "opened"
-        # but had no bucket of their own at all.
+        # (open, in_progress, pending, resolved, closed, cancelled) lands in
+        # at least the "opened" total, so none of them contributes to the
+        # chart without being counted somewhere.
         b = ticket_by_ym.setdefault(ym, {"opened": 0, "inProgress": 0, "resolved": 0})
         b["opened"] += cnt
         if status in ("in_progress", "pending"):
@@ -309,12 +303,10 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
         })
 
     # ── Query 5: cost trend grouped by month (planned vs unplanned spend) ────
-    # Previously this reported "estimated" (only event_type='preventive') vs
-    # "actual" (every event). Two problems: 'preventive' is used by no row in
-    # this database, so the estimated series was a flat zero line; and the pair
-    # was mislabelled — both numbers are money already spent, so "estimated vs
-    # actual" described a budget-vs-outturn comparison the data cannot support
-    # (no budget is stored anywhere).
+    # Not "estimated vs actual": both numbers are money already spent, and no
+    # budget is stored anywhere, so the data cannot support a budget-versus-
+    # outturn comparison. Splitting on event_type='preventive' would also draw
+    # a flat zero line, since no row in this database uses that value.
     #
     # Now it splits real spend by whether the work was planned, using the same
     # classification as the downtime chart below so the two agree. Reactive
@@ -337,7 +329,7 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
     for y, m, abbr in cost_months:
         planned, unplanned = cost_by_ym.get(f"{y:04d}-{m:02d}", (None, None))
         # Both series are the same kind of measure, so the current (partial)
-        # month is shown for both rather than blanking one of them — nulling
+        # month is shown for both rather than blanking one of them, nulling
         # only one made the newest month look like a collapse in spend.
         cost_trend.append({
             "month":     abbr,
@@ -401,10 +393,10 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
         downtime_scope = "warehouse"
 
     # ── Query 7: top 8 risk assets (worst health first) ───────────────────────
-    # Wrapped: this is a secondary widget, not core to the dashboard. A
-    # failure here (e.g. a transient join issue) previously 500'd the ENTIRE
-    # dashboard — contradicting this module's own docstring promise that
-    # "every list may be empty... frontend degrades gracefully."
+    # Wrapped: this is a secondary widget, not core to the dashboard. An
+    # unwrapped failure here, such as a transient join issue, takes down the
+    # entire dashboard, against this module's docstring promise that "every
+    # list may be empty... frontend degrades gracefully."
     top_risk_assets: list[dict] = []
     try:
         _risk_q = (
@@ -420,7 +412,7 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
         for asset, pred, wh_name in risk_rows:
             days_to_maint = (asset.next_service_date - today).days if asset.next_service_date else None
             top_risk_assets.append({
-                # Real asset UUID — the frontend uses this to navigate to the
+                # Real asset UUID, the frontend uses this to navigate to the
                 # asset detail page. asset_code is shown separately as the
                 # human-readable label, not used as an identifier.
                 "id":               str(asset.id),
@@ -445,13 +437,13 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
 
     recent_alerts: list[dict] = []
     try:
-        # notifications.user_id is NOT NULL — every row is addressed to one
+        # notifications.user_id is NOT NULL, every row is addressed to one
         # specific person, so this is a personal inbox table, not a shared
         # fleet-alerts feed. This endpoint's response is cached per-WAREHOUSE
         # (DashboardCache), not per-user, so it cannot be filtered to "the
         # viewing admin's own notifications" without leaking whichever admin's
         # request happened to trigger the cache build to every other admin
-        # sharing that warehouse — that would trade one cross-tenant leak for a
+        # sharing that warehouse, that would trade one cross-tenant leak for a
         # worse one. Restricted to notifications addressed to an admin/
         # super_admin role instead, which keeps this a fleet-oversight feed
         # (not an arbitrary technician's personal notification) while staying
@@ -478,13 +470,11 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
             #   * it is not about any asset, but was addressed to someone who
             #     works here (or to a global super admin, who has no warehouse).
             #
-            # The second clause used to be just `related_asset_id IS NULL`,
-            # which let every asset-less notification through no matter whose
-            # warehouse the recipient belonged to. Because these are ordered
-            # newest-first and capped at 5, one warehouse's recent activity
-            # filled all five slots on every other warehouse's dashboard —
-            # verified: Colombo and Badulla were each showing 5 of 5 alerts
-            # addressed to Galle staff, hiding their own.
+            # The recipient check on the second clause is what keeps this
+            # scoped. A bare `related_asset_id IS NULL` admits every asset-less
+            # notification regardless of the recipient's warehouse, and since
+            # these are ordered newest-first and capped at 5, one busy site
+            # then fills all five slots on every other site's dashboard.
             _notif_q = _notif_q.filter(
                 (Asset.warehouse_id == warehouse_id)
                 | (
@@ -538,7 +528,7 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
             status = (tstatus or "open").lower()
             latest_tickets.append({
                 "id":         tnum or str(tid)[:8],
-                # Real ticket UUID — "id" above is the human-readable
+                # Real ticket UUID, "id" above is the human-readable
                 # ticket_number (display label), not a usable identifier.
                 # The frontend needs this to navigate to the actual ticket.
                 "ticketId":   str(tid),
@@ -590,11 +580,11 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
         )
     ai_insights = ai_insights[:4]
 
-    # ── aiSummary (data-grounded, deterministic — no LLM call here) ───────────
+    # ── aiSummary (data-grounded, deterministic, no LLM call here) ───────────
     # This card previously tried to serve a live-cached Groq summary
     # (run_warehouse_agent) behind `if warehouse_id is None`, but the only
     # caller of this function always resolves a real warehouse via
-    # active_warehouse_id() — which raises rather than ever returning None —
+    # active_warehouse_id(), which raises rather than ever returning None, 
     # so that branch could never run. It wasn't a bug in the LLM integration
     # itself (run_warehouse_agent works and is warehouse-scoped correctly;
     # see the user-triggered "Full report" flow in warehouse_dashboard.py,
@@ -605,7 +595,7 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
     # call volume is limited, and it's better spent on user-initiated
     # requests (chatbot, "Full report") than an always-on background timer
     # nobody explicitly asked for. This card stays a plain, honest,
-    # zero-cost data summary — the frontend already labels it "Data summary"
+    # zero-cost data summary, the frontend already labels it "Data summary"
     # rather than claiming it's AI-generated.
     #
     # Cheap upgrade path if real AI text is wanted here later: generate it
@@ -616,7 +606,7 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
     # The cost sentence has to survive a cost model that scored none or only
     # some of the fleet. Stating a partial sum as "the" estimated cost would
     # under-report fleet spend with nothing to indicate why, so the sentence
-    # says what it covers — or says the estimate is unavailable and stops.
+    # says what it covers, or says the estimate is unavailable and stops.
     if costed_assets == 0:
         cost_sentence = "Estimated maintenance cost is unavailable — the cost model has not scored any assets."
     elif costed_assets < total_assets:

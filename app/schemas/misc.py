@@ -175,7 +175,7 @@ class ReportSourceOut(ReportSourceCreate):
 
 # Both columns are Postgres enums. Typing them as plain `str` let any value
 # through Pydantic and pushed the rejection down to the INSERT, where an
-# unknown value surfaced as a psycopg2 InvalidTextRepresentation — a 500 with
+# unknown value surfaced as a psycopg2 InvalidTextRepresentation, a 500 with
 # a raw SQL traceback for what is really a client input error. Constraining
 # them here turns that into a 422 that names the valid options.
 NotificationChannel = Literal["in_app", "email"]

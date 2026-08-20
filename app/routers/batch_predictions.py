@@ -2,10 +2,10 @@
 
 Endpoints
 ---------
-GET  /batch-predictions/            — latest cached prediction for every asset
-GET  /batch-predictions/{asset_id}  — latest cached prediction for one asset
-POST /batch-predictions/run         — trigger a full batch run immediately
-POST /batch-predictions/run/{asset_id} — re-run predictions for one asset
+GET  /batch-predictions/, latest cached prediction for every asset
+GET  /batch-predictions/{asset_id}, latest cached prediction for one asset
+POST /batch-predictions/run, trigger a full batch run immediately
+POST /batch-predictions/run/{asset_id}, re-run predictions for one asset
 """
 from __future__ import annotations
 
@@ -84,9 +84,9 @@ def list_batch_predictions(
 
     Scoped to the caller: admins/super_admins see their active warehouse;
     regular users see their own warehouse plus any asset assigned to them.
-    Previously unscoped entirely — any authenticated account of any role
-    could pull failure-probability/health-score predictions for the whole
-    fleet across every warehouse.
+    Without that scoping any authenticated account of any role could pull
+    failure-probability and health-score predictions for the whole fleet
+    across every warehouse.
     """
     q = db.query(PdmBatchPrediction).join(Asset, Asset.id == PdmBatchPrediction.asset_id)
 
@@ -119,11 +119,10 @@ def get_batch_prediction(
 ) -> dict:
     """Returns the latest cached prediction for a specific asset.
 
-    Regular users may only fetch predictions for an asset assigned to them
-    — otherwise any user could pull failure-probability/health-score
-    predictions for any asset in the fleet via the shared asset-details
-    panel's fleet-wide search. Admins are scoped to their active warehouse
-    — previously not checked at all here.
+    Regular users may only fetch predictions for an asset assigned to them.
+    Otherwise any user could pull failure-probability and health-score
+    predictions for any asset in the fleet through the shared asset-details
+    panel's fleet-wide search. Admins are scoped to their active warehouse.
     """
     asset = db.query(Asset).filter(Asset.id == asset_id).first()
     if not asset:
@@ -155,12 +154,12 @@ def trigger_full_batch(db: Session = Depends(get_db)) -> dict:
     warehouse and upserts results. Useful as a cron job target on the EC2
     host, or for manual refresh.
 
-    This is a *synchronous* endpoint — it blocks until the run completes
+    This is a *synchronous* endpoint, it blocks until the run completes
     (~1 minute for ~1000 assets, measured against the real fleet). It is
     also unscoped by design: unlike every other endpoint in this router,
     it isn't tied to one warehouse. super_admin-only (not just any admin)
     so a regular, warehouse-pinned admin can't force this expensive,
-    cross-warehouse operation — the frontend never calls this route at
+    cross-warehouse operation, the frontend never calls this route at
     all (only the per-asset /run/{asset_id} variant below, which every
     admin already has correctly-scoped access to); this is an ops/cron
     entry point, not a user-facing action.
@@ -209,7 +208,7 @@ def trigger_single_asset(
     asset = db.query(Asset).filter(Asset.id == asset_id).first()
     if not asset:
         raise HTTPException(status_code=404, detail=f"Asset {asset_id} not found")
-    # Previously unscoped — a regular (non-super) admin could force a live
+    # Scoped, otherwise a regular (non-super) admin could force a live
     # recompute for an asset belonging to a different warehouse.
     assert_asset_in_scope(asset, current_user)
 

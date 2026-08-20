@@ -28,8 +28,7 @@ def predict_vehicle(
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
-    """Deprecated: identical to POST /batch-predictions/run/{asset_id} —
-    both ultimately call batch_prediction_service.run_batch_for_asset, the
+    """Deprecated: identical to POST /batch-predictions/run/{asset_id}, both ultimately call batch_prediction_service.run_batch_for_asset, the
     single real PdM pipeline entry point. Not called by this app's own
     frontend (which uses the batch-predictions route); kept live rather
     than deleted in case any external caller still depends on it."""

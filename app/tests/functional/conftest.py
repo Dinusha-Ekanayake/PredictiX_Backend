@@ -8,7 +8,7 @@ same table that appears in the report.
 Three outcomes are possible and they mean different things:
 
   PASS      the expectation held against the live system
-  FAIL      the expectation did not hold — a real defect, not a broken test
+  FAIL      the expectation did not hold, a real defect, not a broken test
   FRONTEND  the behaviour has no server-side surface to assert, so the backend
             suite cannot judge it and does not claim to
 

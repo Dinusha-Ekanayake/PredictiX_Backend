@@ -7,8 +7,8 @@ Design rule that governs this whole package: **nothing is invented that v11
 already knows.** The trained models (PdM classifier/regressor v7, cost v5,
 survival v3) were all fitted on
 ``app/ai/dataset/srilanka_single_warehouse_vehicle_maintenance_dataset_v11_realistic.csv``.
-Rather than synthesising 56 sensor columns from guessed distributions — which is
-how the previous fleet ended up out of distribution — each new asset adopts a
+Rather than synthesising 56 sensor columns from guessed distributions, which is
+how the previous fleet ended up out of distribution, each new asset adopts a
 real per-vehicle trajectory out of v11 and is re-dated to end today. Coherence
 (odometer monotonicity, service resets, lifetime counters, health decay) is
 therefore inherited, not re-derived.
@@ -19,10 +19,9 @@ from __future__ import annotations
 # ── Source dataset ────────────────────────────────────────────────────────────
 V11_CSV = "app/ai/dataset/srilanka_single_warehouse_vehicle_maintenance_dataset_v11_realistic.csv"
 
-# 61 monthly snapshots = 5 years of history whose final row is dated "today",
-# which is the fix for the defect that motivated this rebuild: the previous
-# fleet's newest reading was 139 days stale, so days_since_last_service (the
-# #2 model feature) was understated ~4x fleet-wide.
+# 61 monthly snapshots = 5 years of history whose final row is dated "today".
+# Ending the history any earlier leaves the newest reading stale and
+# understates days_since_last_service, the #2 model feature, fleet-wide.
 SNAPSHOTS_PER_ASSET = 61
 
 RANDOM_SEED = 20260810
@@ -83,7 +82,7 @@ WAREHOUSES = [
 #   Mini_Truck_1T 190 | Forklift_3.0T 186 | Medium_Truck_7T 160
 #   Heavy_Truck_16T 51
 #
-# Mix rationale — Colombo is the mixed distribution hub (van-heavy last-mile);
+# Mix rationale. Colombo is the mixed distribution hub (van-heavy last-mile);
 # Badulla is an upcountry regional hub on hill roads (light/medium truck heavy,
 # few forklifts, no port work); Galle is a port logistics hub (forklift-heavy
 # container handling, more heavy haulage).
@@ -105,14 +104,14 @@ FORKLIFT_TYPES = {"Forklift_2.5T", "Forklift_3.0T"}
 
 # ── Regional environmental conditioning ───────────────────────────────────────
 # v11 is a single Colombo warehouse, so warehouse identity itself is NOT a model
-# feature (verified against all 58 feature names) — regional character can only
+# feature (verified against all 58 feature names), regional character can only
 # reach the models through these environmental columns, which ARE features.
 #
 # Each entry is (multiplier, additive_offset) applied to the Colombo baseline,
 # then hard-clipped to v11's own observed [min, max] for that column so no value
 # ever lands outside the trained domain.
 REGIONAL_ADJUST = {
-    "COL": {},  # baseline — v11 is Colombo, left untouched
+    "COL": {},  # baseline, v11 is Colombo, left untouched
     "BDL": {    # Uva hill country ~680 m: cooler, drier, rough mountain roads, landlocked
         "ambient_temp_avg_c":       (1.0, -3.5),
         "ambient_humidity_avg_pct":  (1.0, -6.0),
@@ -183,7 +182,7 @@ EMAIL_DOMAIN = "lankalogix.com"
 
 SUPER_ADMINS = [
     # Shown on the login screen as the demo super-admin, so it is deliberately
-    # generic — the login page should not advertise a real person's address.
+    # generic, the login page should not advertise a real person's address.
     # On the company domain like every other demo account; the gmail addresses
     # below belong to real people.
     {"email": "demosuperadmin@" + EMAIL_DOMAIN, "full_name": "Demo Super Admin"},
@@ -201,7 +200,7 @@ PASSWORD_DEMO_ADMIN  = "demoadmin@123"
 PASSWORD_DEMO_USER   = "demouser@123"
 
 # Per-warehouse demo pair, e.g. demoadmingalle.adm@lankalogix.com /
-# demousergalle.adm@lankalogix.com — both sit in the Admin department.
+# demousergalle.adm@lankalogix.com, both sit in the Admin department.
 DEMO_ADMIN_TEMPLATE = "demoadmin{city}.adm@" + EMAIL_DOMAIN
 DEMO_USER_TEMPLATE  = "demouser{city}.adm@" + EMAIL_DOMAIN
 
@@ -212,7 +211,7 @@ TICKETS_PER_100_ASSETS_PER_YEAR = 55
 TICKET_HISTORY_YEARS = 2
 
 # Share of vehicles that currently sit with an active driver assignment. The
-# remainder are genuinely unassigned (in the yard, between shifts, off-hire) —
+# remainder are genuinely unassigned (in the yard, between shifts, off-hire), 
 # a real state the UI should be able to show.
 ACTIVE_ASSIGNMENT_RATE = 0.82
 

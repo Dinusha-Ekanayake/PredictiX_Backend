@@ -20,14 +20,14 @@ def get_db() -> Generator[Session, None, None]:
     """Yield a SQLAlchemy session.
 
     If the database is not configured at all (neither DATABASE_URL nor
-    DATABASE_PASSWORD set — i.e. a broken/dev environment), raise a clean
-    503 instead of yielding None. Previously this yielded None, which made
-    every router that assumed a real Session crash with an opaque 500
-    (AttributeError: 'NoneType' has no attribute 'query'). A 503 tells the
-    caller the service is unavailable, which is the accurate signal.
+    DATABASE_PASSWORD set, i.e. a broken/dev environment), raise a clean
+    503 instead of yielding None. Yielding None makes every router that
+    assumes a real Session fail with an opaque 500 (AttributeError:
+    'NoneType' has no attribute 'query'), where 503 states accurately that
+    the service is unavailable.
 
-    Endpoints that historically tolerated a None db still work: they simply
-    never reach their `if db is None` branch because this raises first.
+    Endpoints that tolerate a None db still work: they simply never reach
+    their `if db is None` branch, because this raises first.
     """
     if not os.getenv("DATABASE_PASSWORD") and not os.getenv("DATABASE_URL"):
         raise HTTPException(
@@ -49,7 +49,7 @@ def get_current_user(
     """Decode JWT and return the matching Profile.
 
     Falls back to a lightweight in-memory profile when the DB row is
-    missing — supports development logins for accounts that exist in
+    missing, supports development logins for accounts that exist in
     auth's TEST_USERS but not yet in the profiles table.
     """
     try:
@@ -71,7 +71,7 @@ def get_current_user(
     if db is not None:
         user = db.query(Profile).filter(Profile.id == user_id).first()
         if user:
-            # Re-check status on every request, not just at login — otherwise
+            # Re-check status on every request, not just at login, otherwise
             # deactivating a user has no effect until their JWT naturally
             # expires (up to 24h), since the token itself carries no status.
             if (user.status or "").strip().lower() != "active":
@@ -99,7 +99,7 @@ def _build_mock_profile(*, user_id: str, email: str, role: str, warehouse_id: Op
     from app.models import Department
     from app.routers.auth import _DEMO_USERS
 
-    # Known demo accounts have a declared full_name — use it instead of
+    # Known demo accounts have a declared full_name. Use it instead of
     # deriving one from the email, which yields artifacts like "... Adm1".
     demo = _DEMO_USERS.get(email.lower())
     display_name = demo["full_name"] if demo else email.split("@")[0].replace(".", " ").title()
@@ -163,7 +163,7 @@ def require_user(current_user=Depends(get_current_user)):
     """Dependency: request must carry a valid JWT (any authenticated role).
 
     get_current_user already raises 401 on a missing/invalid token, so simply
-    depending on it is enough — this wrapper exists to give routers a clearly
+    depending on it is enough, this wrapper exists to give routers a clearly
     named, intention-revealing gate.
     """
     return current_user
@@ -177,7 +177,7 @@ def require_admin(current_user=Depends(get_current_user)):
 
 
 def require_super_admin(current_user=Depends(get_current_user)):
-    """Dependency: request must be an authenticated super_admin — for
+    """Dependency: request must be an authenticated super_admin, for
     operations that are fleet-wide/cross-warehouse by nature (e.g.
     triggering a full-fleet batch recompute), where a regular
     warehouse-pinned admin having the same access as an ops-level
@@ -205,7 +205,7 @@ def is_admin_role(user) -> bool:
 def assert_asset_in_scope(asset, current_user) -> None:
     """Block admins/super_admins from reading/writing an asset outside their
     active warehouse. Raises 404 (not 403) so the asset's existence isn't
-    revealed across warehouse boundaries — mirrors assets.py's own
+    revealed across warehouse boundaries, mirrors assets.py's own
     `_assert_asset_in_scope`, exposed here so every asset-detail router
     (sensor readings, predictions, survival curves, etc.) can share the
     identical check instead of re-implementing it. Non-admin users are not
@@ -224,7 +224,7 @@ def user_can_view_asset(asset, current_user) -> bool:
     (see tickets.py's list_tickets/get_ticket): any user may see any asset
     in their own warehouse, plus any asset specifically assigned to them
     even outside it. Admins/super_admins are scoped separately by
-    assert_asset_in_scope above — this only covers the non-admin case,
+    assert_asset_in_scope above, this only covers the non-admin case,
     which several asset-domain endpoints were found to skip entirely,
     leaving a "user" account with broader read access than a warehouse-
     pinned admin.
@@ -247,7 +247,7 @@ def active_warehouse_id(user) -> Optional[str]:
 
     The difference between the two roles is *not* what they can do once scoped
     (identical admin operations) but that a super_admin may pick ANY warehouse at
-    login while a regular admin is pinned to their own — so both are enforced the
+    login while a regular admin is pinned to their own, so both are enforced the
     same way here, via the single active warehouse on the token.
     """
     wid = getattr(user, "warehouse_id", None)

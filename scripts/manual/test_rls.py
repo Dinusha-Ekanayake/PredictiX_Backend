@@ -1,4 +1,4 @@
-"""Manual debug script — inspect row-level-security policies on the tickets table.
+"""Manual debug script, inspect row-level-security policies on the tickets table.
 
 Run with: python -m scripts.manual.test_rls
 """

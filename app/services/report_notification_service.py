@@ -119,7 +119,7 @@ class ReportNotificationService:
                 admin_name=admin_name
             )
             
-            # Use existing NotificationService sender logic (using WHBREVO key)
+            # Sent on the warehouse Brevo account, not the general one.
             result = NotificationService.send_email(email_list, subject, html_body, use_wh_key=True)
             return result
             
