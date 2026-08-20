@@ -1,0 +1,264 @@
+name: CI
+
+# Runs on every pull request and on pushes to the long-lived branches.
+# Deployment is a separate workflow that waits for this one to pass.
+on:
+  pull_request:
+    branches: [main, master, dev]
+  push:
+    branches: [main, master, dev]
+  workflow_dispatch:
+
+# A newer push to the same branch makes the previous run pointless, so cancel
+# it. Never cancel on main: those runs gate a deployment.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  PYTHON_VERSION: "3.12"
+
+permissions:
+  contents: read
+
+jobs:
+  # ── 1. Fast checks. Fail here before spending time on tests. ──────────────
+  static-checks:
+    name: Static checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Every Python file compiles
+        # Two exclusions, both model-training material rather than shipped code:
+        # Seq2Seq paths contain characters that break compileall's cache writes,
+        # and predictix_breakdown_cost_model_v5.py is a notebook export that
+        # opens with `!pip install`, so it is not valid Python. Only the .pkl
+        # it produces is loaded at runtime.
+        run: python -m compileall -q app scripts -x "(Seq2Seq|__pycache__|predictix_breakdown_cost_model_v5)"
+
+      - name: No secrets committed
+        run: |
+          # .env must never be tracked. The app reads config from the
+          # environment, so a committed .env is always a mistake.
+          if git ls-files --error-unmatch .env 2>/dev/null; then
+            echo "::error::.env is tracked by git. Remove it and rotate the credentials."
+            exit 1
+          fi
+          if git ls-files | grep -qE '\.(pem|key|p12|pfx)$'; then
+            echo "::error::A private key file is tracked by git."
+            git ls-files | grep -E '\.(pem|key|p12|pfx)$'
+            exit 1
+          fi
+
+      - name: No obvious hardcoded credentials
+        run: |
+          # Scans every tracked text file, not just app/ and scripts/. A
+          # previous version checked only those two directories and therefore
+          # missed two root-level scripts that carried a live database URL.
+          #
+          # Narrow patterns on purpose: a check that cries wolf gets ignored,
+          # which is worse than no check. Placeholders (gsk_xxxxxxxx,
+          # "<project-ref>", "your-api-key") are filtered out rather than
+          # failing the build.
+          FILES=$(git ls-files | grep -vE '\.(pkl|csv|pdf|ipynb|png|jpg|svg|lock)$' || true)
+          MATCHES=$(echo "$FILES" | xargs -r grep -InE \
+            'postgres(ql)?(\+psycopg2)?://[^:]+:[^@]{6,}@|gsk_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|eyJhbGciOi[A-Za-z0-9]{20,}' \
+            2>/dev/null \
+            | grep -viE 'x{6,}|your[-_ ]?(api[-_ ])?key|placeholder|example|<[a-z_-]+>|\$\{' || true)
+          if [[ -n "$MATCHES" ]]; then
+            echo "::error::A credential-shaped literal is present in a tracked file."
+            echo "$MATCHES" | sed -E 's#:[^:@]{6,}@#:****@#'
+            exit 1
+          fi
+          echo "No credential-shaped literals found."
+
+  # ── 2. Unit tests. No database, no network, runs on every PR. ─────────────
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    needs: static-checks
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run unit and router tests
+        # These use mocks, so they need no DATABASE_URL and no secrets. That
+        # makes them safe to run on pull requests from forks.
+        run: python scripts/run_tests.py --unit
+
+      - name: Coverage report
+        if: always()
+        run: |
+          pytest app/tests/unit app/tests/qa_automated \
+            --cov=app --cov-report=term-missing:skip-covered --cov-report=xml
+        continue-on-error: true
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: coverage.xml
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ── 3. Integration tests. Need a real database, so they only run on the
+  #      protected branches where the secret is available. ───────────────────
+  integration-tests:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    timeout-minutes: 25
+    # Skipped on fork PRs, which cannot read repository secrets.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    environment: ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run integration tests
+        # The suite skips itself when DATABASE_URL is absent, so a missing
+        # secret shows up as skipped tests rather than a confusing failure.
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          CHATBOT_GROQ_API_KEY: ${{ secrets.CHATBOT_GROQ_API_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_AI_SPACE_URL: ${{ secrets.HF_AI_SPACE_URL }}
+          DISABLE_HF_MODELS: "true"
+        run: pytest app/tests/integration -m integration
+
+  # ── 4. Functional test plan. One case per row of the report's tables. ─────
+  functional-tests:
+    name: Functional test plan
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    timeout-minutes: 40
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    environment: ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run the functional suite
+        # Prints the ID / case / expected / status table the project report
+        # carries, and exits non-zero if any case fails.
+        #
+        # HF_HUB_OFFLINE is forced to 0 because app/main.py defaults it to 1.
+        # AS-09 exists specifically to detect the summary Space being
+        # unreachable, and leaving inference off would make it skip rather than
+        # report — which is the thing it was written to catch.
+        env:
+          # gradio_client resolves a Space through the huggingface_hub API, so
+          # HF_HUB_OFFLINE must be 0 or every summary call falls back to the
+          # template and AS-09 reports a pass it did not earn.
+          HF_HUB_OFFLINE: "0"
+          TRANSFORMERS_OFFLINE: "0"
+          DISABLE_HF_MODELS: "false"
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # Warehouse report generation, which also reads WH_GROQ_MODEL.
+          WH_GROQ_API_KEY: ${{ secrets.WH_GROQ_API_KEY }}
+          WH_GROQ_MODEL: ${{ vars.WH_GROQ_MODEL }}
+          # Chatbot LLM, the fallback key when the first is rate-limited.
+          CHATBOT_GROQ_API_KEY: ${{ secrets.CHATBOT_GROQ_API_KEY }}
+          # Summary Spaces and the token that reaches them.
+          ASSET_SUMMARY_SPACE: ${{ vars.ASSET_SUMMARY_SPACE }}
+          TICKET_SUMMARY_SPACE: ${{ vars.TICKET_SUMMARY_SPACE }}
+          HF_TOKEN_space: ${{ secrets.HF_TOKEN_SPACE }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_AI_SPACE_URL: ${{ secrets.HF_AI_SPACE_URL }}
+        run: python scripts/run_functional_tests.py --detail
+
+      - name: Markdown tables for the report
+        if: always()
+        run: |
+          # functional_results.json survives the step above, so this only
+          # reformats it rather than running the suite a second time.
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, pathlib
+          rows = json.loads(pathlib.Path("functional_results.json").read_text("utf-8"))
+          label = {"PASS": "Pass", "FAIL": "**Fail**",
+                   "FRONTEND": "Frontend", "SKIP": "Skipped"}
+          print("## Functional test plan\n")
+          print("| ID | Test Case | Expected Result | Status |")
+          print("| --- | --- | --- | --- |")
+          for r in sorted(rows, key=lambda r: r["cid"]):
+              note = f" — {r['detail'][:80]}" if r["status"] == "FAIL" else ""
+              print(f"| {r['cid']} | {r['title']} | {r['expected']} "
+                    f"| {label[r['status']]}{note} |")
+          PY
+
+      - name: Upload functional results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: functional-results
+          path: functional_results.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  # ── 5. One status check for branch protection to require. ─────────────────
+  ci-passed:
+    name: CI passed
+    runs-on: ubuntu-latest
+    needs: [static-checks, unit-tests, integration-tests, functional-tests]
+    if: always()
+    steps:
+      - name: Fail if any job did not succeed
+        run: |
+          echo "static-checks:      ${{ needs.static-checks.result }}"
+          echo "unit-tests:         ${{ needs.unit-tests.result }}"
+          echo "integration-tests:  ${{ needs.integration-tests.result }}"
+          echo "functional-tests:   ${{ needs.functional-tests.result }}"
+          # "skipped" is acceptable for the database-backed jobs on a fork PR;
+          # "failure" and "cancelled" are not acceptable anywhere.
+          if [[ "${{ needs.static-checks.result }}" != "success" ]] \
+          || [[ "${{ needs.unit-tests.result }}" != "success" ]] \
+          || [[ "${{ needs.integration-tests.result }}" == "failure" ]] \
+          || [[ "${{ needs.integration-tests.result }}" == "cancelled" ]] \
+          || [[ "${{ needs.functional-tests.result }}" == "failure" ]] \
+          || [[ "${{ needs.functional-tests.result }}" == "cancelled" ]]; then
+            echo "::error::CI failed."
+            exit 1
+          fi
+          echo "All required checks passed."

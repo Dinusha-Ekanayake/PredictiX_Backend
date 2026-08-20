@@ -16,7 +16,7 @@ def _can_view_ticket(ticket: Ticket, current_user: Profile) -> bool:
     view (and comment on) any ticket in their own warehouse; users also
     keep visibility into tickets they created or are assigned to outside
     their warehouse. Comment/edit rights on the comment itself stay
-    narrower — see delete_ticket_comment."""
+    narrower, see delete_ticket_comment."""
     if is_admin_role(current_user):
         return True
     uid = str(getattr(current_user, "id", ""))
@@ -38,7 +38,7 @@ def create_ticket_comment(
     if not _can_view_ticket(ticket, current_user):
         raise HTTPException(status_code=404, detail="Ticket not found")
 
-    # user_id is always the authenticated caller — never trust a
+    # user_id is always the authenticated caller, never trust a
     # client-supplied user_id, or any user could post a comment
     # attributed to someone else's identity.
     data = payload.model_dump()
@@ -67,7 +67,7 @@ def list_ticket_comments(
     elif is_admin_role(current_user):
         q = db.query(TicketComment)
     else:
-        # No ticket_id filter and not an admin — scope to comments on
+        # No ticket_id filter and not an admin, scope to comments on
         # tickets this user can actually see (own warehouse, or tickets
         # they created/are assigned to), instead of the whole table.
         uid = str(getattr(current_user, "id", ""))

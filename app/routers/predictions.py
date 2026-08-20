@@ -1,13 +1,13 @@
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Depends, Query
-from sqlalchemy import or_
+from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
 
 from app.deps import (
     get_db,
     get_current_user,
     require_user,
+    require_admin,
     assert_asset_in_scope,
     is_admin_role,
     active_warehouse_id,
@@ -16,9 +16,6 @@ from app.deps import (
 from app.models import (
     Asset,
     MaintenanceEvent,
-    PredictionRun,
-    AssetFailurePrediction,
-    AssetCostPrediction,
     TicketPrediction,
     Ticket,
     Profile,
@@ -30,10 +27,6 @@ from app.schemas.prediction import (
     HealthScoreResponse,
     FullPredictionResponse,
     HealthResponse,
-    DebugFeaturesResponse,
-    PredictionRunOut,
-    AssetFailurePredictionOut,
-    AssetCostPredictionOut,
     BreakdownCostPredictionOut,   # ← NEW: matches predict_breakdown_cost()'s real shape
     TicketPredictionOut,
 )
@@ -53,13 +46,12 @@ router = APIRouter(
 
 
 # ── Warehouse/ownership scoping helpers ────────────────────────────────────────
-# This router's endpoints were previously unscoped: any authenticated user
-# could read any prediction run, failure/cost prediction, or ticket
-# prediction by ID — including the by-asset endpoints' own scoping being
-# bypassable by going through the by-run-id routes instead, since a run_id
-# is enumerable via the unscoped /runs list. These helpers apply the same
-# warehouse-wide visibility rule established for assets (see app.deps) and
-# tickets (see tickets.py) consistently across every route below.
+# These helpers apply the same warehouse-wide visibility rule used for assets
+# (see app.deps) and tickets (see tickets.py) across every route below. Every
+# route needs one: scoping only the by-asset endpoints leaves the by-run-id
+# routes as a way around them, since a run_id is enumerable from the /runs
+# list, and any authenticated user could then read any prediction run, or any
+# failure, cost or ticket prediction, by ID.
 
 def _user_can_view_ticket(ticket: Ticket, current_user: Profile) -> bool:
     """Same rule as tickets.py's get_ticket/list_tickets."""
@@ -70,35 +62,6 @@ def _user_can_view_ticket(ticket: Ticket, current_user: Profile) -> bool:
     return str(ticket.created_by) == uid or str(ticket.assigned_to) == uid
 
 
-def _assert_run_in_scope(run: PredictionRun, db: Session, current_user: Profile) -> None:
-    """404s if the caller can't see the asset/ticket a prediction run is
-    linked to. A run may be linked to an asset, a ticket, both, or neither
-    (both FKs are nullable) — visible if the caller requested it themselves,
-    or can see whichever it's linked to; a run linked to neither is
-    admin-only (nothing to attribute non-admin visibility to)."""
-    if str(getattr(run, "requested_by", None) or "") == str(getattr(current_user, "id", "")):
-        return
-
-    asset = db.query(Asset).filter(Asset.id == run.asset_id).first() if run.asset_id else None
-    ticket = db.query(Ticket).filter(Ticket.id == run.ticket_id).first() if run.ticket_id else None
-
-    if is_admin_role(current_user):
-        wh_id = active_warehouse_id(current_user)
-        if not wh_id:
-            return
-        if asset is not None and str(asset.warehouse_id) == wh_id:
-            return
-        if ticket is not None and str(ticket.warehouse_id) == wh_id:
-            return
-        if asset is None and ticket is None:
-            return
-    else:
-        if asset is not None and user_can_view_asset(asset, current_user):
-            return
-        if ticket is not None and _user_can_view_ticket(ticket, current_user):
-            return
-
-    raise HTTPException(status_code=404, detail="Prediction run not found")
 
 
 # ── Shared input builder ──────────────────────────────────────────────────────
@@ -178,7 +141,7 @@ def _build_cost_input(asset, last_event) -> dict:
 def _run_cost_prediction_for_asset(asset_id: str, db: Session, current_user: Profile) -> dict:
     """Shared by GET /cost/{asset_id} and POST /cost/live/{asset_id}.
     Runs the breakdown cost model (currently v5.0) live and returns its native dict shape
-    plus asset_id/model_version — the fields BreakdownCostPredictionOut expects.
+    plus asset_id/model_version, the fields BreakdownCostPredictionOut expects.
     """
     from app.main import breakdown_cost_bundle
 
@@ -227,18 +190,15 @@ def prediction_health():
     }
 
 
-@router.get("/debug/features", response_model=DebugFeaturesResponse)
-def debug_features():
-    from app.main import clf_features, reg_features
-
-    return {
-        "classifier_features": clf_features or [],
-        "regressor_features": reg_features or [],
-        "regressor_categorical_features": ["vehicle_role"],
-    }
 
 
-@router.post("/classification", response_model=ClassificationResponse)
+# The four raw-inference endpoints below take a feature payload rather than an
+# asset id, so they leak no data, but they run model inference on demand, and
+# any of the ~1,300 accounts could call them in a loop. Nothing in the frontend
+# uses them (they exist for model testing and ops), so restricting them to
+# admins closes the abuse vector at no functional cost.
+@router.post("/classification", response_model=ClassificationResponse,
+             dependencies=[Depends(require_admin)])
 def classification(payload: PredictionRequest):
     from app.main import clf_model, clf_features, clf_threshold
 
@@ -247,7 +207,8 @@ def classification(payload: PredictionRequest):
     return run_classification(payload.model_dump(), clf_model, clf_features, clf_threshold)
 
 
-@router.post("/regression", response_model=RegressionResponse)
+@router.post("/regression", response_model=RegressionResponse,
+             dependencies=[Depends(require_admin)])
 def regression(payload: PredictionRequest):
     from app.main import reg_model, reg_features
 
@@ -256,12 +217,14 @@ def regression(payload: PredictionRequest):
     return run_regression(payload.model_dump(), reg_model, reg_features)
 
 
-@router.post("/health-score", response_model=HealthScoreResponse)
+@router.post("/health-score", response_model=HealthScoreResponse,
+             dependencies=[Depends(require_admin)])
 def health_score(payload: PredictionRequest):
     return run_health_score(payload.model_dump())
 
 
-@router.post("/full", response_model=FullPredictionResponse)
+@router.post("/full", response_model=FullPredictionResponse,
+             dependencies=[Depends(require_admin)])
 def full_prediction(payload: PredictionRequest):
     from app.main import clf_model, clf_features, reg_model, reg_features, clf_threshold
 
@@ -275,125 +238,12 @@ def full_prediction(payload: PredictionRequest):
     )
 
 
-@router.get(
-    "/runs", response_model=list[PredictionRunOut],
-    deprecated=True,
-    summary="[Deprecated — always empty] Prediction run log",
-)
-def list_prediction_runs(
-    limit: int = Query(default=100, ge=1, le=500),
-    offset: int = Query(default=0, ge=0),
-    db: Session = Depends(get_db),
-    current_user: Profile = Depends(get_current_user),
-):
-    """PredictionRun has no writer anywhere in this codebase — nothing has
-    ever inserted a row, so this will always return an empty list. Kept
-    for API-compatibility rather than deleted outright; marked deprecated
-    so an empty response reads as "this data source isn't populated", not
-    as a bug to chase. The real per-asset prediction history lives in
-    pdm_batch_predictions / pdm_prediction_history (see batch_predictions.py)."""
-    q = (
-        db.query(PredictionRun)
-        .outerjoin(Asset, Asset.id == PredictionRun.asset_id)
-        .outerjoin(Ticket, Ticket.id == PredictionRun.ticket_id)
-    )
-    if is_admin_role(current_user):
-        wh_id = active_warehouse_id(current_user)
-        if wh_id:
-            q = q.filter(
-                or_(
-                    Asset.warehouse_id == wh_id,
-                    Ticket.warehouse_id == wh_id,
-                    (PredictionRun.asset_id.is_(None)) & (PredictionRun.ticket_id.is_(None)),
-                )
-            )
-    else:
-        uid = str(getattr(current_user, "id", ""))
-        user_wh_id = getattr(current_user, "warehouse_id", None)
-        conditions = [
-            PredictionRun.requested_by == getattr(current_user, "id", None),
-            Asset.assigned_to == uid,
-            Ticket.created_by == uid,
-            Ticket.assigned_to == uid,
-        ]
-        if user_wh_id:
-            conditions += [Asset.warehouse_id == user_wh_id, Ticket.warehouse_id == user_wh_id]
-        q = q.filter(or_(*conditions))
-    return q.order_by(PredictionRun.run_started_at.desc()).offset(offset).limit(limit).all()
 
 
-@router.get(
-    "/runs/{run_id}", response_model=PredictionRunOut,
-    deprecated=True,
-    summary="[Deprecated — always 404s] Single prediction run",
-)
-def get_prediction_run(
-    run_id: UUID,
-    db: Session = Depends(get_db),
-    current_user: Profile = Depends(get_current_user),
-):
-    """See list_prediction_runs — PredictionRun has no writer, so any
-    run_id will 404 here. Not a broken lookup; the table is simply empty."""
-    row = db.query(PredictionRun).filter(PredictionRun.id == run_id).first()
-    if not row:
-        raise HTTPException(status_code=404, detail="Prediction run not found")
-    _assert_run_in_scope(row, db, current_user)
-    return row
 
 
-@router.get(
-    "/failure/{asset_id}", response_model=AssetFailurePredictionOut,
-    deprecated=True,
-    summary="[Deprecated — always 404s] Cached failure prediction",
-)
-def get_latest_failure_prediction(
-    asset_id: UUID,
-    db: Session = Depends(get_db),
-    current_user: Profile = Depends(get_current_user),
-):
-    """AssetFailurePrediction has no writer anywhere in this codebase —
-    batch_prediction_service.py upserts into pdm_batch_predictions instead
-    (see get_batch_prediction in batch_predictions.py for the real,
-    populated source of failure-probability data). Every call here 404s
-    because the table is empty, not because a specific asset lacks data."""
-    asset = db.query(Asset).filter(Asset.id == asset_id).first()
-    if not asset:
-        raise HTTPException(status_code=404, detail="Asset not found")
-    assert_asset_in_scope(asset, current_user)
-
-    row = (
-        db.query(AssetFailurePrediction)
-        .filter(AssetFailurePrediction.asset_id == asset_id)
-        .order_by(AssetFailurePrediction.created_at.desc())
-        .first()
-    )
-    if not row:
-        raise HTTPException(status_code=404, detail="No failure prediction found")
-    return row
 
 
-@router.get(
-    "/failure/run/{run_id}", response_model=AssetFailurePredictionOut,
-    deprecated=True,
-    summary="[Deprecated — always 404s] Failure prediction by run",
-)
-def get_failure_prediction_by_run(
-    run_id: UUID,
-    db: Session = Depends(get_db),
-    current_user: Profile = Depends(get_current_user),
-):
-    """See get_latest_failure_prediction — AssetFailurePrediction has no
-    writer, so this always 404s regardless of run_id."""
-    row = db.query(AssetFailurePrediction).filter(AssetFailurePrediction.run_id == run_id).first()
-    if not row:
-        raise HTTPException(status_code=404, detail="Failure prediction not found")
-    asset = db.query(Asset).filter(Asset.id == row.asset_id).first()
-    if asset is not None:
-        if is_admin_role(current_user):
-            assert_asset_in_scope(asset, current_user)
-        elif not user_can_view_asset(asset, current_user):
-            raise HTTPException(status_code=404, detail="Failure prediction not found")
-    return row
 
 
 @router.get("/cost/{asset_id}", response_model=BreakdownCostPredictionOut)
@@ -403,61 +253,20 @@ def get_latest_cost_prediction(
     current_user: Profile = Depends(get_current_user),
 ):
     """
-    Return the breakdown cost prediction (currently v5.0) for an asset — always runs live.
+    Return the breakdown cost prediction (currently v5.0) for an asset, always runs live.
 
-    NOTE: this used to check the AssetCostPrediction DB cache first. That table
-    (i) is never written by anything — batch_prediction_service.py upserts
-    cost into pdm_batch_predictions, not asset_cost_predictions — and (ii)
-    even if it were populated, AssetCostPredictionOut has no fields for
-    confidence bounds or SHAP drivers. So the cache branch always fell through
-    to the live call anyway, except it was previously validated against the
-    wrong response_model and would 500. Since predict_breakdown_cost() is
-    ~15ms (see model docs §1), always running live is simpler and correct.
+    The AssetCostPrediction table is deliberately not consulted. Nothing
+    writes it: batch_prediction_service.py upserts cost into
+    pdm_batch_predictions, not asset_cost_predictions. Even populated it
+    could not serve this route, because AssetCostPredictionOut carries no
+    confidence bounds or SHAP drivers. predict_breakdown_cost() is ~15ms
+    (see model docs §1), so running live is both simpler and correct.
     """
     return _run_cost_prediction_for_asset(str(asset_id), db, current_user)
 
 
-@router.get(
-    "/cost/run/{run_id}", response_model=AssetCostPredictionOut,
-    deprecated=True,
-    summary="[Deprecated — always 404s] Cost prediction by run",
-)
-def get_cost_prediction_by_run(
-    run_id: UUID,
-    db: Session = Depends(get_db),
-    current_user: Profile = Depends(get_current_user),
-):
-    """AssetCostPrediction has no writer anywhere in this codebase — see
-    get_latest_cost_prediction's docstring above for the same fact about
-    this table, and use GET /predictions/cost/{asset_id} instead, which
-    runs the real cost model live. Every call here 404s because the table
-    is empty, not because this specific run lacks a cost prediction."""
-    row = db.query(AssetCostPrediction).filter(AssetCostPrediction.run_id == run_id).first()
-    if not row:
-        raise HTTPException(status_code=404, detail="Cost prediction not found")
-    asset = db.query(Asset).filter(Asset.id == row.asset_id).first()
-    if asset is not None:
-        if is_admin_role(current_user):
-            assert_asset_in_scope(asset, current_user)
-        elif not user_can_view_asset(asset, current_user):
-            raise HTTPException(status_code=404, detail="Cost prediction not found")
-    return row
 
 
-@router.post("/cost/live/{asset_id}", response_model=BreakdownCostPredictionOut)
-def run_live_cost_prediction(
-    asset_id: UUID,
-    db: Session = Depends(get_db),
-    current_user: Profile = Depends(get_current_user),
-):
-    """
-    Force-run the breakdown cost model for one asset, bypassing cache.
-    (Functionally identical to GET /cost/{asset_id} now that that endpoint
-    always runs live too — kept as a separate route for API-contract/semantic
-    compatibility with existing callers that POST here after a maintenance
-    event to refresh the estimate.)
-    """
-    return _run_cost_prediction_for_asset(str(asset_id), db, current_user)
 
 
 @router.get("/ticket/{ticket_id}", response_model=TicketPredictionOut)

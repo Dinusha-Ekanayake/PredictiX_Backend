@@ -44,7 +44,11 @@ class UserAssignedAssetOut(BaseModel):
     category: Optional[str]
     location: str        # warehouse name + city
     status: str          # asset status
-    healthPercent: float # from criticality_score or health_score
+    # The asset's health score from pdm_batch_predictions.health_score, which is
+    # what the UI's health bar draws. Nullable on purpose: an asset with no
+    # completed prediction has no health to report, and the card renders ", ".
+    # A default value here would claim perfect health for a never-scored asset.
+    healthPercent: Optional[float] = None
     nextServiceDate: Optional[str]
 
 class UserItemOut(BaseModel):
@@ -76,10 +80,21 @@ class UserCreate(BaseModel):
     password: Optional[str] = None  # if omitted, the DEFAULT_PASSWORD is hashed
 
 class UserUpdate(BaseModel):
+    """Fields an admin may change on an existing user.
+
+    Mirrors the editable half of UserCreate. The frontend sends
+    Partial<CreateUserPayload>, and update_user reads role, status, department
+    and warehouse, so all four must be declared here: a field the handler
+    reads but the schema omits raises AttributeError and returns 500 on every
+    request, whether or not the client sent it.
+    """
     firstName: Optional[str] = None
     lastName: Optional[str] = None
     name: Optional[str] = None
     email: Optional[str] = None
     address: Optional[str] = None
     contactNumber: Optional[str] = None
-
+    warehouse: Optional[str] = None
+    role: Optional[str] = None
+    department: Optional[str] = None
+    status: Optional[str] = None

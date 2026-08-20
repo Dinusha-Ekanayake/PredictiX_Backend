@@ -68,16 +68,34 @@ def _classify_intent(question: str) -> str:
     q = question.strip().lower()
 
     # Instant keyword pre-filter (catches 80%+ of simple queries)
-    if q in {"hi", "hello", "hey", "menu", "help", "start", "yo", "good morning", "good evening", "good afternoon"}:
+    GREETING_TRIGGERS = {
+        "hi", "hello", "hey", "menu", "help", "start", "yo",
+        "good morning", "good evening", "good afternoon",
+        "what can you do", "what do you do", "who are you",
+        "what are you", "what can i ask", "what can i do",
+        "what are your features", "what are your capabilities",
+        "capabilities", "help me", "options", "commands"
+    }
+    if q in GREETING_TRIGGERS or any(q.startswith(g) for g in ["what can you do", "what do you do", "who are you", "what are you"]):
         return INTENT_GREETING
     if any(q.startswith(k) for k in ("who am i", "what is my", "my role", "my profile", "my name", "my department")):
         return INTENT_WHOAMI
     if q.startswith("faq") or "frequently asked" in q:
         return INTENT_FAQ
 
-    # Fast-path: navigation phrases — "open X", "go to X", "take me to X", "navigate to X"
+    # Fast-path: Data inspection & specific ticket/asset lookups -> DATABASE
+    import re
+    DATA_TRIGGERS = (
+        "show me", "details of", "status of", "info on", "how many", "count of",
+        "number of", "list of", "breakdown", "find ticket", "find asset",
+        "search ticket", "search asset", "detail of"
+    )
+    if any(dt in q for dt in DATA_TRIGGERS) or re.search(r"\b(tkt-\d+|t-\d+|#\d+)\b", q):
+        return INTENT_DATABASE
+
+    # Fast-path: navigation phrases, "open X", "go to X", "take me to X", "navigate to X"
     NAV_TRIGGERS = (
-        "open ", "go to ", "take me to ", "navigate to ", "show me the ",
+        "open ", "go to ", "take me to ", "navigate to ",
         "bring me to ", "launch ", "redirect to ", "i want to go to ",
         "switch to ", "jump to ",
     )
@@ -111,7 +129,6 @@ def _classify_intent(question: str) -> str:
                 {"role": "system", "content": ROUTER_SYSTEM},
                 {"role": "user", "content": question},
             ],
-            model="llama-3.1-8b-instant",
             max_tokens=20,
             temperature=0.0,
         )
@@ -129,35 +146,59 @@ def _rewrite_query_with_history(question: str, history: list[dict]) -> str:
     if not history:
         return question
 
+    q_lower = question.strip().lower()
+    
+    # If the question is obviously a standalone request or greeting/capability question, do NOT rewrite
+    if q_lower in {"hi", "hello", "hey", "menu", "help", "start", "what can you do", "what do you do", "who are you"}:
+        return question
+
+    standalone_triggers = [
+        "how many", "how much", "which is", "what is the most", "show all", "list all",
+        "who is", "who are", "total", "count of", "number of", "give number", "what can you do"
+    ]
+    if any(q_lower.startswith(t) for t in standalone_triggers):
+        return question
+
+    # Only rewrite if there is an explicit pronoun or reference
+    PRONOUNS_OR_ANAPHORA = {"it", "its", "this", "that", "these", "those", "them", "they", "he", "she", "his", "her", "the first", "the second", "the last", "same"}
+    tokens = set(q_lower.replace("?", "").replace("!", "").replace(".", "").split())
+    has_pronoun = bool(tokens & PRONOUNS_OR_ANAPHORA)
+    if not has_pronoun and not any(phrase in q_lower for phrase in ["the first", "the second", "the last", "that asset", "that ticket", "this asset", "this ticket"]):
+        return question
+
     # Take the last 3 turns to provide context without overloading tokens
     recent_history = history[-3:]
     history_text = ""
     for turn in recent_history:
         role = turn.get("role", "unknown")
         content = turn.get("content", "")
-        # Limit assistant content length in case it's a huge dump of tickets
-        if len(content) > 300:
-            content = content[:300] + "...[truncated]"
+        if len(content) > 250:
+            content = content[:250] + "...[truncated]"
         history_text += f"{role}: {content}\n"
-
-    prompt = (
-        "You are a query rewriting assistant.\n"
-        "Given the following conversation history, rewrite the user's latest query into a standalone, fully-contextualized query.\n"
-        "If the user's query is already standalone (e.g. 'how many users are there?'), return it exactly as is.\n"
-        "If the user refers to something in the history (e.g. 'resolve the first one', 'what is its status?'), replace the pronouns or references with the actual entity from the history (e.g. 'resolve ticket #102', 'what is the status of Asset A-100').\n"
-        "Return ONLY the rewritten query, nothing else.\n\n"
-        f"History:\n{history_text}\n"
-        f"User Latest Query: {question}"
-    )
 
     try:
         rewritten, _ = call_groq(
-            messages=[{"role": "user", "content": prompt}],
-            model="llama-3.1-8b-instant",
-            max_tokens=50,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a query rewriting assistant for the PredictiX Smart Asset Management System.\n"
+                        "Given the history and a follow-up query containing pronouns (e.g. 'it', 'this one', 'its status'), "
+                        "output ONLY the rewritten standalone question.\n"
+                        "STRICT RULES:\n"
+                        "1. Return ONLY the rewritten query string. Absolutely NO explanations, commentary, or apologies.\n"
+                        "2. If no rewrite is needed or if unsure, return the user's latest query exactly as is."
+                    )
+                },
+                {"role": "user", "content": f"History:\n{history_text}\n\nLatest query: {question}"}
+            ],
+            max_tokens=60,
             temperature=0.0
         )
-        return str(rewritten).strip() if rewritten else question
+        res_str = str(rewritten).strip().strip('"').strip("'")
+        if not res_str or any(bad in res_str.lower() for bad in ["i'm sorry", "i cannot", "cannot rewrite", "sorry", "here is", "does not contain", "knowledge base"]):
+            return question
+        return res_str
     except Exception as e:
         log.error("Query rewriting failed: %s", e)
         return question

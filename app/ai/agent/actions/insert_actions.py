@@ -1,6 +1,8 @@
 import json
 import logging
+import re
 from typing import Optional
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone
 import uuid
@@ -17,10 +19,7 @@ _VALID_STATUSES = {"open", "in_progress", "pending", "resolved", "closed", "canc
 
 
 def _normalize_priority(raw: Optional[str]) -> str:
-    """Best-effort normalization of the LLM's free-text priority guess.
-    Falls back to 'medium' for anything unrecognized rather than raising —
-    this is chat-agent output, not a strict API contract, so a silent
-    fallback beats surfacing a generic error for a minor LLM quirk."""
+    """Best-effort normalization of the LLM's free-text priority guess."""
     v = (raw or "medium").strip().lower()
     if v in {"critical", "urgent", "severe"}:
         v = "high"
@@ -28,11 +27,37 @@ def _normalize_priority(raw: Optional[str]) -> str:
 
 
 def _normalize_status(raw: Optional[str]) -> Optional[str]:
-    """Same best-effort approach as _normalize_priority — returns None
-    (meaning "don't change it") for anything unrecognized instead of
-    letting an invalid enum value hit the DB and fail the whole commit."""
+    """Same best-effort approach as _normalize_priority."""
     v = (raw or "").strip().lower().replace(" ", "_")
     return v if v in _VALID_STATUSES else None
+
+
+def _extract_json_data(text: str) -> dict:
+    """Safely extract JSON object from LLM response even with markdown fences or extra text."""
+    s = str(text or "").strip()
+    
+    # 1. Clean markdown code blocks
+    s_cleaned = re.sub(r"^```[a-zA-Z]*\s*", "", s)
+    s_cleaned = re.sub(r"\s*```$", "", s_cleaned).strip()
+    
+    try:
+        return json.loads(s_cleaned)
+    except Exception:
+        pass
+
+    # 2. Extract first {...} structure with regex
+    match = re.search(r"\{[\s\S]*\}", s)
+    if match:
+        json_str = match.group(0)
+        try:
+            return json.loads(json_str)
+        except Exception:
+            # Try cleaning trailing commas
+            cleaned_commas = re.sub(r",\s*([\]}])", r"\1", json_str)
+            return json.loads(cleaned_commas)
+
+    raise ValueError(f"No valid JSON found in response: {s[:100]}")
+
 
 ACTION_PROMPT = """
 You are the Action Router for PredictiX Sidekick.
@@ -40,14 +65,15 @@ The user wants to perform an action (create a ticket/asset/user, or update a tic
 You MUST NOT perform delete operations. If the user asks to delete, return {"action": "unauthorized"}.
 
 Determine the action type and extract the fields from the user's request.
-Return exactly ONE JSON object (and nothing else) matching one of these formats:
+Return ONLY valid JSON (no extra text, no explanation) matching one of these formats:
 
 For Ticket Creation:
 {
   "action": "create_ticket",
-  "title": "<short title>",
-  "description": "<detailed description>",
-  "priority": "<low|medium|high|null>"
+  "title": "<short descriptive title>",
+  "description": "<detailed description of the issue>",
+  "priority": "<low|medium|high>",
+  "asset_name": "<asset name or code if mentioned, e.g. 'Forklift FL-04', 'FL-04', or null>"
 }
 
 For Asset Creation:
@@ -80,84 +106,153 @@ If you cannot understand the action or it's a delete operation, return:
 }
 """
 
+
 def handle_action(question: str, ctx: ToolContext) -> dict:
     """Handles data insertion requests strictly."""
     
-    # Use LLM to parse the intent into structured JSON
+    # 1. Use LLM to parse the intent into structured JSON
     try:
         raw_json, _ = call_groq(
             messages=[
                 {"role": "system", "content": ACTION_PROMPT},
                 {"role": "user", "content": question}
             ],
-            model="llama-3.1-8b-instant",
-            max_tokens=200,
-            temperature=0.1
+            max_tokens=300,
+            temperature=0.0
         )
-        
-        # Clean up any markdown blocks around JSON
-        raw_json_clean = str(raw_json).strip()
-        if raw_json_clean.startswith("```json"):
-            raw_json_clean = raw_json_clean[7:-3].strip()
-            
-        data = json.loads(raw_json_clean)
+        data = _extract_json_data(raw_json)
         action = data.get("action")
-        
     except Exception as e:
-        log.error("Failed to parse action JSON: %s", e)
-        return {"answer": "⚠️ I couldn't understand the action details. Please try again.", "action_buttons": []}
+        log.error("Failed to parse action JSON from LLM: %s", e)
+        return {"answer": "⚠️ I couldn't understand the action details. Please try rephrasing with the title and description.", "action_buttons": []}
         
     if action == "unauthorized":
-        return {"answer": "🔒 I am only allowed to create new records. I cannot update or delete existing data.", "action_buttons": []}
+        return {"answer": "🔒 I am only allowed to create or update maintenance records. I cannot delete existing data.", "action_buttons": []}
+
+    # Ensure valid database session
+    db = ctx.db
+    should_close_db = False
+    if db is None or not getattr(db, "is_active", True):
+        from app.db.session import SessionLocal
+        db = SessionLocal()
+        should_close_db = True
 
     try:
         # 1. Create Ticket
         if action == "create_ticket":
-            # Anyone can create a ticket
+            # Search for referenced asset if provided
+            asset = None
+            asset_ref = data.get("asset_name") or data.get("asset_code")
+            if asset_ref:
+                asset_clean = str(asset_ref).strip()
+                asset = (
+                    db.query(Asset)
+                    .filter(
+                        or_(
+                            Asset.asset_code.ilike(f"%{asset_clean}%"),
+                            Asset.asset_name.ilike(f"%{asset_clean}%"),
+                            Asset.registration_number.ilike(f"%{asset_clean}%"),
+                        )
+                    )
+                    .first()
+                )
+
+            # Resolve creator UUID
+            created_by_uuid = None
+            if ctx.user_id:
+                try:
+                    created_by_uuid = uuid.UUID(str(ctx.user_id))
+                except Exception:
+                    pass
+            if not created_by_uuid:
+                first_prof = db.query(Profile).filter(Profile.status == "active").first()
+                if first_prof:
+                    created_by_uuid = first_prof.id
+
+            # Resolve warehouse ID
+            wh_id = None
+            if asset and asset.warehouse_id:
+                wh_id = asset.warehouse_id
+            elif ctx.warehouse_id:
+                try:
+                    wh_id = uuid.UUID(str(ctx.warehouse_id))
+                except Exception:
+                    pass
+
+            ticket_num = generate_ticket_number(db)
+            priority_val = _normalize_priority(data.get("priority"))
+            title_val = data.get("title") or "New Maintenance Ticket"
+            desc_val = data.get("description") or "Created via Sidekick Chatbot"
+
             new_ticket = Ticket(
                 id=uuid.uuid4(),
-                ticket_number=generate_ticket_number(ctx.db),
-                title=data.get("title") or "New Ticket from Chat",
-                description=data.get("description") or "Created via Sidekick",
-                priority=_normalize_priority(data.get("priority")),
-                created_by=uuid.UUID(ctx.user_id),
+                ticket_number=ticket_num,
+                title=title_val,
+                description=desc_val,
+                priority=priority_val,
+                created_by=created_by_uuid,
+                asset_id=asset.id if asset else None,
+                warehouse_id=wh_id,
                 status="open",
-                warehouse_id=uuid.UUID(ctx.warehouse_id) if ctx.warehouse_id else None
             )
-            ctx.db.add(new_ticket)
-            ctx.db.commit()
+            db.add(new_ticket)
+            db.commit()
+            db.refresh(new_ticket)
+
+            # Trigger email notification
+            try:
+                from app.services.notification_service import NotificationService
+                NotificationService.notify_on_new_ticket(db, str(new_ticket.id))
+            except Exception as notify_err:
+                log.warning("Notification dispatch failed on chatbot ticket create: %s", notify_err)
             
             base_path = "/admin/tickets" if ctx.is_admin else "/user/tickets"
+            asset_info = f" for **{asset.asset_name}** (`{asset.asset_code}`)" if asset else ""
+            
             return {
-                "answer": f"✅ Successfully created a new ticket: **{new_ticket.title}**.",
+                "answer": (
+                    f"✅ **Ticket Created Successfully!**\n\n"
+                    f"• **Ticket Number:** `{new_ticket.ticket_number}`\n"
+                    f"• **Title:** {new_ticket.title}\n"
+                    f"• **Priority:** `{new_ticket.priority.upper()}`\n"
+                    f"• **Status:** `OPEN`"
+                    f"{asset_info}\n\n"
+                    f"Our maintenance team has been notified via email."
+                ),
                 "action_buttons": [{"label": "View Ticket", "path": f"{base_path}?ticket_id={new_ticket.id}"}]
             }
             
         # 2. Create Asset
         elif action == "create_asset":
-            # RBAC: Only Admins can create assets
             if not ctx.is_admin:
                 return {"answer": "🔒 You do not have permission to create assets. Only admins can perform this action.", "action_buttons": []}
                 
+            wh_id = None
+            if ctx.warehouse_id:
+                try:
+                    wh_id = uuid.UUID(str(ctx.warehouse_id))
+                except Exception:
+                    pass
+
             new_asset = Asset(
                 id=uuid.uuid4(),
                 asset_name=data.get("asset_name") or "New Asset",
                 asset_code=data.get("asset_code") or f"AST-{uuid.uuid4().hex[:6].upper()}",
                 asset_type=data.get("asset_type") or "vehicle",
                 status="active",
-                warehouse_id=uuid.UUID(ctx.warehouse_id) if ctx.warehouse_id else None
+                warehouse_id=wh_id
             )
-            ctx.db.add(new_asset)
-            ctx.db.commit()
+            db.add(new_asset)
+            db.commit()
+            db.refresh(new_asset)
             
             return {
-                "answer": f"✅ Successfully created a new asset: **{new_asset.asset_name}** ({new_asset.asset_code}).",
+                "answer": f"✅ Successfully created new asset: **{new_asset.asset_name}** (`{new_asset.asset_code}`).",
                 "action_buttons": [{"label": "View Asset", "path": f"/admin/assets?asset_id={new_asset.id}"}]
             }
             
         # 3. Create User
         elif action == "create_user":
-            # RBAC: Only Admins can create users
             if not ctx.is_admin:
                 return {"answer": "🔒 You do not have permission to create users. Only admins can perform this action.", "action_buttons": []}
                 
@@ -165,64 +260,71 @@ def handle_action(question: str, ctx: ToolContext) -> dict:
             if not email:
                 return {"answer": "⚠️ I need an email address to create a new user.", "action_buttons": []}
                 
+            wh_id = None
+            if ctx.warehouse_id:
+                try:
+                    wh_id = uuid.UUID(str(ctx.warehouse_id))
+                except Exception:
+                    pass
+
             new_profile = Profile(
                 id=uuid.uuid4(),
                 email=email,
                 full_name=data.get("full_name") or "New User",
                 role=data.get("role") or "user",
-                warehouse_id=uuid.UUID(ctx.warehouse_id) if ctx.warehouse_id else None
+                warehouse_id=wh_id
             )
-            ctx.db.add(new_profile)
-            ctx.db.commit()
+            db.add(new_profile)
+            db.commit()
+            db.refresh(new_profile)
             
             return {
-                "answer": f"✅ Successfully created a new user: **{new_profile.full_name}** ({email}).",
+                "answer": f"✅ Successfully created new user: **{new_profile.full_name}** (`{email}`).",
                 "action_buttons": [{"label": "View User", "path": f"/users/{new_profile.id}"}]
             }
             
         # 4. Update Ticket
         elif action == "update_ticket":
-            # RBAC: Only Admins can update tickets
             if not ctx.is_admin:
                 return {"answer": "🔒 You do not have permission to update tickets. Only admins can perform this action.", "action_buttons": []}
                 
-            ticket_id_str = str(data.get("ticket_id"))
+            ticket_id_str = str(data.get("ticket_id") or "").strip()
             
-            # Find the ticket by ticket_number or ID
             ticket = None
             if ticket_id_str.isdigit() or ticket_id_str.startswith("#"):
                 num = ticket_id_str.replace("#", "")
-                if num.isdigit():
-                    ticket = ctx.db.query(Ticket).filter(Ticket.ticket_number == int(num)).first()
+                ticket = db.query(Ticket).filter(Ticket.ticket_number.ilike(f"%{num}%")).first()
+            elif ticket_id_str.upper().startswith("TKT-") or ticket_id_str.upper().startswith("T-"):
+                ticket = db.query(Ticket).filter(Ticket.ticket_number.ilike(f"%{ticket_id_str}%")).first()
             else:
                 try:
                     ticket_uuid = uuid.UUID(ticket_id_str)
-                    ticket = ctx.db.query(Ticket).filter(Ticket.id == ticket_uuid).first()
+                    ticket = db.query(Ticket).filter(Ticket.id == ticket_uuid).first()
                 except ValueError:
-                    pass
+                    ticket = db.query(Ticket).filter(Ticket.ticket_number.ilike(f"%{ticket_id_str}%")).first()
                     
             if not ticket:
-                return {"answer": f"⚠️ I couldn't find a ticket matching '{ticket_id_str}'. Please check the ticket number.", "action_buttons": []}
+                return {"answer": f"⚠️ I couldn't find a ticket matching '{ticket_id_str}'. Please verify the ticket number.", "action_buttons": []}
                 
             updated_fields = []
             new_status = _normalize_status(data.get("status"))
             if new_status and new_status != ticket.status:
                 ticket.status = new_status
-                updated_fields.append(f"status to '{ticket.status}'")
+                updated_fields.append(f"status to **{ticket.status.upper()}**")
             if data.get("priority"):
                 new_priority = _normalize_priority(data.get("priority"))
                 if new_priority != ticket.priority:
                     ticket.priority = new_priority
-                    updated_fields.append(f"priority to '{ticket.priority}'")
+                    updated_fields.append(f"priority to **{ticket.priority.upper()}**")
                 
             if not updated_fields:
-                return {"answer": f"The ticket is already up-to-date. No changes were made.", "action_buttons": [{"label": "View Ticket", "path": f"/tickets/{ticket.id}"}]}
+                return {"answer": f"Ticket **{ticket.ticket_number}** is already up-to-date.", "action_buttons": [{"label": "View Ticket", "path": f"/admin/tickets?ticket_id={ticket.id}"}]}
                 
-            ctx.db.commit()
+            db.commit()
             changes = " and ".join(updated_fields)
             return {
-                "answer": f"✅ Successfully updated ticket #{ticket.ticket_number}: changed {changes}.",
-                "action_buttons": [{"label": "View Ticket", "path": f"/tickets/{ticket.id}"}]
+                "answer": f"✅ Successfully updated ticket **{ticket.ticket_number}**: changed {changes}.",
+                "action_buttons": [{"label": "View Ticket", "path": f"/admin/tickets?ticket_id={ticket.id}"}]
             }
             
         else:
@@ -230,5 +332,10 @@ def handle_action(question: str, ctx: ToolContext) -> dict:
             
     except Exception as e:
         log.error("Database error during action execution: %s", e)
-        ctx.db.rollback()
+        if db:
+            db.rollback()
         return {"answer": "⚠️ An error occurred while trying to save the data.", "action_buttons": []}
+    finally:
+        if should_close_db and db:
+            db.close()
+

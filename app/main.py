@@ -1,4 +1,4 @@
-"""PredictiX API — FastAPI application entry point."""
+"""PredictiX API, FastAPI application entry point."""
 from __future__ import annotations
 
 import os
@@ -30,22 +30,18 @@ from .routers.admin_dashboard import admin_dashboard_router
 from .routers.chatbot import router as chatbot_router
 from .routers.faqs import router as faqs_router
 from .routers.asset_assignments import router as asset_assignments_router
-from .routers.asset_documents import router as asset_documents_router
-from .routers.asset_status_history import router as asset_status_history_router
 from .routers.asset_summaries import router as asset_summaries_router
 from .routers.ticket_summaries import router as ticket_summaries_router
 from .routers.asset_component_rul import router as asset_component_rul_router
+from .routers.asset_usage_history import router as asset_usage_history_router
 from .routers.assets import router as assets_router
 from .routers.auth import router as auth_router
 from .routers.db_debug import router as db_debug_router
 from .routers.departments import router as departments_router
 from .routers.maintenance import router as maintenance_router
-from .routers.model_registry import router as model_registry_router
 from .routers.notifications import router as notifications_router
-from .routers.prediction_explanations import router as prediction_explanations_router
 from .routers.predictions import router as predictions_router
 from .routers.profile import router as profiles_router
-from .routers.report_sources import router as report_sources_router
 from .routers.sensor_readings import router as sensor_readings_router
 from .routers.ticket_attachments import router as ticket_attachments_router
 from .routers.ticket_comments import router as ticket_comments_router
@@ -61,15 +57,14 @@ from .routers.websockets import router as websockets_router
 from .routers.asset_reports import router as asset_reports_router, reports_router
 from .routers.warmup import router as warmup_router
 
-# Sharada — user-role self-service profile (/user-profile)
-from .routers.user_profile import router as user_profile_router
-# Sharada — user-role ticket section (/user/tickets)
+# Sharada, user-role ticket section (/user/tickets)
 from .routers.user_tickets import router as user_tickets_router
-# Sharada — FRSO warehouse-level survival predictions (/survival/*)
+# Sharada, FRSO warehouse-level survival predictions (/survival/*)
 from .routers.survival_predictions import router as survival_predictions_router
+from .chatbot.knowledge_base import router as knowledge_base_router
 
 # ─── ML warmup ────────────────────────────────────────────────────────────────
-# Asset & ticket summaries run on HF Spaces (online) — nothing to warm up here.
+# Asset & ticket summaries run on HF Spaces (online), nothing to warm up here.
 from app.ai.services.ticket_categorization_service import warmup_ticket_categorizer
 from app.ai.services.ticket_priority_service import warmup_ticket_priority
 
@@ -82,7 +77,7 @@ BASE_DIR = Path(__file__).resolve().parent
 MODEL_DIR = BASE_DIR / "ai" / "models"
 
 # v7 LightGBM boosters (current). Old v5/v6 CatBoost/XGBoost bundles are kept
-# on disk under each model folder's old/ subdirectory as an archive — not
+# on disk under each model folder's old/ subdirectory as an archive, not
 # loaded anywhere in the app.
 CLF_MODEL_PATH = MODEL_DIR / "pdm_classifier_model" / "predictix_pdm_classifier_v7.txt"
 REG_MODEL_PATH = MODEL_DIR / "pdm_regressor_model"  / "predictix_pdm_regressor_v7.txt"
@@ -92,7 +87,7 @@ REG_DECISION_LOG_PATH = MODEL_DIR / "pdm_regressor_model"  / "regressor_v7_decis
 # Cost-estimation (breakdown_cost_model.py's own MODEL_PATH) and survival
 # analysis (survival_service.py's MODEL_DIR / "survival_bundle.pkl") each
 # have a real decision-log/training-report on disk already, same as
-# classifier/regressor — they just weren't being registered into
+# classifier/regressor, they just weren't being registered into
 # model_registry, so there was no single queryable place recording which
 # version of *every* PdM model family is actually live at once.
 COST_MODEL_PATH = MODEL_DIR / "cost_estimation_model" / "predictix_breakdown_cost_model_v5.pkl"
@@ -100,7 +95,7 @@ COST_DECISION_LOG_PATH = MODEL_DIR / "cost_estimation_model" / "predictix_breakd
 SURVIVAL_MODEL_PATH = MODEL_DIR / "survival_analysis" / "survival_bundle.pkl"
 SURVIVAL_DECISION_LOG_PATH = MODEL_DIR / "survival_analysis" / "training_report.json"
 
-# Same names used as the model_registry.model_name keys throughout the app —
+# Same names used as the model_registry.model_name keys throughout the app, 
 # kept in sync with app.ai.services.vehicle_prediction_service.
 CLASSIFIER_MODEL_NAME = "pdm_classifier_model"
 REGRESSOR_MODEL_NAME = "pdm_regressor_model"
@@ -123,18 +118,27 @@ _model_load_lock = __import__('threading').Lock()
 
 
 def _load_decision_log(path: Path) -> dict:
+    """Load a model's decision-log sidecar. Absent is normal; corrupt is not.
+
+    Returning ``{}`` for both would make a malformed log look exactly like a
+    model that never shipped one.
+    """
+    if not path.exists():
+        return {}
     try:
         with open(path, "r", encoding="utf-8") as fh:
             return json.load(fh)
-    except Exception:
+    except (OSError, json.JSONDecodeError) as exc:
+        logging.getLogger("predictix").warning(
+            "Could not read decision log %s: %s", path.name, exc
+        )
         return {}
 
 
 def _json_safe(value):
     """Recursively replace NaN/Infinity floats with None. Postgres's
     json/jsonb columns reject literal NaN ("invalid input syntax for type
-    json") even though Python's json module happily reads/writes it —
-    training_report.json's weibull_rho is NaN for every component, which
+    json") even though Python's json module happily reads/writes it, training_report.json's weibull_rho is NaN for every component, which
     would otherwise break every metrics upsert for the survival model."""
     if isinstance(value, float):
         return None if (value != value or value in (float("inf"), float("-inf"))) else value
@@ -257,7 +261,7 @@ def _load_pdm_models():
 
 
 def _run_scheduled_batch() -> None:
-    """Scheduled job — runs the full PDM batch in a fresh DB session."""
+    """Scheduled job, runs the full PDM batch in a fresh DB session."""
     from app.db.session import SessionLocal
     from app.ai.services.batch_prediction_service import run_batch_for_all_assets
 
@@ -283,7 +287,7 @@ def _run_scheduled_batch() -> None:
 
 
 def _run_service_reminder_job() -> None:
-    """Scheduled job — daily sweep for assets due within reminder windows."""
+    """Scheduled job, daily sweep for assets due within reminder windows."""
     from app.db import SessionLocal
     from app.services.service_reminder_service import run_auto_reminder_sweep
 
@@ -304,7 +308,7 @@ def _run_startup_batch() -> None:
 
 
 def _ping_hf_models() -> None:
-    """Scheduled job — pings HuggingFace models to prevent cold starts."""
+    """Scheduled job, pings HuggingFace models to prevent cold starts."""
     if os.getenv("DISABLE_HF_MODELS", "false").lower() == "true":
         return
 
@@ -332,7 +336,7 @@ async def lifespan(_: FastAPI):
 
     _load_pdm_models()
 
-    # ─── Breakdown cost estimation model (v5 — CatBoost) ─────────────────────
+    # ─── Breakdown cost estimation model (v5, CatBoost) ─────────────────────
     global breakdown_cost_bundle
     try:
         breakdown_cost_bundle = load_breakdown_bundle()
@@ -356,7 +360,7 @@ async def lifespan(_: FastAPI):
         except Exception as exc:
             log.warning("Ticket priority warmup failed (non-fatal): %s", exc)
 
-        # Asset & ticket summaries run online on HF Spaces — no local warmup.
+        # Asset & ticket summaries run online on HF Spaces, no local warmup.
     else:
         log.info("HuggingFace models disabled (DISABLE_HF_MODELS=true). Skipping warmup.")
 
@@ -429,7 +433,7 @@ app = FastAPI(title="PredictiX API", version="1.0", lifespan=lifespan)
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
 # allowed_frontend_origins() is the single source of truth for "which
-# frontend origins does this API trust" — also reused by the server-side PDF
+# frontend origins does this API trust", also reused by the server-side PDF
 # renderer's network allowlist (see app/routers/asset_reports.py).
 app.add_middleware(
     CORSMiddleware,
@@ -446,8 +450,8 @@ app.add_middleware(
 # An exception that reaches ServerErrorMiddleware (i.e. one with no registered
 # handler) is turned into a bare 500 *outside* CORSMiddleware, so that response
 # carries no Access-Control-Allow-Origin header. The browser then reports it as
-# "blocked by CORS policy / Failed to fetch" and the real cause — usually a DB
-# connection failure — is completely hidden from the Network tab and the
+# "blocked by CORS policy / Failed to fetch" and the real cause, usually a DB
+# connection failure, is completely hidden from the Network tab and the
 # console. Handlers registered here run inside ExceptionMiddleware, so their
 # responses travel back out through CORSMiddleware and DO get CORS headers.
 @app.exception_handler(OperationalError)
@@ -460,8 +464,7 @@ async def _db_unavailable_handler(request: Request, exc: Exception) -> JSONRespo
     friends are real bugs and must keep bubbling up rather than being disguised
     as a transient outage.
 
-    NOTE: a handler registered for bare `Exception` would NOT help here —
-    Starlette routes that one to ServerErrorMiddleware, which sits *outside*
+    NOTE: a handler registered for bare `Exception` would NOT help here. Starlette routes that one to ServerErrorMiddleware, which sits *outside*
     CORSMiddleware, so its response still ends up without CORS headers. Only
     handlers for specific exception types run inside ExceptionMiddleware and
     get the headers, which is why these are registered per-type.
@@ -477,7 +480,6 @@ async def _db_unavailable_handler(request: Request, exc: Exception) -> JSONRespo
 app.include_router(auth_router)
 app.include_router(profiles_router)
 app.include_router(users_router)
-app.include_router(user_profile_router)
 
 # Organisation
 app.include_router(warehouses_router)
@@ -486,8 +488,6 @@ app.include_router(departments_router)
 # Assets & maintenance
 app.include_router(assets_router)
 app.include_router(asset_assignments_router)
-app.include_router(asset_status_history_router)
-app.include_router(asset_documents_router)
 app.include_router(asset_summaries_router)
 app.include_router(maintenance_router)
 app.include_router(sensor_readings_router)
@@ -500,13 +500,12 @@ app.include_router(ticket_status_history_router)
 app.include_router(user_tickets_router)
 app.include_router(ticket_summaries_router)
 app.include_router(asset_component_rul_router)
+app.include_router(asset_usage_history_router)
 
 # Predictions & ML
 app.include_router(predictions_router)
 app.include_router(vehicle_predictions_router)
 app.include_router(batch_predictions_router)
-app.include_router(prediction_explanations_router)
-app.include_router(model_registry_router)
 app.include_router(warehouse_dashboard_router)
 app.include_router(survival_predictions_router)
 app.include_router(admin_dashboard_router)
@@ -515,14 +514,14 @@ app.include_router(admin_dashboard_router)
 app.include_router(notifications_router)
 app.include_router(notification_preferences_router)
 app.include_router(reports_router)
-app.include_router(report_sources_router)
 app.include_router(asset_reports_router)
 
 # Chatbot
 app.include_router(chatbot_router)
 
-# FAQs
+# FAQs & Knowledge Base
 app.include_router(faqs_router)
+app.include_router(knowledge_base_router)
 
 # Diagnostics
 if os.getenv("ENABLE_DEBUG_ROUTES", "false").strip().lower() == "true":

@@ -1,7 +1,18 @@
-"""Manual debug script — check for a pgrst pre_request hook in Postgres settings.
+"""Manual debug script, check for a pgrst pre_request hook in Postgres settings.
 
 Run with: python -m scripts.manual.test_log_api
 """
+import sys
+from pathlib import Path
+
+# Repository root on sys.path so `import app` works however this is invoked.
+# Located by walking up to the directory holding the app package, so moving
+# this file cannot break it.
+_here = Path(__file__).resolve()
+_root = next(p for p in _here.parents if (p / "app" / "__init__.py").exists())
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+
 from sqlalchemy import text
 
 from app.db.session import engine

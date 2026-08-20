@@ -413,16 +413,17 @@ def fleet_survival_summary(db: Session, max_assets: int = 25,
 
     if asset_codes:
         rows = (
-            db.query(Asset.asset_code, Asset.id)
+            db.query(Asset.asset_code, Asset.id, PdmBatchPrediction.predicted_days_until_maintenance)
+            .outerjoin(PdmBatchPrediction, Asset.id == PdmBatchPrediction.asset_id)
             .filter(Asset.asset_code.in_(asset_codes[:max_assets]))
             .all()
         )
     else:
         rows = (
-            db.query(Asset.asset_code, Asset.id)
+            db.query(Asset.asset_code, Asset.id, PdmBatchPrediction.predicted_days_until_maintenance)
             .join(PdmBatchPrediction, Asset.id == PdmBatchPrediction.asset_id)
             .filter(PdmBatchPrediction.status == "ok", PdmBatchPrediction.health_score.isnot(None))
-            .order_by(PdmBatchPrediction.health_score.asc())
+            .order_by(PdmBatchPrediction.predicted_days_until_maintenance.asc())
             .limit(max_assets)
             .all()
         )
@@ -440,7 +441,7 @@ def fleet_survival_summary(db: Session, max_assets: int = 25,
     exp_spend_7 = exp_spend_30 = 0.0
     analyzed = 0
 
-    for code, aid in rows:
+    for code, aid, pdm_rul in rows:
         try:
             feat = build_asset_feature_dict(db, str(aid))
             comps = {c: _score_component(feat, c) for c in COMPONENTS}
@@ -454,13 +455,7 @@ def fleet_survival_summary(db: Session, max_assets: int = 25,
         ps7, ps30 = _p_service(f7), _p_service(f30)
         ps7_bounds, ps30_bounds = _p_service_bounds(f7), _p_service_bounds(f30)
         cost = cost_map.get(code)
-        e7 = ps7 * cost if cost is not None else None
-        e30 = ps30 * cost if cost is not None else None
-        if e7:
-            exp_spend_7 += e7
-        if e30:
-            exp_spend_30 += e30
-
+        
         # Risk thresholds
         fp_30 = ps30
         if fp_30 > 0.6: risk = "Critical"
@@ -480,11 +475,23 @@ def fleet_survival_summary(db: Session, max_assets: int = 25,
             
         c_soonest = soonest["component"]
         rul = soonest["median_days"]
-        if rul == rul:
-            if rul <= 7:
+        
+        # Use PdM's predicted overall maintenance days to bucket the asset into 7/30 days risk
+        bucket_rul = pdm_rul if pdm_rul is not None else rul
+        
+        if bucket_rul == bucket_rul: # check nan
+            if bucket_rul <= 7:
                 at_risk_7[c_soonest] += 1
-            if rul <= 30:
+                if cost is not None:
+                    exp_spend_7 += cost
+            if bucket_rul <= 30:
                 at_risk_30[c_soonest] += 1
+                if cost is not None:
+                    exp_spend_30 += cost
+
+        # Individual expected costs to pass to frontend
+        e7 = cost if (bucket_rul == bucket_rul and bucket_rul <= 7) else 0.0
+        e30 = cost if (bucket_rul == bucket_rul and bucket_rul <= 30) else 0.0
 
         assets_out.append({
             "asset":              code,
@@ -495,6 +502,7 @@ def fleet_survival_summary(db: Session, max_assets: int = 25,
                                   for c in COMPONENTS},
             "soonest_component":  soonest["component"],
             "soonest_median_days": soonest["median_days"],
+            "pdm_rul":            pdm_rul,
             "p_service_7d":       round(ps7, 4),
             "p_service_30d":      round(ps30, 4),
             # Model-free bounds (see _p_service_bounds) — the true joint
@@ -517,17 +525,24 @@ def fleet_survival_summary(db: Session, max_assets: int = 25,
 
     component_summary = []
     for c, v in comp_rul.items():
-        # 7-day view: only assets where this SPECIFIC component's median_days <= 7
-        assets_7d = [a for a in assets_out if a["components"][c]["median_days"] == a["components"][c]["median_days"] and a["components"][c]["median_days"] <= 7]
+        # 7-day view: only assets where the overall RUL <= 7 days
+        assets_7d = [
+            a for a in assets_out 
+            if (a["pdm_rul"] if a["pdm_rul"] is not None else a["soonest_median_days"]) <= 7
+        ]
         if assets_7d:
             c_p7 = [a["components"][c]["fail_prob_7d"] for a in assets_7d]
             avg_7d = sum(c_p7) / len(c_p7)
         else:
             avg_7d = 0.0
 
-        # 30-day view: average across ALL soonest failing assets (all 25 critical assets)
-        if assets_out:
-            c_p30 = [a["components"][c]["fail_prob_30d"] for a in assets_out]
+        # 30-day view: only assets where the overall RUL <= 30 days
+        assets_30d = [
+            a for a in assets_out 
+            if (a["pdm_rul"] if a["pdm_rul"] is not None else a["soonest_median_days"]) <= 30
+        ]
+        if assets_30d:
+            c_p30 = [a["components"][c]["fail_prob_30d"] for a in assets_30d]
             avg_30d = sum(c_p30) / len(c_p30)
         else:
             avg_30d = 0.0

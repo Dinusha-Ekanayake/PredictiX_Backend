@@ -1,4 +1,4 @@
-"""Users router — admin-facing CRUD with the frontend's flat UserItemOut shape.
+"""Users router, admin-facing CRUD with the frontend's flat UserItemOut shape.
 
 Distinct from /profiles in that it returns the denormalised UserItemOut
 shape (department/warehouse as names, name parts split) used by the
@@ -25,7 +25,7 @@ import os
 from app.core.security import hash_password
 from app.db.session import SessionLocal
 from app.deps import get_db, get_current_user, require_admin, require_user, active_warehouse_id
-from app.models import Asset, Department, Profile, Warehouse
+from app.models import Asset, Department, PdmBatchPrediction, Profile, Warehouse
 from app.services.reference_data_cache import get_department_names, get_warehouse_names
 from app.schemas.user_profile import (
     UserAssignedAssetOut,
@@ -125,7 +125,7 @@ def _build_item(
     warehouse_names: dict,
     asset_counts: dict,
 ) -> UserItemOut:
-    """Build a UserItemOut from in-memory lookup maps — no DB calls."""
+    """Build a UserItemOut from in-memory lookup maps, no DB calls."""
     department_name = dept_names.get(user.department_id) if user.department_id else None
     warehouse_name = warehouse_names.get(user.warehouse_id) if user.warehouse_id else None
     assigned = asset_counts.get(str(user.id), 0)
@@ -200,11 +200,27 @@ def _fetch_asset_counts() -> dict:
         }
 
 
-def _fetch_users(scoped_wh: str | None, limit: int, offset: int) -> list[Profile]:
+def _fetch_users(
+    scoped_wh: str | None, limit: int, offset: int, include_unassigned: bool = True
+) -> list[Profile]:
+    """Profiles for the user directory, scoped to one warehouse.
+
+    ``include_unassigned`` controls the ``warehouse_id IS NULL`` arm. Admins
+    need it: that is how a newly-created account with no site yet shows up so
+    it can be assigned one. Regular users do not, for them it only leaked the
+    global super-admin accounts (which carry no warehouse) into what is
+    presented as their warehouse team directory, exposing those names, emails
+    and phone numbers to all 1,255 staff across all three sites.
+    """
     with SessionLocal() as s:
         q = s.query(Profile)
         if scoped_wh:
-            q = q.filter((Profile.warehouse_id == scoped_wh) | (Profile.warehouse_id.is_(None)))
+            if include_unassigned:
+                q = q.filter(
+                    (Profile.warehouse_id == scoped_wh) | (Profile.warehouse_id.is_(None))
+                )
+            else:
+                q = q.filter(Profile.warehouse_id == scoped_wh)
         users = q.order_by(Profile.full_name).offset(offset).limit(limit).all()
         s.expunge_all()  # detach so attributes stay readable after the session closes
         return users
@@ -219,14 +235,18 @@ def list_users(
     # The 4 lookups below are independent reads (no shared state), so they run
     # concurrently on separate DB sessions instead of 4 sequential round-trips.
     # Each round-trip costs ~150-800ms of real network latency to the remote
-    # Supabase region — sequentially that summed to ~1.5-2.5s; concurrently it's
+    # Supabase region, sequentially that summed to ~1.5-2.5s; concurrently it's
     # roughly the slowest single query.
     scoped_wh = active_warehouse_id(current_user)
+    # Only staff who manage accounts need to see profiles with no warehouse yet.
+    manages_accounts = (current_user.role or "").strip().lower() in ("admin", "super_admin")
     with ThreadPoolExecutor(max_workers=4) as executor:
         dept_future = executor.submit(get_department_names)
         wh_future = executor.submit(get_warehouse_names)
         assets_future = executor.submit(_fetch_asset_counts)
-        users_future = executor.submit(_fetch_users, scoped_wh, limit, offset)
+        users_future = executor.submit(
+            _fetch_users, scoped_wh, limit, offset, manages_accounts
+        )
 
         dept_names = dept_future.result()
         warehouse_names = wh_future.result()
@@ -402,8 +422,26 @@ def list_user_assets(user_id: str, db: Session = Depends(get_db)):
         for w in db.query(Warehouse.id, Warehouse.name).filter(Warehouse.id.in_(warehouse_ids)).all()
     } if warehouse_ids else {}
 
+    # Real health, batched into one query. This was asset.criticality_score, 
+    # how important the asset is, not how healthy, which the UI renders
+    # directly as a coloured health bar. See the same fix in profile.py's
+    # /me/assets for the measured divergence.
+    asset_ids = [a.id for a in assets]
+    health_by_asset: dict = {}
+    if asset_ids:
+        health_by_asset = {
+            row.asset_id: row.health_score
+            for row in db.query(
+                PdmBatchPrediction.asset_id, PdmBatchPrediction.health_score
+            ).filter(
+                PdmBatchPrediction.asset_id.in_(asset_ids),
+                PdmBatchPrediction.status == "ok",
+            ).all()
+        }
+
     result = []
     for asset in assets:
+        health = health_by_asset.get(asset.id)
         result.append(UserAssignedAssetOut(
             assignment_id=str(asset.id),
             asset_id=str(asset.id),
@@ -413,7 +451,7 @@ def list_user_assets(user_id: str, db: Session = Depends(get_db)):
             category=asset.category,
             location=warehouse_names.get(asset.warehouse_id, "Unknown"),
             status=asset.status or "active",
-            healthPercent=float(asset.criticality_score or 100),
+            healthPercent=float(health) if health is not None else None,
             nextServiceDate=asset.next_service_date.isoformat() if asset.next_service_date else None,
         ))
     return result

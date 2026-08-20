@@ -31,8 +31,9 @@ from reportlab.pdfgen import canvas as rl_canvas
 from app.services.pdf_styles import (
     COLORS, get_styles, section_divider, thin_divider,
     kpi_card_style, data_table_style, info_grid_style,
-    risk_style_key, risk_color,
+    risk_style_key, risk_color, health_band_color,
 )
+from app.services.health_bands import band_for
 
 PAGE_W, PAGE_H = A4
 MARGIN    = 15 * mm
@@ -516,7 +517,7 @@ def _predictions_section(story, ctx, insights, styles):
 
     # Health score bar
     health = metrics["health_score"]
-    bar_color = COLORS.LOW if health >= 80 else COLORS.MEDIUM if health >= 60 else COLORS.CRITICAL
+    bar_color = health_band_color(band_for(health))
     story.append(Paragraph("Asset Health Score", styles["subsection"]))
     story.append(HBarChart([("Health Score", health, 100, bar_color)], bar_h=12))
     story.append(Spacer(1, 5*mm))

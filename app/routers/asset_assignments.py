@@ -28,12 +28,11 @@ def create_asset_assignment(
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
-    # Previously trusted the raw payload entirely: asset_id/user_id were
-    # never validated to exist, the target asset's warehouse was never
-    # checked against the caller's, and assigned_by was taken verbatim from
-    # the client instead of the authenticated session — any admin could
-    # assign a different warehouse's asset to an arbitrary user_id and
-    # attribute the action to someone else.
+    # The payload is never trusted as given. asset_id and user_id are checked
+    # to exist, the target asset's warehouse is checked against the caller's,
+    # and assigned_by comes from the authenticated session. Without all three,
+    # an admin could assign another warehouse's asset to an arbitrary user_id
+    # and attribute the action to someone else.
     asset = db.query(Asset).filter(Asset.id == payload.asset_id).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
@@ -63,12 +62,12 @@ def list_asset_assignments(
 ):
     q = db.query(AssetAssignment)
 
-    # Regular users only ever see assignment history involving themselves —
+    # Regular users only ever see assignment history involving themselves, 
     # otherwise the shared asset-details panel's Assignments tab (called
     # with ?asset_id=) would expose every other employee's assignment
-    # history, admin notes, and reassignment dates for any asset. Admins
-    # are scoped to their active warehouse — previously unscoped, so any
-    # admin saw every warehouse's assignment history.
+    # history, admin notes, and reassignment dates for any asset. Admins are
+    # scoped to their active warehouse, so no admin reads another site's
+    # assignment history.
     if not is_admin_role(current_user):
         uid = str(getattr(current_user, "id", ""))
         q = q.filter(cast(AssetAssignment.user_id, String) == uid)
@@ -81,7 +80,30 @@ def list_asset_assignments(
         q = q.filter(AssetAssignment.asset_id == asset_id)
     if user_id:
         q = q.filter(AssetAssignment.user_id == user_id)
-    return q.order_by(AssetAssignment.assigned_at.desc()).offset(offset).limit(limit).all()
+
+    rows = q.order_by(AssetAssignment.assigned_at.desc()).offset(offset).limit(limit).all()
+
+    # Resolve the people involved in one query rather than one per row, so the
+    # history can show names instead of UUIDs.
+    person_ids = {r.user_id for r in rows if r.user_id}
+    person_ids |= {r.assigned_by for r in rows if r.assigned_by}
+    people = {
+        p.id: p
+        for p in db.query(Profile.id, Profile.full_name, Profile.email)
+        .filter(Profile.id.in_(person_ids))
+        .all()
+    } if person_ids else {}
+
+    out: list[AssetAssignmentOut] = []
+    for r in rows:
+        assignee = people.get(r.user_id)
+        assigner = people.get(r.assigned_by)
+        item = AssetAssignmentOut.model_validate(r)
+        item.user_name = assignee.full_name if assignee else None
+        item.user_email = assignee.email if assignee else None
+        item.assigned_by_name = assigner.full_name if assigner else None
+        out.append(item)
+    return out
 
 
 @router.delete("/{assignment_id}", dependencies=[Depends(require_admin)])
@@ -93,8 +115,8 @@ def delete_asset_assignment(
     obj = db.query(AssetAssignment).filter(AssetAssignment.id == assignment_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Asset assignment not found")
-    # Previously unscoped — any admin could delete any warehouse's
-    # assignment history record by ID.
+    # Scoped by the asset's warehouse, otherwise any admin could delete any
+    # warehouse's assignment history record by ID.
     asset = db.query(Asset).filter(Asset.id == obj.asset_id).first()
     if asset is not None:
         assert_asset_in_scope(asset, current_user)

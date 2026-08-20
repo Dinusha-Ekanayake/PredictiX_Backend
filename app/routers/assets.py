@@ -1,4 +1,6 @@
-"""Assets resource — CRUD, search, assignment, status updates."""
+"""Assets resource, CRUD, search, assignment, status updates."""
+import logging
+from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -46,16 +48,16 @@ _VALID_ASSET_STATUSES = {"active", "inactive", "under_maintenance", "critical", 
 
 def _purge_asset(db: Session, asset_id: str) -> None:
     """Delete an asset's owned child rows and null out soft references,
-    then the asset itself — mirrors tickets.py's _purge_ticket.
+    then the asset itself, mirrors tickets.py's _purge_ticket.
 
     Without this, deleting any asset with real history (a sensor reading,
-    an assignment, a status change — i.e. almost any real asset) raised an
+    an assignment, a status change, i.e. almost any real asset) raised an
     uncaught IntegrityError, since none of these child tables declare
     ondelete=CASCADE. PdmBatchPrediction/PdmPredictionHistory/
     ServiceReminderLog already cascade at the DB level and need no manual
     handling here.
     """
-    # Owned child rows — deleted outright.
+    # Owned child rows, deleted outright.
     db.query(MaintenanceEvent).filter(MaintenanceEvent.asset_id == asset_id).delete(synchronize_session=False)
     db.query(SensorReading).filter(SensorReading.asset_id == asset_id).delete(synchronize_session=False)
     db.query(AssetAssignment).filter(AssetAssignment.asset_id == asset_id).delete(synchronize_session=False)
@@ -64,7 +66,7 @@ def _purge_asset(db: Session, asset_id: str) -> None:
     db.query(AssetFailurePrediction).filter(AssetFailurePrediction.asset_id == asset_id).delete(synchronize_session=False)
     db.query(AssetCostPrediction).filter(AssetCostPrediction.asset_id == asset_id).delete(synchronize_session=False)
 
-    # Soft references — nulled out, the referencing record itself survives.
+    # Soft references, nulled out, the referencing record itself survives.
     db.query(PredictionExplanation).filter(PredictionExplanation.asset_id == asset_id).update(
         {PredictionExplanation.asset_id: None}, synchronize_session=False
     )
@@ -109,12 +111,12 @@ def _assert_asset_in_scope(obj: Asset, current_user) -> None:
 def _non_admin_visibility_filter(current_user):
     """SQLAlchemy filter for a non-admin ("user" role) caller's asset
     visibility: their own warehouse, plus any asset specifically assigned
-    to them even outside it — the same warehouse-wide rule already
+    to them even outside it, the same warehouse-wide rule already
     established for tickets (tickets.py's list_tickets/get_ticket).
 
     _enforced_warehouse() only ever scopes admin roles (returns None for
     "user"), and every read endpoint below only narrowed its query when
-    that value was non-None — so a plain "user" account got zero warehouse
+    that value was non-None, so a plain "user" account got zero warehouse
     scoping at all, wider access than a warehouse-pinned admin.
     """
     uid = str(getattr(current_user, "id", ""))
@@ -125,6 +127,8 @@ def _non_admin_visibility_filter(current_user):
 
 # require_user gates every endpoint (valid token needed); mutating endpoints
 # additionally require_admin below.
+log = logging.getLogger(__name__)
+
 router = APIRouter(
     prefix="/assets",
     tags=["Assets"],
@@ -140,10 +144,20 @@ class ServiceReminderRequest(BaseModel):
 def list_assets_dropdown(
     search: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    limit: int = Query(default=2000, ge=1, le=5000),
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
-    """Returns only id, asset_code, asset_name, asset_type, warehouse_id — fast for populating dropdowns."""
+    """Returns only id, asset_code, asset_name, asset_type, warehouse_id, fast for populating dropdowns.
+
+    The result is bounded. Both callers (the admin and user New Ticket dialogs)
+    fetch this once on mount with no search term and filter client-side, so the
+    bound must stay above the real fleet size or assets would silently vanish
+    from the picker, the default of 2000 is well clear of the current ~850 and
+    exists to stop the response growing without limit as the fleet does. The
+    ``search`` parameter is already server-side, so the path to a smaller
+    payload is to send it rather than to lower this number.
+    """
     q = db.query(Asset.id, Asset.asset_code, Asset.asset_name, Asset.asset_type, Asset.warehouse_id)
     if is_admin_role(current_user):
         scoped_wh = _enforced_warehouse(current_user)
@@ -159,7 +173,7 @@ def list_assets_dropdown(
         ))
     if status:
         q = q.filter(Asset.status == status)
-    rows = q.order_by(Asset.asset_name.asc()).all()
+    rows = q.order_by(Asset.asset_name.asc()).limit(limit).all()
     return [
         {
             "id": str(r.id),
@@ -187,9 +201,10 @@ def create_asset(
         if existing_vin:
             raise HTTPException(status_code=400, detail="VIN already exists")
 
-    # Previously unvalidated — a nonexistent department_id raised an
-    # uncaught IntegrityError (ForeignKeyViolation) on commit, a raw 500
-    # instead of a clean 404, unlike warehouse_id/vin/asset_code above.
+    # Checked up front like warehouse_id/vin/asset_code above. Left to the
+    # database, a nonexistent department_id surfaces as an uncaught
+    # IntegrityError (ForeignKeyViolation) on commit, a raw 500 where the
+    # caller should get a clean 404.
     if payload.department_id:
         existing_dept = db.query(Department).filter(Department.id == payload.department_id).first()
         if not existing_dept:
@@ -203,10 +218,9 @@ def create_asset(
     if scoped_wh:
         data["warehouse_id"] = scoped_wh
 
-    # created_by was previously trusted verbatim from the request body —
-    # any admin could attribute a newly created asset to a different real
-    # profile. Always derive it from the authenticated session instead
-    # (and, per AssetUpdate, it can never be changed after this).
+    # created_by comes from the authenticated session, never the request
+    # body, otherwise any admin could attribute a new asset to a different
+    # real profile. Per AssetUpdate it can never be changed after this.
     data["created_by"] = current_user.id
 
     obj = Asset(**data)
@@ -220,9 +234,9 @@ def create_asset(
 def list_assets(
     search: str | None = Query(default=None, description="Search by asset id, asset code, asset name, VIN, registration, make, model"),
     # UUID-typed (not str) so FastAPI/Pydantic reject a malformed value with a
-    # clean 422 before it ever reaches the query — these previously reached
-    # Postgres as raw strings and crashed with an uncaught 500
-    # (InvalidTextRepresentation) on anything that wasn't a real UUID.
+    # clean 422 before it ever reaches the query. As raw strings these reach
+    # Postgres directly and raise an uncaught 500 (InvalidTextRepresentation)
+    # on anything that is not a real UUID.
     warehouse_id: UUID | None = Query(default=None),
     department_id: UUID | None = Query(default=None),
     status: str | None = Query(default=None),
@@ -251,13 +265,13 @@ def list_assets(
     q = db.query(Asset)
 
     # Warehouse scoping. Admins/super_admins are pinned to their active
-    # warehouse — any client-supplied warehouse_id is overridden so it can't
+    # warehouse, any client-supplied warehouse_id is overridden so it can't
     # be used to read another warehouse's assets. Non-admin "user" accounts
     # get the same warehouse-wide visibility used everywhere else in the
     # app (tickets, comments): their own warehouse, plus anything assigned
-    # to them. Previously a "user" caller who simply omitted warehouse_id
-    # got the entire fleet across every warehouse — broader access than a
-    # scoped admin.
+    # to them. Without that scoping a "user" caller who simply omits
+    # warehouse_id reads the entire fleet across every warehouse, broader
+    # access than a scoped admin.
     if is_admin_role(current_user):
         scoped_wh = _enforced_warehouse(current_user)
         if scoped_wh:
@@ -343,7 +357,7 @@ def list_assets(
     else:
         q = q.order_by(sort_column.desc())
 
-    # Project down to only the columns the list view needs (AssetListOut) —
+    # Project down to only the columns the list view needs (AssetListOut), 
     # filters/sort above still run against the full table; this only trims
     # what's SELECTed and hydrated into Python, cutting payload + ORM overhead.
     q = q.with_entities(
@@ -367,7 +381,7 @@ def list_assets(
 @router.get("/count")
 def count_assets(
     search: str | None = Query(default=None),
-    # UUID-typed for the same reason as list_assets above — a malformed
+    # UUID-typed for the same reason as list_assets above, a malformed
     # value now 422s cleanly instead of crashing with an uncaught 500.
     warehouse_id: UUID | None = Query(default=None),
     department_id: UUID | None = Query(default=None),
@@ -428,11 +442,11 @@ def count_assets(
         q = q.filter(Asset.asset_type == asset_type)
     if vehicle_role:
         q = q.filter(Asset.vehicle_role == vehicle_role)
-    # These filters (health_band, make/model/year, numeric ranges) previously
-    # existed on list_assets but not here — FastAPI silently ignores unknown
-    # query params rather than erroring, so filtering the list by e.g. Health
-    # Band showed the correctly-filtered rows but an unfiltered fleet-wide
-    # total count, breaking the toolbar's "N assets" badge and pagination.
+    # These filters (health_band, make/model/year, numeric ranges) must stay
+    # in step with list_assets. FastAPI ignores unknown query params instead
+    # of erroring, so any filter missing here returns an unfiltered fleet-wide
+    # count next to correctly-filtered rows, which breaks the toolbar's
+    # "N assets" badge and pagination.
     if make:
         q = q.filter(Asset.make.ilike(f"%{make.strip()}%"))
     if model:
@@ -499,7 +513,7 @@ def get_asset_stats(
     total, operational, maintenance, critical, offline = row
     total = int(total or 0)
 
-    # Real per-asset health_score average from pdm_batch_predictions — the
+    # Real per-asset health_score average from pdm_batch_predictions, the
     # same source and same number the admin dashboard's Fleet Health KPI
     # uses. Averaged ONLY over assets that actually have a completed
     # prediction; NOT blended with any estimate for unscored assets, so
@@ -542,7 +556,7 @@ def get_asset_analytics(
     """Fleet-wide descriptive analytics for the AssetsAnalytics charts:
     status distribution, health-band distribution, vehicle-type breakdown,
     and the top 5 at-risk assets. Computed over ALL matching assets (scoped
-    to the caller's warehouse), independent of pagination — so the charts
+    to the caller's warehouse), independent of pagination, so the charts
     don't silently reflect only whatever page of the table is showing.
     """
     base_q = db.query(Asset)
@@ -575,7 +589,7 @@ def get_asset_analytics(
     )
 
     # Top 5 at-risk: critical first, then poor, each ordered by criticality_score
-    # ascending (worst first) — despite the name, criticality_score is used
+    # ascending (worst first), despite the name, criticality_score is used
     # fleet-wide (profile.py, user_profile.py, users.py) as a health-percentage
     # proxy where higher = healthier (defaults to 100.0 when null), so the most
     # at-risk assets within a band are the ones with the LOWEST score, not the
@@ -627,7 +641,7 @@ def get_asset(
     if is_admin_role(current_user):
         _assert_asset_in_scope(obj, current_user)
     elif not user_can_view_asset(obj, current_user):
-        # 404, not 403 — same rationale as _assert_asset_in_scope: don't
+        # 404, not 403, same rationale as _assert_asset_in_scope: don't
         # reveal that an asset outside the caller's warehouse exists.
         raise HTTPException(status_code=404, detail="Asset not found")
     return obj
@@ -648,7 +662,7 @@ def update_asset(
     update_data = payload.model_dump(exclude_unset=True)
 
     # A regular admin is pinned to one warehouse and must never be able to
-    # move an asset into a different one via this endpoint — create_asset
+    # move an asset into a different one via this endpoint, create_asset
     # already prevents this on the create path by pinning warehouse_id
     # server-side, but update_asset had no equivalent, so a regular admin
     # could relocate an asset out of their own warehouse boundary just by
@@ -675,8 +689,8 @@ def update_asset(
         if existing_code:
             raise HTTPException(status_code=400, detail="Asset code already exists")
 
-    # Same gap as create_asset — a nonexistent department_id previously
-    # raised an uncaught IntegrityError on commit instead of a clean 404.
+    # Same check as create_asset: a nonexistent department_id would otherwise
+    # raise an uncaught IntegrityError on commit instead of a clean 404.
     if update_data.get("department_id"):
         existing_dept = db.query(Department).filter(Department.id == update_data["department_id"]).first()
         if not existing_dept:
@@ -694,25 +708,99 @@ def update_asset(
 def assign_asset(
     asset_id: UUID,
     assigned_to: UUID | None = None,
+    notes: str | None = None,
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
+    """Assign an asset to a user, or unassign it by omitting `assigned_to`.
+
+    Admin only. Two things are written together: `assets.assigned_to`, which
+    drives visibility and every "my assets" view, and a row in
+    `asset_assignments`, which is the audit trail of who assigned what to whom.
+    Writing only the first would leave the history permanently empty.
+    """
     obj = db.query(Asset).filter(Asset.id == asset_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Asset not found")
     _assert_asset_in_scope(obj, current_user)
 
-    # Previously took the raw string with no existence check — assigning
-    # to a nonexistent user_id silently "succeeded" with a dangling
-    # reference.
+    assignee: Profile | None = None
     if assigned_to is not None:
         assignee = db.query(Profile).filter(Profile.id == assigned_to).first()
         if not assignee:
             raise HTTPException(status_code=404, detail="User not found")
 
-    obj.assigned_to = assigned_to
-    db.commit()
+        # An asset can only be worked on by someone at its site, so refuse a
+        # cross-warehouse assignment rather than creating one nobody can act on.
+        if assignee.warehouse_id is not None and str(assignee.warehouse_id) != str(obj.warehouse_id):
+            raise HTTPException(
+                status_code=422,
+                detail="That user belongs to a different warehouse than this asset.",
+            )
+
+        if (assignee.status or "").strip().lower() != "active":
+            raise HTTPException(
+                status_code=422,
+                detail="That user account is not active.",
+            )
+
+    previous = obj.assigned_to
+    now = datetime.utcnow()
+
+    try:
+        # Close whatever assignment was open, whether this is a reassignment
+        # or an unassignment.
+        (
+            db.query(AssetAssignment)
+            .filter(
+                AssetAssignment.asset_id == asset_id,
+                AssetAssignment.is_active == True,  # noqa: E712
+            )
+            .update(
+                {"is_active": False, "unassigned_at": now},
+                synchronize_session=False,
+            )
+        )
+
+        obj.assigned_to = assigned_to
+
+        if assigned_to is not None:
+            db.add(
+                AssetAssignment(
+                    asset_id=asset_id,
+                    user_id=assigned_to,
+                    assigned_by=current_user.id,
+                    is_active=True,
+                    notes=notes,
+                )
+            )
+
+        db.commit()
+    except Exception:
+        db.rollback()
+        log.exception("Failed to assign asset %s to %s", asset_id, assigned_to)
+        raise HTTPException(status_code=500, detail="Could not update the assignment")
+
     db.refresh(obj)
+
+    # Best-effort: the assignment is already committed, so a failed
+    # notification must not fail the request.
+    if assigned_to is not None and str(previous or "") != str(assigned_to):
+        try:
+            from app.services.in_app_notification_service import InAppNotificationService
+
+            InAppNotificationService.notify_user(
+                db,
+                user_id=str(assigned_to),
+                title="Asset assigned to you",
+                message=f"{obj.asset_name or obj.asset_code} has been assigned to you.",
+                priority="medium",
+                notification_type="system",
+                link_url=f"/user/assets?asset_id={asset_id}",
+            )
+        except Exception:
+            log.exception("Asset-assignment notification failed (non-fatal)")
+
     return obj
 
 
@@ -723,9 +811,9 @@ def update_asset_status(
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
-    # Previously took the raw string with no enum check — an invalid
-    # status silently "succeeded" but then dropped out of every dashboard
-    # bucket, since get_asset_stats only counts the real enum values.
+    # Validated against the enum before it is stored. An unchecked status
+    # would "succeed" here and then drop out of every dashboard bucket, since
+    # get_asset_stats counts only the real enum values.
     normalized = status.strip().lower()
     if normalized not in _VALID_ASSET_STATUSES:
         raise HTTPException(
@@ -778,13 +866,12 @@ def send_service_reminder_endpoint(
     if not is_admin_role(current_user):
         raise HTTPException(status_code=403, detail="Admins only")
 
-    # asset_id is UUID-typed above now, so FastAPI already rejects a
-    # malformed value with a clean 422 before this body ever runs — no
-    # manual parsing needed here anymore.
+    # asset_id is UUID-typed above, so FastAPI rejects a malformed value with
+    # a clean 422 before this body runs and no manual parsing is needed.
 
-    # Previously never looked the asset up at all — any admin, regardless
-    # of which warehouse they're pinned to, could trigger a service-reminder
-    # email for an asset in a warehouse they don't manage.
+    # The asset is looked up so the warehouse check below can run. Without it
+    # any admin, whichever warehouse they are pinned to, could trigger a
+    # service-reminder email for an asset they do not manage.
     asset = db.query(Asset).filter(Asset.id == asset_id).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")

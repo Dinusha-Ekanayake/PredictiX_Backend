@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from sqlalchemy.exc import IntegrityError
@@ -40,7 +41,7 @@ from app.services.notification_service import NotificationService
 router = APIRouter(prefix="/tickets", tags=["Tickets"])
 log = logging.getLogger(__name__)
 
-# Supabase enums are lowercase — normalize incoming values
+# Supabase enums are lowercase, normalize incoming values
 VALID_STATUSES = {"open", "in_progress", "pending", "resolved", "closed", "cancelled"}
 VALID_PRIORITIES = {"low", "medium", "high"}
 VALID_CATEGORIES = {"electrical", "mechanical", "software"}
@@ -97,7 +98,7 @@ def create_ticket(
         data["predicted_category"] = _normalize_category(data["predicted_category"])
 
     # Tag the ticket with a warehouse so it shows up in warehouse-scoped
-    # ticket lists — prefer the linked asset's warehouse (authoritative),
+    # ticket lists, prefer the linked asset's warehouse (authoritative),
     # falling back to the creating admin's active warehouse. Without this,
     # tickets silently had a NULL warehouse_id and were invisible to the
     # scoped list/status-count endpoints.
@@ -111,12 +112,10 @@ def create_ticket(
     db.add(obj)
     db.commit()
     db.refresh(obj)
-
     if obj.assigned_to:
         _notify_ticket_assignment(db, obj)
 
     background_tasks.add_task(NotificationService.notify_on_new_ticket, db, str(obj.id))
-
     return obj
 
 
@@ -144,7 +143,7 @@ def get_ticket_status_counts(
 ):
     """Aggregate ticket counts by status for dashboards.
     Everyone (users, admins, super_admins) sees counts scoped to their own
-    warehouse — same visibility as list_tickets/list_tickets_paginated/
+    warehouse, same visibility as list_tickets/list_tickets_paginated/
     get_ticket. Users additionally see tickets assigned to or created by
     them even if those fall outside their own warehouse.
     """
@@ -154,7 +153,7 @@ def get_ticket_status_counts(
     if is_admin_role(current_user):
         wh_id = active_warehouse_id(current_user)
         if wh_id:
-            # Tickets with no warehouse_id (orphaned — e.g. created without
+            # Tickets with no warehouse_id (orphaned, e.g. created without
             # an asset) stay visible to every admin rather than vanishing
             # from everyone's counts. Matches list_tickets/list_tickets_paginated.
             q = q.filter((Ticket.warehouse_id == wh_id) | (Ticket.warehouse_id.is_(None)))
@@ -197,7 +196,7 @@ def list_tickets(
 ):
     q = db.query(Ticket)
 
-    # Role-based scoping — matches /paginated and get_ticket: everyone
+    # Role-based scoping. Matches /paginated and get_ticket: everyone
     # (users, admins, super_admins) can see every ticket in their own
     # warehouse and can comment on it; only owners/admins may edit one
     # (enforced separately in update_my_ticket/update_ticket). Users also
@@ -219,7 +218,7 @@ def list_tickets(
             )
     else:
         # Pin to the admin's active warehouse, overriding any
-        # client-supplied warehouse_id — same pattern as departments.py.
+        # client-supplied warehouse_id, same pattern as departments.py.
         # Tickets with no warehouse_id (orphaned) stay visible to every
         # admin rather than becoming invisible to everyone.
         scoped_wh = active_warehouse_id(current_user)
@@ -246,6 +245,8 @@ def list_tickets_paginated(
     search: str | None = Query(default=None),
     asset_id: str | None = Query(default=None),
     warehouse_id: str | None = Query(default=None),
+    sort_by: str | None = Query(default=None),
+    sort_dir: str = Query(default="desc", pattern="^(asc|desc)$"),
     limit: int = Query(default=10, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
@@ -261,7 +262,7 @@ def list_tickets_paginated(
 
     q = db.query(Ticket)
 
-    # Role-based scoping — see list_tickets.
+    # Role-based scoping, see list_tickets.
     if not is_admin_role(current_user):
         uid = str(getattr(current_user, "id", ""))
         user_wh_id = getattr(current_user, "warehouse_id", None)
@@ -278,7 +279,7 @@ def list_tickets_paginated(
             )
     else:
         # Pin to the admin's active warehouse, overriding any
-        # client-supplied warehouse_id — same pattern as departments.py.
+        # client-supplied warehouse_id, same pattern as departments.py.
         # Tickets with no warehouse_id (orphaned) stay visible to every
         # admin rather than becoming invisible to everyone.
         scoped_wh = active_warehouse_id(current_user)
@@ -295,12 +296,41 @@ def list_tickets_paginated(
         q = q.filter((Ticket.warehouse_id == warehouse_id) | (Ticket.warehouse_id.is_(None)))
     if search and search.strip():
         term = f"%{search.strip()}%"
+        from app.models import Profile
+        assigned_user_exists = db.query(Profile.id).filter(
+            (Profile.id == Ticket.assigned_to) &
+            (Profile.full_name.ilike(term))
+        ).exists()
         q = q.filter(
-            Ticket.title.ilike(term) | Ticket.description.ilike(term)
+            Ticket.title.ilike(term) |
+            Ticket.description.ilike(term) |
+            Ticket.ticket_number.ilike(term) |
+            assigned_user_exists
         )
 
     total = q.count()
-    rows = q.order_by(Ticket.created_at.desc()).offset(offset).limit(limit).all()
+
+    # Sort results
+    sort_col = Ticket.created_at
+    if sort_by:
+        s_by = sort_by.lower()
+        if s_by in ("title", "name"):
+            sort_col = Ticket.title
+        elif s_by == "priority":
+            sort_col = Ticket.priority
+        elif s_by == "status":
+            sort_col = Ticket.status
+        elif s_by == "ticket_number":
+            sort_col = Ticket.ticket_number
+        elif s_by == "updated_at":
+            sort_col = Ticket.updated_at
+
+    if sort_dir.lower() == "asc":
+        q = q.order_by(sort_col.asc())
+    else:
+        q = q.order_by(sort_col.desc())
+
+    rows = q.offset(offset).limit(limit).all()
 
     return {"tickets": [TicketOut.model_validate(t) for t in rows], "total": total}
 
@@ -311,7 +341,7 @@ def list_tickets_paginated(
 # (get_current_user): only the ticket's creator or an admin may modify it.
 
 def _is_admin(user: Profile) -> bool:
-    # Includes super_admin — see app.deps.is_admin_role.
+    # Includes super_admin, see app.deps.is_admin_role.
     return is_admin_role(user)
 
 
@@ -398,7 +428,7 @@ def create_my_ticket(
         status="open",
         priority=_normalize_priority(payload.priority) or "medium",
         predicted_category=_normalize_category(payload.category) or "mechanical",
-        created_by=str(current_user.id),  # forced — cannot be spoofed
+        created_by=str(current_user.id),  # forced, cannot be spoofed
     )
     db.add(obj)
     db.commit()
@@ -406,9 +436,7 @@ def create_my_ticket(
     asset_name = None
     if obj.asset_id:
         asset_name = db.query(Asset.asset_name).filter(Asset.id == obj.asset_id).scalar()
-
     background_tasks.add_task(NotificationService.notify_on_new_ticket, db, str(obj.id))
-
     return _serialize_user_ticket(obj, asset_name)
 
 
@@ -462,6 +490,7 @@ def update_my_ticket(
 @router.delete("/mine/{ticket_id}")
 def delete_my_ticket(
     ticket_id: str,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
@@ -470,12 +499,38 @@ def delete_my_ticket(
         raise HTTPException(status_code=404, detail="Ticket not found")
     if not _is_admin(current_user) and str(obj.created_by) != str(current_user.id):
         raise HTTPException(status_code=403, detail="You can only delete tickets you created.")
+    
+    # Gather details for deletion notification before purging
+    ticket_number = obj.ticket_number
+    title = obj.title
+    
+    creator = db.query(Profile).filter(Profile.id == obj.created_by).first()
+    creator_email = creator.email if creator else None
+    
+    assignee_email = None
+    if obj.assigned_to:
+        assignee = db.query(Profile).filter(Profile.id == obj.assigned_to).first()
+        assignee_email = assignee.email if assignee else None
+        
+    admin_emails = NotificationService._admin_emails_for_warehouse(db, obj.warehouse_id)
+    deleter_name = getattr(current_user, "full_name", "User")
+
     try:
         _purge_ticket(db, ticket_id)
         db.commit()
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=f"Cannot delete ticket: {getattr(exc, 'orig', exc)}")
+        
+    background_tasks.add_task(
+        NotificationService.notify_on_ticket_delete,
+        ticket_number,
+        title,
+        creator_email,
+        assignee_email,
+        deleter_name,
+        admin_emails
+    )
     return {"message": "Ticket deleted", "id": ticket_id}
 
 
@@ -546,13 +601,22 @@ def update_ticket(
         )
         db.add(history)
 
+        # Stamp the lifecycle timestamps the tickets table carries for this
+        # purpose. Without these, resolved_at and closed_at stay null forever
+        # and any resolution-time metric has no data to work from. Only set on
+        # first entry into the state, so reopening and resolving again keeps
+        # the original resolution time rather than overwriting it.
+        now = datetime.now(timezone.utc)
+        if new_status == "resolved" and obj.resolved_at is None:
+            obj.resolved_at = now
+        elif new_status == "closed" and obj.closed_at is None:
+            obj.closed_at = now
+
     db.commit()
     db.refresh(obj)
-
     new_assigned_to = updates.get("assigned_to")
     if new_assigned_to and str(new_assigned_to) != str(old_assigned_to or ""):
         _notify_ticket_assignment(db, obj)
-
     background_tasks.add_task(
         NotificationService.notify_on_ticket_update,
         db,
@@ -566,8 +630,13 @@ def update_ticket(
     return obj
 
 
-@router.delete("/{ticket_id}", dependencies=[Depends(require_admin)])
-def delete_ticket(ticket_id: str, db: Session = Depends(get_db)):
+@router.delete("/{ticket_id}")
+def delete_ticket(
+    ticket_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(require_admin),
+):
     """Delete a ticket and clean up its dependent rows in one transaction.
 
     Child rows (comments, attachments, status history, predictions) are
@@ -578,6 +647,21 @@ def delete_ticket(ticket_id: str, db: Session = Depends(get_db)):
     obj = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Ticket not found")
+
+    # Gather details for deletion notification before purging
+    ticket_number = obj.ticket_number
+    title = obj.title
+    
+    creator = db.query(Profile).filter(Profile.id == obj.created_by).first()
+    creator_email = creator.email if creator else None
+    
+    assignee_email = None
+    if obj.assigned_to:
+        assignee = db.query(Profile).filter(Profile.id == obj.assigned_to).first()
+        assignee_email = assignee.email if assignee else None
+        
+    admin_emails = NotificationService._admin_emails_for_warehouse(db, obj.warehouse_id)
+    deleter_name = getattr(current_user, "full_name", "Admin")
 
     try:
         # Delete owned child rows.
@@ -613,6 +697,15 @@ def delete_ticket(ticket_id: str, db: Session = Depends(get_db)):
         detail = str(orig) if orig else str(exc)
         raise HTTPException(status_code=409, detail=f"Cannot delete ticket: {detail}")
 
+    background_tasks.add_task(
+        NotificationService.notify_on_ticket_delete,
+        ticket_number,
+        title,
+        creator_email,
+        assignee_email,
+        deleter_name,
+        admin_emails
+    )
     return {"message": "Ticket deleted", "id": ticket_id}
 
 
@@ -642,10 +735,16 @@ def preview_ticket(payload: TicketPreviewRequest, _: object = Depends(get_curren
     )
 
 
+# Admin-gated, not user-gated: this forwards free text straight to a Hugging
+# Face Space, so any account could use it as an unmetered proxy to that Space
+# and exhaust it for the ticket-creation path that actually needs it. Ticket
+# creation is unaffected, it calls categorize_ticket_text() directly (see
+# create_ticket above) rather than going through this route, and no frontend
+# code calls this endpoint at all.
 @router.post(
     "/categorize",
     response_model=TicketCategorizationResponse,
-    dependencies=[Depends(require_user)],
+    dependencies=[Depends(require_admin)],
 )
 def categorize_ticket_endpoint(payload: TicketCategorizationRequest):
     try:
@@ -665,7 +764,7 @@ def categorize_ticket_endpoint(payload: TicketCategorizationRequest):
         "Sends ticket text to the AroshN/priority_classif_xgb XGBoost model on Hugging Face "
         "and returns a single priority label (e.g. Low, Medium, High, Critical)."
     ),
-    dependencies=[Depends(require_user)],
+    dependencies=[Depends(require_admin)],
 )
 def prioritize_ticket_endpoint(payload: TicketPriorityRequest):
     try:

@@ -19,11 +19,11 @@ import os
 import uuid as _uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
-from sqlalchemy import String, cast, or_
+from sqlalchemy import String, cast, func, or_, text
 from sqlalchemy.orm import Session
 
 from app.deps import get_current_user, get_db, require_admin, require_user, active_warehouse_id
-from app.models import Asset, AssetAssignment, Department, Profile, Warehouse
+from app.models import Asset, AssetAssignment, Department, PdmBatchPrediction, Profile, Warehouse
 from app.schemas.profile import ProfileOut, ProfileUpdate
 from app.schemas.user_profile import UserProfileUpdate
 from app.services.notification_service import NotificationService
@@ -77,38 +77,39 @@ def _split_name(full: str | None) -> tuple[str, str]:
 
 
 def _profile_to_response(user: Profile, db: Session) -> dict:
-    """Build the frontend-friendly self-profile shape."""
-    department_name = None
-    if user.department_id:
-        dept = db.query(Department).filter(Department.id == user.department_id).first()
-        department_name = dept.name if dept else None
+    """Build the frontend-friendly self-profile shape.
 
-    warehouse_name = None
-    if user.warehouse_id:
-        wh = db.query(Warehouse).filter(Warehouse.id == user.warehouse_id).first()
-        warehouse_name = wh.name if wh else None
+    Department name, warehouse name and assigned-asset count come back in one
+    statement of three scalar subqueries. Each round trip to Supabase costs
+    roughly 250ms regardless of how little it returns, so the count of
+    statements matters more here than the work inside them.
 
-    # Same fix as get_my_assets/get_my_stats: count everything assigned to
-    # this user except fully decommissioned assets (union of the direct
-    # column and active asset_assignments rows), not just status=="active" —
-    # otherwise a user's own profile page undercounts their assigned assets
-    # the moment one goes critical/under_maintenance, which is exactly when
-    # it most needs to still be visible to them.
-    assigned_asset_ids_subq = (
-        db.query(AssetAssignment.asset_id)
-        .filter(AssetAssignment.user_id == user.id, AssetAssignment.is_active == True)
-    )
-    asset_count = (
-        db.query(Asset)
-        .filter(
-            or_(
-                Asset.assigned_to == str(user.id),
-                Asset.id.in_(assigned_asset_ids_subq),
-            ),
-            cast(Asset.status, String) != "decommissioned",
-        )
-        .count()
-    )
+    The asset count is the union of the direct assigned_to column and active
+    asset_assignments rows, excluding only decommissioned assets. Filtering on
+    status == "active" would undercount a user's assets the moment one goes
+    critical or under_maintenance, which is when they most need to see it.
+    """
+    row = db.execute(
+        text("""
+            SELECT
+              (SELECT name FROM departments WHERE id = :dept_id)  AS department_name,
+              (SELECT name FROM warehouses  WHERE id = :wh_id)    AS warehouse_name,
+              (SELECT count(*) FROM assets a
+                 WHERE (a.assigned_to = :uid
+                        OR a.id IN (SELECT asset_id FROM asset_assignments
+                                     WHERE user_id = :uid AND is_active))
+                   AND a.status::text <> 'decommissioned')        AS asset_count
+        """),
+        {
+            "dept_id": user.department_id,
+            "wh_id": user.warehouse_id,
+            "uid": user.id,
+        },
+    ).first()
+
+    department_name = row[0] if row else None
+    warehouse_name = row[1] if row else None
+    asset_count = int(row[2]) if row and row[2] is not None else 0
 
     first_name, last_name = _split_name(user.full_name)
     meta = user.meta if isinstance(user.meta, dict) else {}
@@ -149,28 +150,53 @@ def get_my_profile(
     current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    real_user = db.query(Profile).filter(Profile.email == current_user.email).first() or current_user
-    return _profile_to_response(real_user, db)
+    # get_current_user has already loaded this row by primary key, so it is
+    # passed straight through rather than fetched again.
+    return _profile_to_response(current_user, db)
 
+
+from fastapi import BackgroundTasks
 
 @router.put("/me")
 def update_my_profile(
     payload: UserProfileUpdate,
+    background_tasks: BackgroundTasks,
     current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    if payload.firstName is not None or payload.lastName is not None:
+    # PATCH semantics: "the client did not mention this field" and "the client
+    # explicitly sent null to clear it" are different requests, and testing
+    # `is not None` collapsed them into one, so a user could set an address or
+    # phone number but never clear it again, and the API silently returned 200
+    # as though the clear had worked. model_fields_set carries only the keys
+    # actually present in the request body, which is the distinction we need.
+    sent = payload.model_fields_set
+
+    if "firstName" in sent or "lastName" in sent:
         curr_first, curr_last = _split_name(current_user.full_name)
-        first = payload.firstName if payload.firstName is not None else curr_first
-        last = payload.lastName if payload.lastName is not None else curr_last
-        current_user.full_name = f"{first} {last}".strip()
+        first = payload.firstName if "firstName" in sent else curr_first
+        last = payload.lastName if "lastName" in sent else curr_last
+        # A name is identity, not free text: refuse to blank it entirely rather
+        # than storing an empty string that renders as a nameless account.
+        combined = f"{first or ''} {last or ''}".strip()
+        if not combined:
+            raise HTTPException(
+                status_code=422,
+                detail="firstName and lastName cannot both be empty",
+            )
+        current_user.full_name = combined
 
-    if payload.contactNumber is not None:
-        current_user.phone = payload.contactNumber
+    if "contactNumber" in sent:
+        current_user.phone = payload.contactNumber or None
 
-    if payload.address is not None:
+    if "address" in sent:
         meta = dict(current_user.meta or {})
-        meta["address"] = payload.address
+        if payload.address:
+            meta["address"] = payload.address
+        else:
+            # Drop the key entirely rather than storing null/"", keeps meta
+            # clean and makes "no address" a single representation.
+            meta.pop("address", None)
         current_user.meta = meta
 
     if payload.settings is not None:
@@ -192,11 +218,28 @@ def update_my_profile(
             log.exception("Profile update failed")
             raise HTTPException(status_code=500, detail="Profile update failed")
 
-        # Best-effort admin notification email via Brevo — never blocks the save.
-        try:
-            NotificationService.notify_on_profile_update(db, str(current_user.id))
-        except Exception:
-            log.exception("Profile-update notification failed (non-fatal)")
+        def send_notifications():
+            # Best-effort admin notification email via Brevo, never blocks the save.
+            try:
+                NotificationService.notify_on_profile_update(db, str(current_user.id))
+            except Exception:
+                log.exception("Profile-update notification failed (non-fatal)")
+
+            # In-app bell notification for admins
+            try:
+                from app.services.in_app_notification_service import InAppNotificationService
+                InAppNotificationService.notify_admins(
+                    db=db,
+                    title="Profile Updated",
+                    message=f"{current_user.full_name} has updated their profile information.",
+                    priority="low",
+                    notification_type="system",
+                    warehouse_id=str(current_user.warehouse_id) if current_user.warehouse_id else None
+                )
+            except Exception:
+                log.exception("Profile-update in-app notification failed (non-fatal)")
+
+        background_tasks.add_task(send_notifications)
 
     return _profile_to_response(current_user, db)
 
@@ -261,12 +304,12 @@ def get_my_assets(
         return []
 
     # Assigned via either the direct assets.assigned_to column OR an active
-    # row in asset_assignments — an asset reassigned only through the
+    # row in asset_assignments, an asset reassigned only through the
     # assignments table (without updating assigned_to) would otherwise
     # silently be missing from this list despite showing up elsewhere
     # (get_my_profile's asset count already checks both sources via
     # max(direct, via_table)). Only decommissioned (fully retired) assets
-    # are excluded — critical/under_maintenance assets must still show up,
+    # are excluded, critical/under_maintenance assets must still show up,
     # since those are exactly what most need the user's attention.
     assigned_asset_ids_subq = (
         db.query(AssetAssignment.asset_id)
@@ -290,6 +333,27 @@ def get_my_assets(
         for w in db.query(Warehouse.id, Warehouse.name, Warehouse.city).filter(Warehouse.id.in_(warehouse_ids)).all()
     } if warehouse_ids else {}
 
+    # healthPercent comes from pdm_batch_predictions.health_score, resolved for
+    # every asset in one query.
+    #
+    # criticality_score is not a substitute. It measures how important an asset
+    # is, not how healthy, and the two barely track each other: across the fleet
+    # they differ by 29 points on average. The UI draws this value straight into
+    # a coloured health bar, so the wrong source shows a reassuring number for
+    # failing equipment.
+    asset_ids = [a.id for a in assets]
+    health_by_asset: dict = {}
+    if asset_ids:
+        health_by_asset = {
+            row.asset_id: row.health_score
+            for row in db.query(
+                PdmBatchPrediction.asset_id, PdmBatchPrediction.health_score
+            ).filter(
+                PdmBatchPrediction.asset_id.in_(asset_ids),
+                PdmBatchPrediction.status == "ok",
+            ).all()
+        }
+
     result = []
     for asset in assets:
         location = ""
@@ -308,7 +372,13 @@ def get_my_assets(
             "category": asset.category,
             "location": location,
             "status": asset.status or "active",
-            "healthPercent": float(asset.criticality_score) if asset.criticality_score is not None else 100.0,
+            # None, not 100.0, when the asset has no completed prediction: the
+            # UI already renders null as ", ", whereas the old default asserted
+            # perfect health for an asset nothing had actually scored.
+            "healthPercent": (
+                float(health_by_asset[asset.id])
+                if health_by_asset.get(asset.id) is not None else None
+            ),
             "nextServiceDate": asset.next_service_date.isoformat() if asset.next_service_date else None,
         })
     return result
@@ -323,59 +393,80 @@ def get_my_stats(
         return {"assignedAssets": 0, "activeAssets": 0}
 
     # assignedAssets = everything assigned to this user (direct assigned_to
-    # OR an active asset_assignments row — same union as get_my_assets)
+    # OR an active asset_assignments row, same union as get_my_assets)
     # except fully decommissioned assets; activeAssets = specifically
-    # status == "active". These were previously the same over-filtered
-    # query (status == "active" only, direct column only), which silently
-    # undercounted assignedAssets for any user with a critical/
-    # under_maintenance asset or a table-only assignment.
+    # status == "active". The two counts differ on purpose: a critical or
+    # under_maintenance asset is still assigned to its holder even though it is
+    # not active.
     assigned_asset_ids_subq = (
         db.query(AssetAssignment.asset_id)
         .filter(AssetAssignment.user_id == current_user.id, AssetAssignment.is_active == True)
     )
-    assigned_count = (
-        db.query(Asset)
+    # Both counts come from the same rows and differ only by status, so they are
+    # two aggregates over one scan rather than two queries. The database is in a
+    # different region from the application (~150-230ms per round-trip), which
+    # makes an avoidable second query the dominant cost of this endpoint.
+    row = (
+        db.query(
+            func.count(Asset.id)
+            .filter(cast(Asset.status, String) != "decommissioned")
+            .label("assigned"),
+            func.count(Asset.id)
+            .filter(cast(Asset.status, String) == "active")
+            .label("active"),
+        )
         .filter(
             or_(
                 Asset.assigned_to == str(current_user.id),
                 Asset.id.in_(assigned_asset_ids_subq),
-            ),
-            cast(Asset.status, String) != "decommissioned",
+            )
         )
-        .count()
+        .one()
     )
-    active_count = (
-        db.query(Asset)
-        .filter(
-            or_(
-                Asset.assigned_to == str(current_user.id),
-                Asset.id.in_(assigned_asset_ids_subq),
-            ),
-            cast(Asset.status, String) == "active",
-        )
-        .count()
-    )
-    return {"assignedAssets": assigned_count, "activeAssets": active_count}
+    return {"assignedAssets": int(row.assigned or 0), "activeAssets": int(row.active or 0)}
 
 
 @router.get("/me/colleagues")
 def get_my_colleagues(
+    limit: int | None = Query(default=None, ge=1, le=1000,
+                              description="Cap the number of colleagues returned. "
+                                          "Omit for the full department (the team "
+                                          "directory needs all of them to search over)."),
+    offset: int = Query(default=0, ge=0),
     current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    real_user = db.query(Profile).filter(Profile.email == current_user.email).first()
-    if not real_user or not real_user.department_id:
+    """Colleagues in the caller's department.
+
+    Departments are per-warehouse rows, so filtering on ``department_id``
+    already scopes this to the caller's own site.
+
+    ``limit`` exists because the dashboard's "My Team" card renders eight
+    people: unbounded, this returned the entire department, measured at 519
+    colleagues / 140 KB for one Colombo driver, ~98% of it discarded, and the
+    slowest of that page's four parallel calls. The team directory still omits
+    the parameter and receives everyone, because it filters client-side.
+    """
+    # current_user is the caller's own Profile row and already carries
+    # department_id, so no lookup is needed here.
+    if not current_user.department_id:
         return []
 
-    colleagues = (
+    q = (
         db.query(Profile)
-        .filter(Profile.department_id == real_user.department_id, Profile.id != real_user.id)
-        .all()
+        .filter(Profile.department_id == current_user.department_id,
+                Profile.id != current_user.id)
+        .order_by(Profile.full_name)
     )
+    if offset:
+        q = q.offset(offset)
+    if limit is not None:
+        q = q.limit(limit)
+    colleagues = q.all()
 
-    # All colleagues share real_user.department_id — resolve the name once
+    # All colleagues share the same department, resolve the name once
     # instead of one Department query per colleague (removes the N+1).
-    dept = db.query(Department).filter(Department.id == real_user.department_id).first()
+    dept = db.query(Department).filter(Department.id == current_user.department_id).first()
     dept_name = dept.name if dept else "Unknown"
 
     result = []

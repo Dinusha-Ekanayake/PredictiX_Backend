@@ -41,7 +41,7 @@ class UserTicketCreate(BaseModel):
 
 
 class UserTicketPreviewRequest(BaseModel):
-    """Body for POST /user/tickets/preview — same shape as create, minus DB ids."""
+    """Body for POST /user/tickets/preview, same shape as create, minus DB ids."""
 
     title: str = Field(..., min_length=1, max_length=255)
     description: str = Field(..., min_length=1)

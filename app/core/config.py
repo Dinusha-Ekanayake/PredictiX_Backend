@@ -21,7 +21,7 @@ def jwt_secret() -> str:
     Reads the live environment first (so a value injected at deploy time on
     EC2/Vercel is honoured even if it differs from the .env baked at import),
     then falls back to the validated Settings value. It NEVER falls back to a
-    hardcoded constant — an unset secret is a hard error, because a public
+    hardcoded constant, an unset secret is a hard error, because a public
     default would let anyone forge admin tokens.
     """
     secret = os.getenv("JWT_SECRET") or getattr(settings, "JWT_SECRET", None)
@@ -37,7 +37,7 @@ def jwt_algorithm() -> str:
     return os.getenv("JWT_ALGORITHM") or settings.JWT_ALGORITHM or "HS256"
 
 
-# Fallback defaults only — used when the corresponding env var isn't set,
+# Fallback defaults only, used when the corresponding env var isn't set,
 # so a fresh checkout still works with zero config. Any real deployment
 # should set PROD_ALLOWED_ORIGINS (and DEV_ALLOWED_ORIGINS / ALLOWED_ORIGINS
 # as needed) rather than relying on these being edited in source.
@@ -64,14 +64,14 @@ def _origins_from_env(var_name: str, default: list[str]) -> list[str]:
 
 
 def allowed_frontend_origins() -> list[str]:
-    """The frontend origins this API trusts — single source of truth.
+    """The frontend origins this API trusts, single source of truth.
 
     Used for both the CORS allowlist (main.py) and the server-side PDF
     renderer's network allowlist (asset_reports.py), so the two never drift
     apart.
 
     Fully configurable via environment, with the current known deployments
-    as safe fallback defaults (not secrets — these are public URLs — so a
+    as safe fallback defaults (not secrets, these are public URLs, so a
     hardcoded default is fine; the point is that changing them, e.g. adding
     a new Vercel alias or a staging domain, should never require a code
     change and redeploy):

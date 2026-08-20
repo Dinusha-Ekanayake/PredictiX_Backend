@@ -1,4 +1,7 @@
+# `.env` alone only matches that exact name — a `.env.bak` left by an edit, or
+# a `.env.production`, was still committable with every secret in it.
 .env
+.env.*
 .venv/
 
 __pycache__/
@@ -34,6 +37,10 @@ _temp_readme.md
 test_out.txt
 test_results.json
 
+# Written by scripts/run_functional_tests.py on every run; CI uploads it as a
+# build artifact rather than tracking it.
+functional_results.json
+
 # Fleet-rebuild intermediate caches (regenerable; hold account id mappings)
 scripts/.fleet_cache.pkl
 scripts/.superadmin_ids.pkl
@@ -52,3 +59,21 @@ old-database/
 _dbg_*.py
 .claude/settings.local.json
 CLAUDE.md
+
+# ── Build and runtime artifacts ──────────────────────────────
+# Profiler output.
+*.out
+
+# Virtualenv. A stray venv/Scripts/python.exe was tracked once.
+venv/
+
+# Row-level backups written before a seeding script updates the database. They
+# carry reading ids from one environment and cannot be replayed against another.
+scripts/backups/
+
+# Local debugging scripts. Two of these carried live Groq keys, so the whole
+# directory stays untracked rather than relying on review to catch the next one.
+app/chatbot/scratch/
+
+# Exported user reports carry names, emails and phone numbers.
+*_report.csv

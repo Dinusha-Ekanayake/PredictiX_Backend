@@ -325,9 +325,69 @@ class EmailTemplates:
         """
         return subject, html_body
 
+    @staticmethod
+    def ticket_deleted_notification(ticket_number: str, title: str, deleter_name: str) -> tuple:
+        """Email template for ticket deletion"""
+        subject = f"PredictiX Alert: Ticket {ticket_number} Deleted"
+        
+        html_body = f"""
+        <html>
+            <head>
+                <style>
+                    body {{ font-family: Arial, sans-serif; color: #333; }}
+                    .container {{ max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 8px; }}
+                    .header {{ background: linear-gradient(135deg, #ef4444 0%, #b91c1c 100%); color: white; padding: 20px; border-radius: 8px 8px 0 0; }}
+                    .content {{ padding: 20px; }}
+                    .delete-box {{ background: #fef2f2; padding: 15px; border-left: 4px solid #ef4444; margin: 15px 0; border-radius: 4px; }}
+                    .footer {{ background: #f5f5f5; padding: 10px; text-align: center; font-size: 12px; color: #666; border-radius: 0 0 8px 8px; }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        <h2>Ticket Deleted: {ticket_number}</h2>
+                    </div>
+                    <div class="content">
+                        <p>Hello,</p>
+                        <p>Ticket <strong>{ticket_number} ({title})</strong> has been deleted from the PredictiX system by <strong>{deleter_name}</strong>.</p>
+                        
+                        <div class="delete-box">
+                            <strong>Details of deleted ticket:</strong><br>
+                            <strong>Ticket ID/Number:</strong> {ticket_number}<br>
+                            <strong>Title:</strong> {title}
+                        </div>
+                        
+                        <p>No further actions are required for this ticket.</p>
+                        
+                        <p>Best regards,<br>PredictiX Help Desk</p>
+                    </div>
+                    <div class="footer">
+                        <p>This is an automated notification. Please do not reply to this email.</p>
+                    </div>
+                </div>
+            </body>
+        </html>
+        """
+        return subject, html_body
+
 
 class NotificationService:
     """Service to send email notifications using PostgreSQL database data"""
+
+    @staticmethod
+    def _resolve_session(db: Optional[Session]) -> tuple[Session, bool]:
+        """Ensures an open, valid SQLAlchemy session.
+        If `db` is None or closed (e.g. dispatched via FastAPI BackgroundTasks),
+        opens a fresh SessionLocal() and returns (session, should_close=True)."""
+        try:
+            if db is not None and db.is_active:
+                # Ping connection to ensure it's not closed
+                db.connection()
+                return db, False
+        except Exception:
+            pass
+        from app.db.session import SessionLocal
+        return SessionLocal(), True
 
     @staticmethod
     def _admin_emails_for_warehouse(db: Session, warehouse_id: Optional[str]) -> List[str]:
@@ -345,11 +405,13 @@ class NotificationService:
             Profile.email.isnot(None),
         )
         if warehouse_id:
-            q = q.filter(Profile.warehouse_id == warehouse_id)
+            q = q.filter(
+                (Profile.warehouse_id == warehouse_id) | (Profile.role == "super_admin")
+            )
         return [email for (email,) in q.all()]
 
     @staticmethod
-    def send_email(to_emails: List[str], subject: str, html_body: str) -> bool:
+    def send_email(to_emails: List[str], subject: str, html_body: str, use_wh_key: bool = False) -> bool:
         """
         Send email to one or more recipients
         
@@ -357,190 +419,192 @@ class NotificationService:
             to_emails: List of recipient email addresses
             subject: Email subject
             html_body: HTML body of the email
+            use_wh_key: Send on the warehouse account (WH_BREVO_API_KEY),
+                which is what warehouse report mail goes out on.
             
         Returns:
             True if email sent successfully, False otherwise
         """
         import requests
 
-        api_key = os.getenv("BREVO_API_KEY")
-        sender_email = os.getenv("BREVO_SENDER_EMAIL", "neuromindspredictix@gmail.com")
-        sender_name = os.getenv("BREVO_SENDER_NAME", "PredictiX System")
-
-        if not api_key:
-            print("[NOTIFICATION] Email service disabled - BREVO_API_KEY not configured")
-            return False
-
-        recipients = [{"email": e} for e in to_emails if e]
+        recipients = [e for e in to_emails if e]
         if not recipients:
             print("[NOTIFICATION] No valid recipients - skipping email")
             return False
 
+        reply_to_email = "neuromindspredictix@gmail.com"
+
+        # 1. Primary: Direct Google SMTP (guaranteed inbox delivery)
         try:
-            resp = requests.post(
-                "https://api.brevo.com/v3/smtp/email",
-                headers={
-                    "api-key": api_key,
-                    "Content-Type": "application/json",
-                    "accept": "application/json",
-                },
-                json={
-                    "sender": {"email": sender_email, "name": sender_name},
-                    "to": recipients,
-                    "subject": subject,
-                    "htmlContent": html_body,
-                },
-                timeout=15,
-            )
-            if resp.status_code in (200, 201, 202):
-                print(f"[NOTIFICATION] Email sent via Brevo to {len(recipients)} recipient(s)")
-                return True
-            print(f"[NOTIFICATION-ERROR] Brevo API {resp.status_code}: {resp.text[:200]}")
-            return False
-        except Exception as e:
-            print(f"[NOTIFICATION-ERROR] Failed to send via Brevo: {str(e)}")
-            return False
+            from app.services.reminder_email_sender import send_email as send_smtp
+            for recipient in recipients:
+                send_smtp(
+                    to_email=recipient,
+                    subject=subject,
+                    html_body=html_body,
+                    reply_to=reply_to_email,
+                )
+            print(f"[NOTIFICATION] Email sent via SMTP to {len(recipients)} recipient(s)", flush=True)
+            return True
+        except Exception as smtp_err:
+            print(f"[NOTIFICATION-WARNING] Direct SMTP failed: {smtp_err}, trying Brevo API...", flush=True)
+
+        # 2. Secondary Fallback: Brevo API
+        if use_wh_key:
+            api_key = os.getenv("WH_BREVO_API_KEY") or os.getenv("WHBREVO")
+            if not api_key:
+                # Falling back means warehouse report mail goes out on the
+                # general account. That is better than not sending, but it is
+                # not what was asked for, so it is stated rather than silent.
+                api_key = os.getenv("BREVO_API_KEY")
+                if api_key:
+                    print("[NOTIFICATION-WARNING] No warehouse Brevo key set "
+                          "(WH_BREVO_API_KEY/WHBREVO); sending on the general "
+                          "BREVO_API_KEY instead.", flush=True)
+        else:
+            api_key = os.getenv("BREVO_API_KEY")
+
+        sender_email = os.getenv("BREVO_SENDER_EMAIL", "neuromindspredictix@11453287.brevosend.com")
+        sender_name = os.getenv("BREVO_SENDER_NAME", "PredictiX Admin")
+
+        if api_key:
+            try:
+                resp = requests.post(
+                    "https://api.brevo.com/v3/smtp/email",
+                    headers={
+                        "api-key": api_key,
+                        "Content-Type": "application/json",
+                        "accept": "application/json",
+                    },
+                    json={
+                        "sender": {"email": sender_email, "name": sender_name},
+                        "to": [{"email": e} for e in recipients],
+                        "replyTo": {"email": reply_to_email, "name": "PredictiX Support"},
+                        "subject": subject,
+                        "htmlContent": html_body,
+                    },
+                    timeout=15,
+                )
+                if resp.status_code in (200, 201, 202):
+                    print(f"[NOTIFICATION] Email sent from {sender_email} via Brevo to {len(recipients)} recipient(s)", flush=True)
+                    return True
+                print(f"[NOTIFICATION-ERROR] Brevo API returned {resp.status_code}: {resp.text[:200]}", flush=True)
+            except Exception as brevo_err:
+                print(f"[NOTIFICATION-ERROR] Brevo sending failed: {brevo_err}", flush=True)
+
+        return False
     
     @staticmethod
-    def notify_on_new_user(db: Session, new_user_id: str) -> bool:
-        """
-        Main notification handler - sends all notifications for new user
-        Queries all data directly from PostgreSQL database
-        
-        Args:
-            db: SQLAlchemy database session
-            new_user_id: UUID of the newly created user
-            
-        Returns:
-            True if notifications sent successfully (or email disabled)
-        """
+    def notify_on_user_creation(db: Optional[Session], new_user_id: str) -> bool:
+        """Send notifications to admins and department members when a new user is created"""
+        session, should_close = NotificationService._resolve_session(db)
         try:
             from app.models import Profile, Department
             
-            # ============================================================
-            # Query new user from database
-            # ============================================================
-            new_user = db.query(Profile).filter(Profile.id == new_user_id).first()
-            
-            if not new_user:
-                print(f"[NOTIFICATION-ERROR] New user with ID {new_user_id} not found in database")
+            user = session.query(Profile).filter(Profile.id == new_user_id).first()
+            if not user:
+                print(f"[NOTIFICATION-ERROR] User with ID {new_user_id} not found in database", flush=True)
                 return False
+                
+            print(f"[NOTIFICATION] Processing new user notifications for: {user.full_name}", flush=True)
             
-            print(f"[NOTIFICATION] Processing notifications for user: {new_user.full_name}")
-            
-            # Get department name from database
             department_name = "Not Assigned"
-            if new_user.department_id:
-                dept = db.query(Department).filter(Department.id == new_user.department_id).first()
+            if user.department_id:
+                dept = session.query(Department).filter(Department.id == user.department_id).first()
                 if dept:
                     department_name = dept.name
             
-            # Format creation timestamp
-            created_at = (new_user.created_at or datetime.now()).strftime('%B %d, %Y at %I:%M %p')
+            created_at = (user.created_at or datetime.now()).strftime('%B %d, %Y at %I:%M %p')
+            success = True
             
-            # Generate temporary password
-            import secrets
-            temp_password = secrets.token_urlsafe(12)
-            
-            # ============================================================
-            # 1. SEND WELCOME EMAIL TO NEW USER
-            # ============================================================
-            print(f"[NOTIFICATION] Sending welcome email to {new_user.email}")
-            subject, html_body = EmailTemplates.new_user_welcome_email(
-                new_user_name=new_user.full_name,
-                email=new_user.email,
-                temp_password=temp_password
-            )
-            NotificationService.send_email([new_user.email], subject, html_body)
-            
-            # ============================================================
-            # 2. SEND NOTIFICATION TO ADMINS IN THE NEW USER'S WAREHOUSE
-            # ============================================================
-            admin_emails = NotificationService._admin_emails_for_warehouse(db, new_user.warehouse_id)
-
+            admin_emails = NotificationService._admin_emails_for_warehouse(session, user.warehouse_id)
             if admin_emails:
-                print(f"[NOTIFICATION] Notifying {len(admin_emails)} admin(s) from database")
+                print(f"[NOTIFICATION] Notifying {len(admin_emails)} admin(s) of new user from database", flush=True)
                 subject, html_body = EmailTemplates.new_user_admin_notification(
-                    new_user_name=new_user.full_name,
+                    new_user_name=user.full_name,
                     department=department_name,
-                    role=new_user.role,
-                    email=new_user.email,
+                    role=user.role,
+                    email=user.email,
                     created_at=created_at
                 )
-                NotificationService.send_email(admin_emails, subject, html_body)
+                admin_success = NotificationService.send_email(admin_emails, subject, html_body)
+                success = success and admin_success
             
-            # ============================================================
-            # 3. SEND NOTIFICATION TO DEPARTMENT MEMBERS FROM DATABASE
-            # ============================================================
-            if new_user.department_id:
-                dept_members = db.query(Profile).filter(
-                    Profile.department_id == new_user.department_id,
-                    Profile.id != new_user.id,  # Exclude the new user
-                    Profile.status == "active"
-                ).all()
+            if user.department_id:
+                dept_member_emails = [
+                    e for (e,) in session.query(Profile.email).filter(
+                        Profile.department_id == user.department_id,
+                        Profile.id != user.id,
+                        Profile.status == "active",
+                        Profile.email.isnot(None)
+                    ).all()
+                ]
                 
-                dept_email_list = [member.email for member in dept_members if member.email]
-                
-                if dept_email_list:
-                    print(f"[NOTIFICATION] Notifying {len(dept_email_list)} department member(s) in {department_name} from database")
+                if dept_member_emails:
+                    print(f"[NOTIFICATION] Notifying {len(dept_member_emails)} department member(s) of new user from database", flush=True)
                     subject, html_body = EmailTemplates.new_user_department_notification(
-                        new_user_name=new_user.full_name,
+                        new_user_name=user.full_name,
                         department=department_name,
-                        role=new_user.role,
+                        role=user.role,
                         created_at=created_at
                     )
-                    NotificationService.send_email(dept_email_list, subject, html_body)
+                    dept_success = NotificationService.send_email(dept_member_emails, subject, html_body)
+                    success = success and dept_success
             
-            print(f"[NOTIFICATION] All notifications processed for {new_user.full_name}")
-            return True
+            print(f"[NOTIFICATION] User creation notifications processed for {user.full_name}")
+            return success
             
         except Exception as e:
-            print(f"[NOTIFICATION-ERROR] Failed to process notifications: {str(e)}")
+            print(f"[NOTIFICATION-ERROR] Failed to process user creation notifications: {str(e)}")
             import traceback
             traceback.print_exc()
             return False
+        finally:
+            if should_close:
+                session.close()
     
     @staticmethod
-    def notify_on_profile_update(db: Session, user_id: str) -> bool:
-        """
-        Send notification to admins when a user updates their profile
-        All data fetched directly from PostgreSQL database
-        
-        Args:
-            db: SQLAlchemy database session
-            user_id: UUID of the user who updated their profile
-            
-        Returns:
-            True if notifications sent successfully (or email disabled)
-        """
+    def notify_on_profile_update(db: Optional[Session], user_id: str) -> bool:
+        """Send notification to admins when a user updates their profile"""
+        session, should_close = NotificationService._resolve_session(db)
         try:
             from app.models import Profile, Department
             
-            # ============================================================
-            # Query user who updated their profile
-            # ============================================================
-            user = db.query(Profile).filter(Profile.id == user_id).first()
-            
+            user = session.query(Profile).filter(Profile.id == user_id).first()
             if not user:
                 print(f"[NOTIFICATION-ERROR] User with ID {user_id} not found in database", flush=True)
                 return False
             
             print(f"[NOTIFICATION] Processing profile update notification for: {user.full_name}", flush=True)
             
-            # Get department name from database
             department_name = "Not Assigned"
             if user.department_id:
-                dept = db.query(Department).filter(Department.id == user.department_id).first()
+                dept = session.query(Department).filter(Department.id == user.department_id).first()
                 if dept:
                     department_name = dept.name
             
-            # Format timestamp
             updated_at = (datetime.now()).strftime('%B %d, %Y at %I:%M %p')
             
             # ============================================================
-            # SEND NOTIFICATION TO ADMINS IN THE USER'S WAREHOUSE
+            # SEND NOTIFICATION TO ADMINS IN USER'S DEPARTMENT ONLY
             # ============================================================
-            admin_emails = NotificationService._admin_emails_for_warehouse(db, user.warehouse_id)
+            department_admins = []
+            if user.department_id:
+                from app.deps import ADMIN_ROLES
+                department_admins = [
+                    e for (e,) in session.query(Profile.email).filter(
+                        Profile.role.in_(ADMIN_ROLES),
+                        Profile.status == "active",
+                        Profile.email.isnot(None),
+                        Profile.department_id == user.department_id
+                    ).all()
+                ]
+
+            admin_emails = list(set(department_admins))
+            
+            # HARDCODED FOR PRESENTATION / DEMONSTRATION
+            if "neuromindspredictix@gmail.com" not in admin_emails:
+                admin_emails.append("neuromindspredictix@gmail.com")
 
             if admin_emails:
                 print(f"[NOTIFICATION] Notifying {len(admin_emails)} admin(s) of profile update from database", flush=True)
@@ -562,25 +626,24 @@ class NotificationService:
                     <body>
                         <div class="container">
                             <div class="header">
-                                <h2>Profile Update Notification</h2>
+                                <h2>User Profile Updated</h2>
                             </div>
                             <div class="content">
                                 <p>Hello Admin,</p>
                                 <p>A user has updated their profile information in the PredictiX system.</p>
                                 
                                 <div class="info-box">
-                                    <strong>User Details (from Database):</strong><br>
+                                    <strong>User Details:</strong><br>
                                     <strong>Name:</strong> {user.full_name}<br>
                                     <strong>Email:</strong> {user.email}<br>
                                     <strong>Department:</strong> {department_name}<br>
                                     <strong>Role:</strong> {user.role.upper()}<br>
-                                    <strong>Contact Number:</strong> {user.phone if user.phone else 'Not provided'}<br>
                                     <strong>Updated:</strong> {updated_at}
                                 </div>
                                 
                                 <p>Please review their updated profile in the admin section if needed.</p>
                                 
-                                <p>Best regards,<br>PredictiX System</p>
+                                <p>Generated by PredictiX System</p>
                             </div>
                             <div class="footer">
                                 <p>This is an automated notification. Please do not reply to this email.</p>
@@ -589,75 +652,74 @@ class NotificationService:
                     </body>
                 </html>
                 """
-                
                 NotificationService.send_email(admin_emails, subject, html_body)
             
             print(f"[NOTIFICATION] Profile update notification processed for {user.full_name}")
             return True
-            
         except Exception as e:
             print(f"[NOTIFICATION-ERROR] Failed to process profile update notification: {str(e)}")
             import traceback
             traceback.print_exc()
             return False
+        finally:
+            if should_close:
+                session.close()
 
     @staticmethod
-    def notify_on_new_faq(db: Session, question: str, answer: str, category: Optional[str] = None, creator_name: str = "Administrator") -> bool:
-        """Send notification to admins when a new FAQ is created"""
+    def notify_on_new_faq(db: Optional[Session], question: str, answer: str, category: Optional[str] = None, creator_name: str = "Administrator") -> bool:
+        """Send notification to all users when a new FAQ is created"""
+        session, should_close = NotificationService._resolve_session(db)
         try:
             from app.models import Profile
-            
-            # FAQs are a shared knowledge base (not tied to a warehouse or
-            # asset), so every active admin/super_admin is notified.
-            admin_emails = NotificationService._admin_emails_for_warehouse(db, None)
-
-            if not admin_emails:
-                print("[NOTIFICATION] No admins to notify for new FAQ - skipping email", flush=True)
+            user_emails = [
+                email for (email,) in session.query(Profile.email)
+                .filter(Profile.email.isnot(None))
+                .all()
+            ]
+            if not user_emails:
+                print("[NOTIFICATION] No users to notify for new FAQ - skipping email", flush=True)
                 return False
                 
-            print(f"[NOTIFICATION] Notifying {len(admin_emails)} admin(s) of new FAQ", flush=True)
+            print(f"[NOTIFICATION] Notifying {len(user_emails)} user(s) of new FAQ", flush=True)
             subject, html_body = EmailTemplates.new_faq_notification(
                 question=question,
                 answer=answer,
                 category=category or "General",
                 creator_name=creator_name
             )
-            return NotificationService.send_email(admin_emails, subject, html_body)
+            return NotificationService.send_email(user_emails, subject, html_body)
         except Exception as e:
             print(f"[NOTIFICATION-ERROR] Failed to notify on new FAQ: {str(e)}", flush=True)
             return False
+        finally:
+            if should_close:
+                session.close()
 
     @staticmethod
-    def notify_on_new_ticket(db: Session, ticket_id: str) -> bool:
+    def notify_on_new_ticket(db: Optional[Session], ticket_id: str) -> bool:
         """Send notifications to admins, creator, and assignee when a ticket is created"""
+        session, should_close = NotificationService._resolve_session(db)
         try:
             from app.models import Ticket, Profile
             
-            ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+            ticket = session.query(Ticket).filter(Ticket.id == ticket_id).first()
             if not ticket:
                 print(f"[NOTIFICATION-ERROR] Ticket with ID {ticket_id} not found", flush=True)
                 return False
                 
-            # Get creator details
-            creator = db.query(Profile).filter(Profile.id == ticket.created_by).first()
+            creator = session.query(Profile).filter(Profile.id == ticket.created_by).first()
             creator_name = creator.full_name if creator else "System/Unknown"
             creator_email = creator.email if creator else None
             
-            # Get assignee details
             assignee_name = "Unassigned"
             assignee_email = None
             if ticket.assigned_to:
-                assignee = db.query(Profile).filter(Profile.id == ticket.assigned_to).first()
+                assignee = session.query(Profile).filter(Profile.id == ticket.assigned_to).first()
                 if assignee:
                     assignee_name = assignee.full_name
                     assignee_email = assignee.email
                     
-            # Admin recipients — scoped to the ticket's own warehouse so
-            # admins don't get flooded with notifications for tickets
-            # outside the warehouse they manage.
-            admin_emails = NotificationService._admin_emails_for_warehouse(db, ticket.warehouse_id)
-
-            # Determine overall recipients list ensuring uniqueness
+            admin_emails = NotificationService._admin_emails_for_warehouse(session, ticket.warehouse_id)
             recipients = set(admin_emails)
             if creator_email:
                 recipients.add(creator_email)
@@ -682,43 +744,42 @@ class NotificationService:
         except Exception as e:
             print(f"[NOTIFICATION-ERROR] Failed to notify on new ticket: {str(e)}", flush=True)
             return False
+        finally:
+            if should_close:
+                session.close()
 
     @staticmethod
-    def notify_on_ticket_update(db: Session, ticket_id: str, updater_id: str, old_status: str, old_priority: str, old_assigned_to: Optional[str]) -> bool:
+    def notify_on_ticket_update(db: Optional[Session], ticket_id: str, updater_id: str, old_status: str, old_priority: str, old_assigned_to: Optional[str]) -> bool:
         """Send notifications when a ticket is updated"""
+        session, should_close = NotificationService._resolve_session(db)
         try:
             from app.models import Ticket, Profile
             
-            ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+            ticket = session.query(Ticket).filter(Ticket.id == ticket_id).first()
             if not ticket:
                 print(f"[NOTIFICATION-ERROR] Ticket with ID {ticket_id} not found", flush=True)
                 return False
                 
-            # Get updater details
-            updater = db.query(Profile).filter(Profile.id == updater_id).first()
+            updater = session.query(Profile).filter(Profile.id == updater_id).first()
             updater_name = updater.full_name if updater else "System/User"
             
-            # Determine changes
             changes = []
             if old_status != ticket.status:
                 changes.append(f"<li><b>Status:</b> Changed from <span style='color: #ef4444;'>{old_status}</span> to <span style='color: #22c55e;'>{ticket.status}</span></li>")
             if old_priority != ticket.priority:
                 changes.append(f"<li><b>Priority:</b> Changed from <b>{old_priority}</b> to <b>{ticket.priority}</b></li>")
             
-            # Check assignee change (single lookup, reused below for both
-            # the changelog name and the notification recipient email).
             old_assignee_name = "Unassigned"
             old_assignee_email = None
             if old_assigned_to:
-                old_assignee = db.query(Profile).filter(Profile.id == old_assigned_to).first()
+                old_assignee = session.query(Profile).filter(Profile.id == old_assigned_to).first()
                 if old_assignee:
                     old_assignee_name = old_assignee.full_name
                     old_assignee_email = old_assignee.email
-
             new_assignee_name = "Unassigned"
             new_assignee_email = None
             if ticket.assigned_to:
-                new_assignee = db.query(Profile).filter(Profile.id == ticket.assigned_to).first()
+                new_assignee = session.query(Profile).filter(Profile.id == ticket.assigned_to).first()
                 if new_assignee:
                     new_assignee_name = new_assignee.full_name
                     new_assignee_email = new_assignee.email
@@ -726,30 +787,26 @@ class NotificationService:
             if str(old_assigned_to or "") != str(ticket.assigned_to or ""):
                 changes.append(f"<li><b>Assignee:</b> Changed from <b>{old_assignee_name}</b> to <b>{new_assignee_name}</b></li>")
                 
-            # If nothing notable changed, don't send notification
             if not changes:
                 print(f"[NOTIFICATION] No status, priority, or assignee change on ticket {ticket.ticket_number} - skipping email", flush=True)
                 return False
                 
             changes_html = "<ul>" + "".join(changes) + "</ul>"
             
-            # Get creator details
-            creator = db.query(Profile).filter(Profile.id == ticket.created_by).first()
+            creator = session.query(Profile).filter(Profile.id == ticket.created_by).first()
             creator_email = creator.email if creator else None
+            updater_email = updater.email if updater else None
             
-            # Admins scoped to the ticket's own warehouse — see notify_on_new_ticket.
-            admin_emails = NotificationService._admin_emails_for_warehouse(db, ticket.warehouse_id)
-
-            # Build recipients set
+            admin_emails = NotificationService._admin_emails_for_warehouse(session, ticket.warehouse_id)
             recipients = set(admin_emails)
             if creator_email:
                 recipients.add(creator_email)
+            if updater_email:
+                recipients.add(updater_email)
             if new_assignee_email:
                 recipients.add(new_assignee_email)
-            # Notify old assignee too if they were removed/changed
             if old_assignee_email:
                 recipients.add(old_assignee_email)
-
             email_list = list(recipients)
             if not email_list:
                 return False
@@ -764,5 +821,41 @@ class NotificationService:
             return NotificationService.send_email(email_list, subject, html_body)
         except Exception as e:
             print(f"[NOTIFICATION-ERROR] Failed to notify on ticket update: {str(e)}", flush=True)
+            return False
+        finally:
+            if should_close:
+                session.close()
+
+    @staticmethod
+    def notify_on_ticket_delete(
+        ticket_number: str,
+        title: str,
+        creator_email: Optional[str],
+        assignee_email: Optional[str],
+        deleter_name: str,
+        admin_emails: List[str]
+    ) -> bool:
+        """Send notifications to creator, assignee, and admins when a ticket is deleted"""
+        try:
+            recipients = set(admin_emails)
+            if creator_email:
+                recipients.add(creator_email)
+            if assignee_email:
+                recipients.add(assignee_email)
+                
+            email_list = list(recipients)
+            if not email_list:
+                print("[NOTIFICATION] No recipients to notify for deleted ticket - skipping email", flush=True)
+                return False
+                
+            print(f"[NOTIFICATION] Notifying on deleted ticket {ticket_number} to {len(email_list)} recipients", flush=True)
+            subject, html_body = EmailTemplates.ticket_deleted_notification(
+                ticket_number=ticket_number,
+                title=title,
+                deleter_name=deleter_name
+            )
+            return NotificationService.send_email(email_list, subject, html_body)
+        except Exception as e:
+            print(f"[NOTIFICATION-ERROR] Failed to notify on ticket delete: {str(e)}", flush=True)
             return False
 

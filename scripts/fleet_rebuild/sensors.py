@@ -5,7 +5,7 @@ alongside them. Every service in v11 shows up as a step in
 ``lifetime_service_count`` with ``days_since_last_service`` resetting to a small
 number and the serviced component's health jumping back up. Reading the events
 back out of that signal guarantees the workshop history and the sensor history
-can never contradict each other — which they would if both were rolled
+can never contradict each other, which they would if both were rolled
 independently.
 """
 

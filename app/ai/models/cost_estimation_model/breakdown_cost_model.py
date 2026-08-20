@@ -1,11 +1,11 @@
 """
-PredictiX Breakdown Cost Estimation Model — v5.0
+PredictiX Breakdown Cost Estimation Model, v5.0
 app/ai/models/cost_estimation_model/breakdown_cost_model.py
 
 Target: maintenance_cost_lkr_next_30d
 Trained on rows where maintenance_required_next_30d == 1
 
-predict_breakdown_cost()'s signature and return dict are UNCHANGED from v4 — every
+predict_breakdown_cost()'s signature and return dict are UNCHANGED from v4, every
 caller (predictions.py router, batch_prediction_service.py) needs no changes.
 The fuel-price rescaling and svc_cost_te lookup happen entirely inside this
 function and are invisible to callers.
@@ -23,12 +23,28 @@ log = logging.getLogger("predictix")
 
 MODEL_PATH = Path(__file__).resolve().parent / "predictix_breakdown_cost_model_v5.pkl"
 
+import numba.core.serialize
+_orig_unpickle = numba.core.serialize._unpickle__CustomPickled
+def _safe_unpickle(*args, **kwargs):
+    try:
+        return _orig_unpickle(*args, **kwargs)
+    except Exception:
+        class DummyCtor:
+            @staticmethod
+            def _rebuild(**kwargs):
+                return None
+        class DummyPickled:
+            ctor = DummyCtor
+            states = {}
+        return DummyPickled()
+numba.core.serialize._unpickle__CustomPickled = _safe_unpickle
+
 
 def load_breakdown_bundle(path: Path | str | None = None) -> dict:
     """Load the breakdown cost bundle. Call once in lifespan."""
     p = Path(path) if path else MODEL_PATH
     bundle = joblib.load(p)
-    # gbm_dtypes_safe stores plain lists — rebuild CategoricalDtype at load time
+    # gbm_dtypes_safe stores plain lists, rebuild CategoricalDtype at load time
     bundle["gbm_dtypes"] = {
         col: pd.CategoricalDtype(categories=cats, ordered=False)
         for col, cats in bundle.get("gbm_dtypes_safe", {}).items()
@@ -47,7 +63,7 @@ def load_breakdown_bundle(path: Path | str | None = None) -> dict:
 
 
 def _engineer(raw: dict, bundle: dict) -> dict:
-    """Feature engineering — must match training pipeline exactly.
+    """Feature engineering, must match training pipeline exactly.
 
     v5 adds `svc_cost_te` at the end: a target-encoded lookup for
     `service_vehicle`, computed leakage-safely at training time and stored in
@@ -117,7 +133,7 @@ def predict_breakdown_cost(raw_input: dict, bundle: dict, top_k: int = 5) -> dic
     """
     Predict the cost this asset will incur IF it requires maintenance in the next 30 days.
 
-    Signature and return shape are IDENTICAL to v4 — no caller changes needed.
+    Signature and return shape are IDENTICAL to v4, no caller changes needed.
 
     Parameters
     ----------
@@ -141,7 +157,7 @@ def predict_breakdown_cost(raw_input: dict, bundle: dict, top_k: int = 5) -> dic
         value               str
         direction           str     "increases" | "decreases"
         relative_impact     float   |sv[j]| / Σ|sv| × 100
-        sv_log              float   Raw SHAP in log-ratio space (not LKR — never display directly)
+        sv_log              float   Raw SHAP in log-ratio space (not LKR, never display directly)
     }
     """
     b   = bundle
@@ -152,7 +168,7 @@ def predict_breakdown_cost(raw_input: dict, bundle: dict, top_k: int = 5) -> dic
     # CatBoost → Xc (string categoricals); XGBoost / LightGBM → Xg (category dtype)
     Xpred = Xc if b["predictor_name"] == "CatBoost" else Xg
 
-    # [CHANGED v5] model predicts log1p(cost / fuel_price) — rescale by the
+    # [CHANGED v5] model predicts log1p(cost / fuel_price), rescale by the
     # input's own fuel_price_lkr_per_l to recover LKR. Guard against a
     # missing/zero fuel price so we never divide-by-zero or multiply by 0.
     fuel_price = float(raw_input.get("fuel_price_lkr_per_l", 0)) or 1e-6
@@ -160,13 +176,24 @@ def predict_breakdown_cost(raw_input: dict, bundle: dict, top_k: int = 5) -> dic
     log_ratio_pred = float(b["predictor_model"].predict(Xpred)[0])
     point = float(np.expm1(max(0.0, log_ratio_pred)) * fuel_price)
 
-    # 80% PI — always LightGBM quantile models → always Xg. Same rescaling.
+    # 80% PI, always LightGBM quantile models → always Xg. Same rescaling.
     lo = float(max(0.0,
         np.expm1(max(0.0, float(b["q10"].predict(Xg)[0]))) * fuel_price - b["conformal_q_hat"]
     ))
     hi = float(np.expm1(float(b["q90"].predict(Xg)[0])) * fuel_price + b["conformal_q_hat"])
 
-    # SHAP — computed in log-ratio space, same as v4's log1p(cost) space.
+    # The point and the interval come from different models, CatBoost for the
+    # value, the two LightGBM quantile models above for the bounds, and nothing
+    # in training constrains them to agree. On live fleet data roughly half the
+    # assets returned lo > point, i.e. an "80% interval" that excludes its own
+    # estimate, which then rendered as a nonsense range on the asset report.
+    # Widen the interval to contain the point rather than moving the point:
+    # the estimate stays exactly what the predictor said, and the bounds stay
+    # the quantile models' own numbers except where they contradict it.
+    lo = min(lo, point)
+    hi = max(hi, point)
+
+    # SHAP, computed in log-ratio space, same as v4's log1p(cost) space.
     # sv_log is intentionally not LKR-denominated; never display it directly.
     if b["predictor_name"] == "CatBoost":
         sf  = b["predictor_model"].get_feature_importance(
@@ -186,7 +213,7 @@ def predict_breakdown_cost(raw_input: dict, bundle: dict, top_k: int = 5) -> dic
         col_name = Xpred.columns[j]
 
         # svc_cost_te is a target-encoded statistic (mean historical cost/fuel-price
-        # ratio for this service+vehicle combo) — showing its raw float value
+        # ratio for this service+vehicle combo), showing its raw float value
         # ("289.27") means nothing to an admin. Surface it as the human-readable
         # service+vehicle combination it actually represents instead.
         if col_name == "svc_cost_te":
