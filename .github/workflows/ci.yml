@@ -196,10 +196,11 @@ jobs:
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          # Chatbot LLM.
+          # Warehouse report generation, which also reads WH_GROQ_MODEL.
+          WH_GROQ_API_KEY: ${{ secrets.WH_GROQ_API_KEY }}
+          WH_GROQ_MODEL: ${{ vars.WH_GROQ_MODEL }}
+          # Chatbot LLM, the fallback key when the first is rate-limited.
           CHATBOT_GROQ_API_KEY: ${{ secrets.CHATBOT_GROQ_API_KEY }}
-          # Warehouse report generation LLM, a different provider entirely.
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           # Summary Spaces and the token that reaches them.
           ASSET_SUMMARY_SPACE: ${{ vars.ASSET_SUMMARY_SPACE }}
           TICKET_SUMMARY_SPACE: ${{ vars.TICKET_SUMMARY_SPACE }}

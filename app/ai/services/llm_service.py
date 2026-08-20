@@ -1,9 +1,9 @@
-"""Groq LLM service with two-model support and automatic fallback.
+"""Groq LLM service with active model support and automatic fallback.
 
 Models used:
-  PRIMARY   = llama-3.3-70b-versatile   (used only for SQL generation)
-  FAST      = llama-3.1-8b-instant       (router, table selector, summarizer)
-  FALLBACK  = llama-3.3-70b-versatile   (if 8b-instant is unavailable)
+  DEFAULT / FAST  = groq/compound-mini or groq/compound
+  HEAVY / SQL     = groq/compound or openai/gpt-oss-120b
+  FALLBACK        = qwen/qwen3.6-27b or openai/gpt-oss-20b
 """
 from __future__ import annotations
 
@@ -11,74 +11,52 @@ import logging
 import os
 import time
 from typing import Optional
+from dotenv import load_dotenv
 
 from groq import Groq
 
+# Ensure .env is loaded
+load_dotenv()
+
 log = logging.getLogger("predictix.llm")
 
-# Groq models in the order they are attempted. The first entry must be one the
-# deployed GROQ_API_KEY can actually call: a dead or forbidden model at the head
-# of this list costs a failed HTTP round-trip on *every* LLM request before the
-# cascade recovers, which is why the previous order was worth fixing.
-#
-# Probed against the live API 2026-08-12 with the deployed key:
-#   llama-3.3-70b-versatile   OK
-#   llama-3.1-8b-instant      403, listed in models.list() but not permitted
-#                                   for this key's tier
-#   llama3-8b-8192            400, decommissioned
-#   llama-3.1-70b-versatile   400, decommissioned
-#
-# The 403 is a key/tier property, not a property of the model, so 8b-instant is
-# kept as a fallback: a key with broader access would use it, and on this key it
-# is simply never reached. Re-probe before trusting these notes, the point of
-# the cascade is that Groq retires models faster than this file gets edited.
-# The chatbot's first-choice model. WH_GROQ_MODEL is still read so a
-# deployment already carrying that name keeps the model it was configured with.
-CHATBOT_MODEL = (
-    os.getenv("CHATBOT_GROQ_MODEL")
-    or os.getenv("WH_GROQ_MODEL")
-    or "llama-3.3-70b-versatile"
-)
-
+# Active Groq models available
 MODEL_COMPOUND = "groq/compound"
 MODEL_COMPOUND_MINI = "groq/compound-mini"
 
 FAST_MODELS = [
-    CHATBOT_MODEL,
-    "groq/compound-mini",
     "groq/compound",
+    "groq/compound-mini",
     "qwen/qwen3.6-27b",
+    "openai/gpt-oss-120b",
 ]
 
 HEAVY_MODELS = [
     "groq/compound",
     "groq/compound-mini",
-    "llama-3.3-70b-versatile",
     "openai/gpt-oss-120b",
+    "qwen/qwen3.6-27b",
 ]
 
 MODEL_CASCADE = [
-    CHATBOT_MODEL,
-    "llama-3.1-8b-instant",
-    "groq/compound-mini",
     "groq/compound",
+    "groq/compound-mini",
     "qwen/qwen3.6-27b",
     "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
 ]
 
-DEFAULT_MODEL = MODEL_COMPOUND_MINI
+DEFAULT_MODEL = MODEL_COMPOUND
 
 
 def _get_api_keys() -> list[str]:
-    """Groq keys this service may use, in priority order.
-
-    Groq backs the chatbot and nothing else: warehouse report generation runs
-    on OpenRouter (see app/agents/report_agents._get_llm). Every Groq key in
-    the environment therefore serves this one purpose, and the extras act as
-    failover when the first is rate-limited.
+    """Retrieve all configured Groq API keys in priority order:
+    1. WH_GROQ_API_KEY (Primary - always tried first)
+    2. CHATBOT_GROQ_API_KEY (Secondary fallback)
+    3. GROQ_API_KEY (Tertiary fallback)
     """
     keys: list[str] = []
-    for var in ["CHATBOT_GROQ_API_KEY", "WH_GROQ_API_KEY", "GROQ_API_KEY"]:
+    for var in ["WH_GROQ_API_KEY", "CHATBOT_GROQ_API_KEY", "GROQ_API_KEY"]:
         val = os.getenv(var)
         if val and val.strip() and val.strip() not in keys:
             keys.append(val.strip())
@@ -104,104 +82,122 @@ def call_groq(
     model: str = DEFAULT_MODEL,
     max_tokens: int = 512,
     temperature: float = 0.3,
-    retries: int = 2,
+    retries: int = 1,
     tools: Optional[list] = None,
     tool_choice: Optional[str] = None,
 ) -> tuple[str | dict, str]:
-    """Call Groq with automatic multi-key failover, model cascade, and retry.
+    """Call Groq with automatic multi-key failover, multi-model cascade, and retry.
 
-    Returns:
-        (result, fallback_msg): 
-          - result: str if no tools, dict if tools used.
-          - fallback_msg: empty string if successful on first try, or a friendly message if fallback occurred.
+    Systematically rotates through all configured API keys and candidate models
+    upon encountering ANY trouble (rate limits, 401/403 permission errors,
+    404 model not found, timeouts, 500/503 server errors, etc.).
     """
     global _ACTIVE_KEY_INDEX
     keys = _get_api_keys()
-    current_key_idx = _ACTIVE_KEY_INDEX
-    client, current_key_idx = _get_client(current_key_idx)
+    if not keys:
+        raise RuntimeError("No Groq API keys configured in environment")
 
-    kwargs: dict = {
-        "model": model,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-    }
-    if tools:
-        kwargs["tools"] = tools
-    if tool_choice:
-        kwargs["tool_choice"] = tool_choice
+    # Build prioritized candidate model list starting with the requested model
+    pool = HEAVY_MODELS if model in HEAVY_MODELS else FAST_MODELS
+    candidate_models: list[str] = [model]
+    for m in pool + MODEL_CASCADE:
+        if m not in candidate_models:
+            candidate_models.append(m)
 
     last_err: Exception | None = None
     fallback_message = ""
-    current_model = model
-    tried: set[str] = {model}
-    attempt = 0
 
-    while attempt <= retries:
-        try:
-            resp = client.chat.completions.create(**kwargs)
-            msg = resp.choices[0].message
-            if tools:
-                return (msg, fallback_message)  # type: ignore[return-value]
-            return (msg.content or "", fallback_message)
-        except Exception as e:
-            last_err = e
-            err_str = str(e).lower()
-            is_rate_limit = "429" in err_str or "rate_limit" in err_str
-            is_model_blocked = (
-                "403" in err_str
-                or "blocked" in err_str
-                or "not allowed" in err_str
-                or "permission" in err_str
-                or "decommissioned" in err_str
-                or "no longer supported" in err_str
-                or "model_decommissioned" in err_str
-                or ("model" in err_str and "not found" in err_str)
-            )
+    # Try every candidate model in order
+    for model_idx, current_model in enumerate(candidate_models):
+        kwargs: dict = {
+            "model": current_model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        if tools:
+            kwargs["tools"] = tools
+        if tool_choice:
+            kwargs["tool_choice"] = tool_choice
 
-            # 1. Multi-key failover: switch to backup Groq key on rate limit (429)
-            if is_rate_limit and len(keys) > 1:
-                current_key_idx = (current_key_idx + 1) % len(keys)
-                _ACTIVE_KEY_INDEX = current_key_idx
-                log.warning(
-                    "Groq API key rate-limited (429). Seamlessly switching to backup Groq key (%d/%d)...",
-                    current_key_idx + 1,
-                    len(keys),
-                )
-                client, _ = _get_client(current_key_idx)
-                continue
+        is_model_missing = False
 
-            # 2. Model cascade on block/decommission
-            if is_model_blocked:
-                pool = HEAVY_MODELS if current_model in HEAVY_MODELS else FAST_MODELS
-                next_model = next((m for m in pool if m not in tried), None)
-                if not next_model:
-                    next_model = next((m for m in MODEL_CASCADE if m not in tried), None)
-                if next_model:
-                    log.warning(
-                        "Model %s blocked. Falling back to %s.",
-                        current_model, next_model,
+        # For this model, try all configured API keys starting from _ACTIVE_KEY_INDEX
+        for key_offset in range(len(keys)):
+            current_key_idx = (_ACTIVE_KEY_INDEX + key_offset) % len(keys)
+            client, _ = _get_client(current_key_idx)
+
+            # Attempts per key/model for transient hiccups
+            for attempt in range(retries + 1):
+                try:
+                    resp = client.chat.completions.create(**kwargs)
+                    msg = resp.choices[0].message
+                    # Save working key as the new active key
+                    _ACTIVE_KEY_INDEX = current_key_idx
+                    if model_idx > 0:
+                        log.info(
+                            "Groq succeeded using fallback model '%s' with key #%d/%d",
+                            current_model,
+                            current_key_idx + 1,
+                            len(keys),
+                        )
+                    if tools:
+                        return (msg, fallback_message)
+                    return (msg.content or "", fallback_message)
+
+                except Exception as e:
+                    last_err = e
+                    err_str = str(e).lower()
+
+                    # Check if model is missing / decommissioned (no key will have it)
+                    is_model_missing = (
+                        "404" in err_str
+                        or "model_not_found" in err_str
+                        or "not found" in err_str
+                        or "decommissioned" in err_str
                     )
-                    current_model = next_model
-                    tried.add(next_model)
-                    kwargs["model"] = current_model
-                    fallback_message = ""
-                    continue
+                    if is_model_missing:
+                        log.warning(
+                            "Model '%s' is not found or decommissioned (%s). Cascading to next model...",
+                            current_model,
+                            str(e)[:100],
+                        )
+                        break
 
-            attempt += 1
-            if attempt <= retries:
-                backoff = 2.0 * attempt
-                log.warning(
-                    "Groq call failed (attempt %d/%d), retrying in %.1fs: %s",
-                    attempt, retries, backoff, str(e)[:120],
-                )
-                time.sleep(backoff)
+                    # Check if key issue (401, 403, 429 rate limit, quota, project blocked)
+                    is_key_issue = (
+                        "401" in err_str
+                        or "403" in err_str
+                        or "429" in err_str
+                        or "rate_limit" in err_str
+                        or "permissions_error" in err_str
+                        or "blocked" in err_str
+                        or "unauthorized" in err_str
+                    )
+                    if is_key_issue and len(keys) > 1 and key_offset < len(keys) - 1:
+                        log.warning(
+                            "Groq key #%d encountered error (%s). Seamlessly rotating to next key...",
+                            current_key_idx + 1,
+                            str(e)[:100],
+                        )
+                        break
 
-    raise RuntimeError(f"Groq call failed after {retries + 1} attempts: {last_err}")
+                    # Transient connection/server error: brief retry with backoff
+                    if attempt < retries:
+                        time.sleep(1.0 * (attempt + 1))
+                    else:
+                        break
+
+            if is_model_missing:
+                break
+
+    raise RuntimeError(
+        f"All Groq API keys ({len(keys)}) and candidate models ({len(candidate_models)}) failed. Last error: {last_err}"
+    )
 
 
 def ask_llm(context: str, question: str) -> str:
-    """Legacy RAG LLM call, kept for backwards compatibility with /chatbot/ask."""
+    """Legacy RAG LLM call – kept for backwards compatibility with /chatbot/ask."""
     try:
         res, msg = call_groq(
             messages=[

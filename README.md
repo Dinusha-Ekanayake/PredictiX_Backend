@@ -541,16 +541,14 @@ DATABASE_PASSWORD=<your-db-password>
 DATABASE_KEY=sb_secret_...
 # If DATABASE_URL is omitted, the backend builds the pooler URL from PROJECT_REF and DATABASE_PASSWORD.
 
-# LLM providers. Each feature has its own credential and they are not
-# interchangeable: a key used for the wrong feature spends the wrong budget.
-# Chatbot and agent (Groq). CHATBOT_GROQ_API_KEY is tried first, then
-# WH_GROQ_API_KEY as failover. CHATBOT_GROQ_MODEL overrides the first model
-# in the cascade.
-CHATBOT_GROQ_API_KEY=gsk_...
+# Groq keys. Both features are billed separately, so which key a feature
+# reaches for decides which budget it spends.
+# Warehouse report generation, which also picks its model from WH_GROQ_MODEL.
 WH_GROQ_API_KEY=gsk_...
-# Warehouse report generation (OpenRouter, not Groq). Report generation
-# returns 503 without this.
-OPENROUTER_API_KEY=sk-or-v1-...
+WH_GROQ_MODEL=groq/compound
+# Chatbot and agent. WH_GROQ_API_KEY is tried first and this is the fallback,
+# so the chatbot keeps answering when the first key is rate-limited.
+CHATBOT_GROQ_API_KEY=gsk_...
 
 # HuggingFace (required only if DISABLE_HF_MODELS=false)
 DISABLE_HF_MODELS=true
