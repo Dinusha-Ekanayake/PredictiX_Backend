@@ -56,8 +56,7 @@ def log_maintenance(
 ):
     """Record a completed service and advance the asset's service state.
 
-    The asset page has always called this path, but the route did not exist —
-    every "Log Maintenance" save returned 404. ``POST /maintenance/`` could not
+    The asset page has always called this path, but the route did not exist, every "Log Maintenance" save returned 404. ``POST /maintenance/`` could not
     stand in for it: that endpoint is a bare row insert which needs
     ``asset_id`` and ``event_type`` in the body, and has nowhere to put
     ``next_service_date``, so using it would have silently dropped the service
@@ -130,7 +129,7 @@ def log_maintenance(
     try:
         db.commit()
     except Exception:
-        # One transaction covers the event and the asset update — a partial
+        # One transaction covers the event and the asset update, a partial
         # write would leave a service recorded against stale service dates.
         db.rollback()
         raise
@@ -150,7 +149,7 @@ def list_maintenance_events(
     q = db.query(MaintenanceEvent)
 
     # Regular users only see maintenance history for assets assigned to
-    # them — otherwise the shared asset-details panel's Maintenance Logs
+    # them, otherwise the shared asset-details panel's Maintenance Logs
     # tab (called with ?asset_id=) would expose service notes/costs for
     # any asset in the fleet, including ones assigned to other employees.
     if not is_admin_role(current_user):
@@ -176,7 +175,7 @@ def get_maintenance_event(
     if not obj:
         raise HTTPException(status_code=404, detail="Maintenance event not found")
 
-    # Same ownership rule as list_maintenance_events above — a regular user
+    # Same ownership rule as list_maintenance_events above, a regular user
     # may only fetch a single event for an asset assigned to them.
     if not is_admin_role(current_user):
         uid = str(getattr(current_user, "id", ""))

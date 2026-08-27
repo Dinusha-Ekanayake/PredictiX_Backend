@@ -22,12 +22,12 @@ class InAppNotificationService:
         meta: dict = None,
     ) -> list:
         """Create a notification for every id in user_ids with ONE preference
-        query, ONE bulk insert, and ONE commit — instead of the naive
-        per-user loop (which was N users x [1 preference query + 1 insert +
-        1 commit], e.g. ~20-30 round-trips to notify 9 admins). Per-user
+        query, ONE bulk insert, and ONE commit, rather than a per-user loop
+        costing N users x [1 preference query + 1 insert + 1 commit], around
+        20-30 round-trips to notify 9 admins. Per-user
         side effects (websocket push, email) still happen individually
         since those aren't DB calls and inherently can't be batched, but
-        they run against data already fetched here — no extra queries.
+        they run against data already fetched here, no extra queries.
         """
         user_ids = [str(uid) for uid in user_ids if uid]
         if not user_ids:
@@ -46,12 +46,12 @@ class InAppNotificationService:
             for p in prefs:
                 prefs_by_user.setdefault(str(p.user_id), []).append(p)
 
-            # Only fetch profiles up front if any user might need email/sms —
+            # Only fetch profiles up front if any user might need email/sms, 
             # decided per-user below, but the query itself is one IN(...) call
             # regardless of how many of them actually end up needing it.
             # Contact info is copied into plain dicts (not kept as live ORM
             # objects) because expire_on_commit=True (the session default)
-            # expires every tracked object on the commit below — touching an
+            # expires every tracked object on the commit below, touching an
             # attribute on a stale ORM object after that silently re-issues
             # a fresh per-object SELECT, defeating the whole point of the
             # batched fetch.
@@ -101,12 +101,12 @@ class InAppNotificationService:
                     )
 
             # Snapshot the id/created_at each Notification will have BEFORE
-            # insert — id is a client-side default (models.Notification.id =
+            # insert, id is a client-side default (models.Notification.id =
             # Column(..., default=uuid.uuid4)) so it's already known; the
             # timestamp is approximated as "now" for the websocket push
             # rather than round-tripping to read back the server default.
             # This is what lets the commit below be the last DB call in this
-            # function — no post-commit refresh() per notification.
+            # function, no post-commit refresh() per notification.
             now = datetime.now(timezone.utc)
             websocket_payloads = [
                 {
@@ -128,7 +128,7 @@ class InAppNotificationService:
                 db.commit()
                 created = to_insert
 
-            # Per-user side effects — no further DB queries, only network
+            # Per-user side effects, no further DB queries, only network
             # calls (websocket push, outbound email) using data captured
             # above (payloads) / before the commit (contact_by_id) so
             # nothing here touches an expired ORM object.
@@ -152,7 +152,7 @@ class InAppNotificationService:
     @staticmethod
     def _push_websocket(payload: dict) -> None:
         """payload is a plain dict (see websocket_payloads in
-        _create_notifications_bulk) — never a live ORM object, since those
+        _create_notifications_bulk), never a live ORM object, since those
         can be expired by the commit that happens right before this runs."""
         user_id = payload.pop("user_id")
         try:
@@ -223,7 +223,7 @@ class InAppNotificationService:
     ):
         """Notify admins. When warehouse_id is given, scopes to admins whose
         profile.warehouse_id matches PLUS every super_admin (who operate
-        across all warehouses) — mirrors the scoping used everywhere else
+        across all warehouses), mirrors the scoping used everywhere else
         in the app (see app.deps.active_warehouse_id / is_admin_role)."""
         query = db.query(Profile.id).filter(Profile.role.in_(["admin", "super_admin"]))
         if warehouse_id:

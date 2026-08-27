@@ -22,14 +22,14 @@ def get_exact_db_values(db: Session = Depends(get_db)):
     # Total AssetFailurePrediction records
     total_predictions = db.query(AssetFailurePrediction.id).count()
 
-    # Average health — computed in SQL (AVG) instead of pulling every row
+    # Average health, computed in SQL (AVG) instead of pulling every row
     # into Python just to sum()/len() it.
     avg_health = db.query(func.avg(AssetFailurePrediction.health_score)).scalar() or 0
     total_health_scores_count = (
         db.query(AssetFailurePrediction.id).filter(AssetFailurePrediction.health_score.isnot(None)).count()
     )
 
-    # Small sample of raw values for inspection — not the whole table.
+    # Small sample of raw values for inspection, not the whole table.
     sample_health_scores = (
         db.query(AssetFailurePrediction.health_score)
         .filter(AssetFailurePrediction.health_score.isnot(None))

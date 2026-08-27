@@ -1,4 +1,4 @@
-"""Users router — admin-facing CRUD with the frontend's flat UserItemOut shape.
+"""Users router, admin-facing CRUD with the frontend's flat UserItemOut shape.
 
 Distinct from /profiles in that it returns the denormalised UserItemOut
 shape (department/warehouse as names, name parts split) used by the
@@ -125,7 +125,7 @@ def _build_item(
     warehouse_names: dict,
     asset_counts: dict,
 ) -> UserItemOut:
-    """Build a UserItemOut from in-memory lookup maps — no DB calls."""
+    """Build a UserItemOut from in-memory lookup maps, no DB calls."""
     department_name = dept_names.get(user.department_id) if user.department_id else None
     warehouse_name = warehouse_names.get(user.warehouse_id) if user.warehouse_id else None
     assigned = asset_counts.get(str(user.id), 0)
@@ -207,7 +207,7 @@ def _fetch_users(
 
     ``include_unassigned`` controls the ``warehouse_id IS NULL`` arm. Admins
     need it: that is how a newly-created account with no site yet shows up so
-    it can be assigned one. Regular users do not — for them it only leaked the
+    it can be assigned one. Regular users do not, for them it only leaked the
     global super-admin accounts (which carry no warehouse) into what is
     presented as their warehouse team directory, exposing those names, emails
     and phone numbers to all 1,255 staff across all three sites.
@@ -235,7 +235,7 @@ def list_users(
     # The 4 lookups below are independent reads (no shared state), so they run
     # concurrently on separate DB sessions instead of 4 sequential round-trips.
     # Each round-trip costs ~150-800ms of real network latency to the remote
-    # Supabase region — sequentially that summed to ~1.5-2.5s; concurrently it's
+    # Supabase region, sequentially that summed to ~1.5-2.5s; concurrently it's
     # roughly the slowest single query.
     scoped_wh = active_warehouse_id(current_user)
     # Only staff who manage accounts need to see profiles with no warehouse yet.
@@ -422,8 +422,8 @@ def list_user_assets(user_id: str, db: Session = Depends(get_db)):
         for w in db.query(Warehouse.id, Warehouse.name).filter(Warehouse.id.in_(warehouse_ids)).all()
     } if warehouse_ids else {}
 
-    # Real health, batched into one query. This was asset.criticality_score —
-    # how important the asset is, not how healthy — which the UI renders
+    # Real health, batched into one query. This was asset.criticality_score, 
+    # how important the asset is, not how healthy, which the UI renders
     # directly as a coloured health bar. See the same fix in profile.py's
     # /me/assets for the measured divergence.
     asset_ids = [a.id for a in assets]

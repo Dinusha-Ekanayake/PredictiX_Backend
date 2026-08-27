@@ -1,4 +1,4 @@
-"""Manual smoke test — insert a throwaway ticket row and roll it back.
+"""Manual smoke test, insert a throwaway ticket row and roll it back.
 
 Run with: python -m scripts.manual.test_insert
 """

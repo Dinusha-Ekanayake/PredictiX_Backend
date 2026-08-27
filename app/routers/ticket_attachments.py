@@ -11,8 +11,7 @@ def _can_view_ticket(ticket: Ticket, current_user: Profile) -> bool:
     """Same rule as tickets.py's get_ticket/list scoping: everyone can
     view (and attach files to) any ticket in their own warehouse; users
     also keep visibility into tickets they created or are assigned to
-    outside their warehouse. Deletion of an attachment stays narrower —
-    see delete_ticket_attachment."""
+    outside their warehouse. Deletion of an attachment stays narrower, see delete_ticket_attachment."""
     if is_admin_role(current_user):
         return True
     uid = str(getattr(current_user, "id", ""))
@@ -30,7 +29,7 @@ def create_ticket_attachment(payload: TicketAttachmentCreate, db: Session = Depe
     if not _can_view_ticket(ticket, current_user):
         raise HTTPException(status_code=404, detail="Ticket not found")
 
-    # uploaded_by is always the authenticated caller — never trust a
+    # uploaded_by is always the authenticated caller, never trust a
     # client-supplied value.
     data = payload.model_dump()
     data["uploaded_by"] = current_user.id

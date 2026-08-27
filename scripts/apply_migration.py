@@ -1,9 +1,9 @@
 """Apply a SQL migration from docs/migrations against the configured database.
 
-Migrations in this project were previously applied by hand through the Supabase
-SQL editor, which leaves no record of what ran where. This runner uses the same
-DATABASE_URL the application does, so a migration is applied to exactly the
-database the app talks to, and prints the row counts it changed.
+Applying migrations by hand through the Supabase SQL editor leaves no record
+of what ran where. This runner uses the same DATABASE_URL the application does,
+so a migration lands on exactly the database the app talks to, and it prints
+the row counts it changed.
 
 Usage:
     python scripts/apply_migration.py 010                 # dry run: show the SQL

@@ -1,6 +1,6 @@
 """Staff roster: super admins, warehouse admins, demo pairs and department users.
 
-Produces account *specs*, not final rows — ``id`` is left unset because a
+Produces account *specs*, not final rows, ``id`` is left unset because a
 profile's primary key must equal the ``auth.users`` id that Supabase mints when
 the account is created. The loader fills it in after each auth user exists.
 """
@@ -63,7 +63,7 @@ def build_roster(rng: random.Random) -> list[dict]:
         head = C.HEADCOUNT[short]
         seq = 1
 
-        # Demo pair — fixed, memorable credentials for demonstrations.
+        # Demo pair, fixed, memorable credentials for demonstrations.
         roster.append({
             "email": emails.reserve(C.DEMO_ADMIN_TEMPLATE.format(city=city_slug)),
             "password": C.PASSWORD_DEMO_ADMIN,
@@ -104,7 +104,7 @@ def build_roster(rng: random.Random) -> list[dict]:
             acronym = next(d["acronym"] for d in C.DEPARTMENTS if d["code"] == dept)
             for _ in range(head[dept]):
                 first, surname = make_person(rng)
-                # A small share of any real roster is not currently active —
+                # A small share of any real roster is not currently active, 
                 # resigned, on long leave, or suspended pending review.
                 roll = rng.random()
                 status = "inactive" if roll < 0.03 else ("suspended" if roll < 0.038 else "active")

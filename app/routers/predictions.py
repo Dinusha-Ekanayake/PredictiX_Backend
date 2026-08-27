@@ -46,13 +46,12 @@ router = APIRouter(
 
 
 # ── Warehouse/ownership scoping helpers ────────────────────────────────────────
-# This router's endpoints were previously unscoped: any authenticated user
-# could read any prediction run, failure/cost prediction, or ticket
-# prediction by ID — including the by-asset endpoints' own scoping being
-# bypassable by going through the by-run-id routes instead, since a run_id
-# is enumerable via the unscoped /runs list. These helpers apply the same
-# warehouse-wide visibility rule established for assets (see app.deps) and
-# tickets (see tickets.py) consistently across every route below.
+# These helpers apply the same warehouse-wide visibility rule used for assets
+# (see app.deps) and tickets (see tickets.py) across every route below. Every
+# route needs one: scoping only the by-asset endpoints leaves the by-run-id
+# routes as a way around them, since a run_id is enumerable from the /runs
+# list, and any authenticated user could then read any prediction run, or any
+# failure, cost or ticket prediction, by ID.
 
 def _user_can_view_ticket(ticket: Ticket, current_user: Profile) -> bool:
     """Same rule as tickets.py's get_ticket/list_tickets."""
@@ -142,7 +141,7 @@ def _build_cost_input(asset, last_event) -> dict:
 def _run_cost_prediction_for_asset(asset_id: str, db: Session, current_user: Profile) -> dict:
     """Shared by GET /cost/{asset_id} and POST /cost/live/{asset_id}.
     Runs the breakdown cost model (currently v5.0) live and returns its native dict shape
-    plus asset_id/model_version — the fields BreakdownCostPredictionOut expects.
+    plus asset_id/model_version, the fields BreakdownCostPredictionOut expects.
     """
     from app.main import breakdown_cost_bundle
 
@@ -194,7 +193,7 @@ def prediction_health():
 
 
 # The four raw-inference endpoints below take a feature payload rather than an
-# asset id, so they leak no data — but they run model inference on demand, and
+# asset id, so they leak no data, but they run model inference on demand, and
 # any of the ~1,300 accounts could call them in a loop. Nothing in the frontend
 # uses them (they exist for model testing and ops), so restricting them to
 # admins closes the abuse vector at no functional cost.
@@ -254,16 +253,14 @@ def get_latest_cost_prediction(
     current_user: Profile = Depends(get_current_user),
 ):
     """
-    Return the breakdown cost prediction (currently v5.0) for an asset — always runs live.
+    Return the breakdown cost prediction (currently v5.0) for an asset, always runs live.
 
-    NOTE: this used to check the AssetCostPrediction DB cache first. That table
-    (i) is never written by anything — batch_prediction_service.py upserts
-    cost into pdm_batch_predictions, not asset_cost_predictions — and (ii)
-    even if it were populated, AssetCostPredictionOut has no fields for
-    confidence bounds or SHAP drivers. So the cache branch always fell through
-    to the live call anyway, except it was previously validated against the
-    wrong response_model and would 500. Since predict_breakdown_cost() is
-    ~15ms (see model docs §1), always running live is simpler and correct.
+    The AssetCostPrediction table is deliberately not consulted. Nothing
+    writes it: batch_prediction_service.py upserts cost into
+    pdm_batch_predictions, not asset_cost_predictions. Even populated it
+    could not serve this route, because AssetCostPredictionOut carries no
+    confidence bounds or SHAP drivers. predict_breakdown_cost() is ~15ms
+    (see model docs §1), so running live is both simpler and correct.
     """
     return _run_cost_prediction_for_asset(str(asset_id), db, current_user)
 

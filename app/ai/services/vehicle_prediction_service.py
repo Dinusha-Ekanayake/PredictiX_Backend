@@ -2,12 +2,12 @@
 
 Historically this ran its own separate copy of the classifier/regressor
 inference logic against ``asset_failure_predictions`` /
-``asset_cost_predictions`` — a second pipeline alongside the scheduled batch
+``asset_cost_predictions``, a second pipeline alongside the scheduled batch
 job, using different feature-building code that could (and did) drift out of
 sync with it. It now delegates to
-``app.ai.services.batch_prediction_service.run_batch_for_asset`` — the exact
+``app.ai.services.batch_prediction_service.run_batch_for_asset``, the exact
 same feature builder, v7 LightGBM models, and decision layer used by the
-daily scheduler — so an on-demand "refresh this asset now" always agrees
+daily scheduler, so an on-demand "refresh this asset now" always agrees
 with what the next scheduled run would have produced, and both write to the
 single source of truth, ``pdm_batch_predictions``.
 """
@@ -23,7 +23,7 @@ from app.ai.services.batch_prediction_service import run_batch_for_asset
 
 
 # Kept here (rather than moved) because app.ai.services.survival_service
-# imports these four generic helpers — unrelated to which PdM model
+# imports these four generic helpers, unrelated to which PdM model
 # generation is loaded, so they don't need to change with the v7 swap.
 def _to_float(value: Any, default: float = 0.0) -> float:
     if value is None:

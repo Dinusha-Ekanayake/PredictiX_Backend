@@ -1,4 +1,4 @@
-"""Manual debug script — list volatile functions in the public schema.
+"""Manual debug script, list volatile functions in the public schema.
 
 Run with: python -m scripts.manual.test_volatile
 """

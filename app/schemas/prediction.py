@@ -19,7 +19,7 @@ class PredictionRequest(BaseModel):
 
     Unlike the asset-based /vehicle-predictions/{id} and /batch-predictions/*
     endpoints, this one takes hand-supplied features rather than reading a
-    real Asset + SensorReading — intended for testing/debugging the models
+    real Asset + SensorReading, intended for testing/debugging the models
     directly. All fields are optional; missing ones are treated as
     0 (numeric) / "" (categorical) by LgbModelBundle.build_frame().
     """
@@ -92,7 +92,7 @@ class PredictionRequest(BaseModel):
 # return: they declared predicted_class / predicted_label / confidence /
 # health_band, none of which prediction_service produces. Because the fields
 # were declared required, FastAPI raised ResponseValidationError while
-# serialising every successful call — so all four endpoints returned 500 no
+# serialising every successful call, so all four endpoints returned 500 no
 # matter what was sent, which is why nothing in the product used them. The
 # models below are the real shapes, captured from the services' own output.
 
@@ -178,7 +178,7 @@ class AssetFailurePredictionOut(BaseModel):
 
 class AssetCostPredictionOut(BaseModel):
     """DB-row shape for the legacy asset_cost_predictions table. Only used by
-    GET /predictions/cost/run/{run_id} now — GET /predictions/cost/{asset_id}
+    GET /predictions/cost/run/{run_id} now, GET /predictions/cost/{asset_id}
     and POST /predictions/cost/live/{asset_id} use BreakdownCostPredictionOut
     below instead, since that table is never populated by the breakdown-cost pipeline and
     can't represent SHAP drivers or confidence bounds anyway."""
@@ -197,7 +197,7 @@ class AssetCostPredictionOut(BaseModel):
 
 # ── breakdown-cost response shape (v4.0 and v5.0 share this contract) ────────────────────────────────────────
 # Mirrors predict_breakdown_cost()'s actual return dict
-# (app/ai/models/cost_estimation_model/breakdown_cost_model.py) exactly — this
+# (app/ai/models/cost_estimation_model/breakdown_cost_model.py) exactly, this
 # is NOT the extra_data-wrapped sample in the older v4 model docs; the code is the
 # source of truth, not the doc.
 
@@ -206,7 +206,7 @@ class CostDriverOut(BaseModel):
     value: str
     direction: str          # "increases" | "decreases"
     relative_impact: float  # 0-100, share of total |SHAP|
-    # sv_log intentionally omitted — log1p-space value, not meant for display
+    # sv_log intentionally omitted, log1p-space value, not meant for display
     # (v4/v5 docs §9: "Never display sv_log directly")
 
 
@@ -227,7 +227,7 @@ class BreakdownCostPredictionOut(BaseModel):
     sanity_check: str
     top_drivers: list[CostDriverOut]
     model_version: Optional[str] = None
-    # Bundle-level accuracy stats (not per-prediction) — lets the frontend
+    # Bundle-level accuracy stats (not per-prediction), lets the frontend
     # show the model's real current numbers instead of hardcoding any
     # version's stats, which would go stale the next time the model changes.
     test_r2: Optional[float] = None
