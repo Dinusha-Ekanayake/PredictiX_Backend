@@ -1,4 +1,4 @@
-"""Manual debug script — list triggers defined on the tickets table.
+"""Manual debug script, list triggers defined on the tickets table.
 
 Run with: python -m scripts.manual.test_triggers
 """

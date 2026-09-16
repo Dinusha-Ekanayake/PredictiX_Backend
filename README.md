@@ -351,6 +351,7 @@ PredictiX_backend/
 | GET | `/assets` | List with filters (search, warehouse, status, health_band, criticality) |
 | POST | `/assets` | Create asset |
 | GET/PUT/DELETE | `/assets/{id}` | Retrieve, update, delete asset |
+| GET | `/assets/{id}/usage-history` | Recorded monthly operating history (hours run/idle, distance, service cadence, downtime) for the asset panel's charts |
 | GET/POST | `/asset-assignments` | Assignment records |
 | GET | `/asset-status-history` | Status audit log |
 | GET/POST | `/asset-documents` | Document management |
@@ -540,8 +541,14 @@ DATABASE_PASSWORD=<your-db-password>
 DATABASE_KEY=sb_secret_...
 # If DATABASE_URL is omitted, the backend builds the pooler URL from PROJECT_REF and DATABASE_PASSWORD.
 
-# Groq (AI reports and chatbot agent — required for LLM features)
-GROQ_API_KEY=gsk_...
+# Groq keys. Both features are billed separately, so which key a feature
+# reaches for decides which budget it spends.
+# Warehouse report generation, which also picks its model from WH_GROQ_MODEL.
+WH_GROQ_API_KEY=gsk_...
+WH_GROQ_MODEL=groq/compound
+# Chatbot and agent. WH_GROQ_API_KEY is tried first and this is the fallback,
+# so the chatbot keeps answering when the first key is rate-limited.
+CHATBOT_GROQ_API_KEY=gsk_...
 
 # HuggingFace (required only if DISABLE_HF_MODELS=false)
 DISABLE_HF_MODELS=true
@@ -552,6 +559,42 @@ HF_TICKET_SUMMARIZATION_REPO=Dinusha-Ekanayake/predictix-ticket_summarization_mo
 HF_TICKET_PRIORITIZATION_REPO=AroshN/priority_classif_xgb
 HF_ASSET_SUMMARIZATION_REPO=Dinusha-Ekanayake/predictix-asset_summarization_model
 ENABLE_HF_WARMER=false
+
+# Asset and ticket summary Spaces, reached with gradio_client.
+ASSET_SUMMARY_SPACE=SharadaAbeywickrama/Asset_summery_generation
+TICKET_SUMMARY_SPACE=SharadaAbeywickrama/Ticket_summery_generation
+HF_TOKEN_space=hf_...
+# Embedding endpoint for the chatbot knowledge base. A value pointing at the
+# retired api-inference.huggingface.co host is replaced at runtime with a
+# warning rather than used.
+HF_INFERENCE_API_URL=https://router.huggingface.co/hf-inference/models/sentence-transformers/all-MiniLM-L6-v2/pipeline/feature-extraction
+
+# HF_HUB_OFFLINE must stay 0. gradio_client resolves a Space through the
+# huggingface_hub API, so offline mode makes every asset and ticket summary
+# fall back to its template. TRANSFORMERS_OFFLINE=1 still prevents any model
+# weights being downloaded locally.
+HF_HUB_OFFLINE=0
+TRANSFORMERS_OFFLINE=1
+
+# Email. Two Brevo accounts, kept apart on purpose.
+# Ticket, FAQ and in-app notification mail.
+BREVO_API_KEY=xkeysib-...
+BREVO_SENDER_EMAIL=notifications@example.com
+BREVO_SENDER_NAME=PredictiX System
+# Warehouse report notifications only. Without it that mail falls back to the
+# general account above and logs a warning.
+WH_BREVO_API_KEY=xkeysib-...
+# Service-reminder mail goes out over SMTP rather than Brevo.
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USERNAME=reminders@example.com
+SMTP_PASSWORD=...
+SMTP_FROM_EMAIL=reminders@example.com
+SMTP_FROM_NAME=PredictiX
+
+# Debug endpoints (/debug/*) dump raw database rows, so keep them off in
+# production.
+ENABLE_DEBUG_ROUTES=false
 
 # PDM Batch Job
 BATCH_RUN_ON_STARTUP=false

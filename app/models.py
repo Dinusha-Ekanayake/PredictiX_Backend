@@ -224,7 +224,7 @@ class Ticket(Base):
     warehouse_id = Column(UUID(as_uuid=True), ForeignKey("warehouses.id"))
     title = Column(Text, nullable=False)
     description = Column(Text, nullable=False)
-    # These six columns are Postgres ENUMs in the DB, not text — see top of
+    # These six columns are Postgres ENUMs in the DB, not text, see top of
     # file for the ENUM type definitions.
     status = Column(TicketStatusEnum, nullable=False, default="open")
     priority = Column(TicketPriorityEnum)
@@ -483,7 +483,7 @@ class UserNotificationPreference(Base):
 
 
 class PdmBatchPrediction(Base):
-    """One row per asset — upserted by the hourly batch PDM scheduler."""
+    """One row per asset, upserted by the hourly batch PDM scheduler."""
 
     __tablename__ = "pdm_batch_predictions"
 
@@ -512,7 +512,7 @@ class PdmBatchPrediction(Base):
     error_message = Column(Text)
     status = Column(Text, nullable=False, default="ok")
 
-    # Auditability — which model generation + exact input produced this row.
+    # Auditability, which model generation + exact input produced this row.
     model_version = Column(Text)
     feature_snapshot = Column(JSONB, default={})
 
@@ -526,13 +526,13 @@ class PdmBatchPrediction(Base):
 
 
 class PdmPredictionHistory(Base):
-    """Append-only log of every batch prediction run — never upserted or
+    """Append-only log of every batch prediction run, never upserted or
     overwritten, unlike PdmBatchPrediction (which only ever holds the latest
     row per asset).
 
     Exists so that predictions made today can eventually be checked against
     what actually happened afterward (a real maintenance_event within N days,
-    an unplanned "repair" event, etc.) — the validation this system currently
+    an unplanned "repair" event, etc.), the validation this system currently
     cannot do because PdmBatchPrediction discards prior predictions on every
     upsert. One row is inserted per asset per batch run; nothing here is ever
     updated or deleted by the app itself.

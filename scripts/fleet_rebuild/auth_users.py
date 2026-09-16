@@ -5,11 +5,10 @@ separate credential stores, and the application's own login path does not
 consult this one:
 
 * ``auth.users`` (managed here, via the GoTrue Admin API) backs
-  ``profiles.id`` — which is a foreign key to it, so the row must exist — and
+  ``profiles.id``, which is a foreign key to it, so the row must exist, and
   any Supabase-side flow.
 * ``profiles.meta['password_hash']`` (a bcrypt hash written by
-  ``load.set_password_hashes``) is what ``POST /auth/login`` actually verifies
-  — see ``app/routers/auth.py::_authenticate_profile``. With no hash stored it
+  ``load.set_password_hashes``) is what ``POST /auth/login`` actually verifies, see ``app/routers/auth.py::_authenticate_profile``. With no hash stored it
   falls back to the single global ``DEFAULT_PASSWORD``, so the intended
   password is silently rejected.
 
@@ -17,7 +16,7 @@ An account created through this module alone therefore signs in fine against
 Supabase directly and still fails at the application's login screen. Always
 follow account creation with ``set_password_hashes`` for the same people, and
 verify with ``app.routers.auth.post_login`` rather than
-:func:`verify_login` below — the latter tests Supabase, which is the store
+:func:`verify_login` below, the latter tests Supabase, which is the store
 that is *not* used.
 
 Accounts go through the Admin API rather than being written straight into
@@ -48,11 +47,11 @@ def client():
 def list_all_users(sb, page_size: int = 200, max_pages: int = 200) -> list:
     """Every auth user, paged.
 
-    Stops only on an empty page. An earlier version also broke when a page came
-    back shorter than ``page_size``, which is wrong: GoTrue clamps ``per_page``
-    server-side, so *every* page is shorter than a large requested size and the
-    loop exited after the first one — silently under-enumerating the directory
-    and leaving stale accounts behind on a supposedly full cleanup.
+    Stops only on an empty page. Stopping on a page shorter than ``page_size``
+    would be wrong: GoTrue clamps ``per_page`` server-side, so *every* page is
+    shorter than a large requested size and the loop would exit after the
+    first, silently under-enumerating the directory and leaving stale accounts
+    behind on a supposedly full cleanup.
     """
     users: list = []
     seen: set[str] = set()
@@ -137,7 +136,7 @@ def delete_users_except(
 
     Deleting an auth user cascades ``public.profiles`` (FK ON DELETE CASCADE),
     which in turn cascades that person's notifications, assignments and
-    comments — so this is only ever run as part of a full rebuild.
+    comments, so this is only ever run as part of a full rebuild.
     """
     users = list_all_users(sb)
     targets = [u for u in users if str(u.id) not in keep_ids]
@@ -160,7 +159,7 @@ def verify_login(email: str, password: str) -> tuple[bool, str]:
     the account can log into the application: ``POST /auth/login`` checks
     ``profiles.meta['password_hash']`` instead and never calls Supabase. A
     PASS here with no stored hash is exactly the false positive that ships a
-    broken demo account — use ``app.routers.auth.post_login`` to check the
+    broken demo account. Use ``app.routers.auth.post_login`` to check the
     real path.
     """
     env = load_env()

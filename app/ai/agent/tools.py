@@ -1,4 +1,4 @@
-"""PredictiX Chatbot – Pure-Python Tool Handlers & Zero-Token Handlers.
+"""PredictiX Chatbot, Pure-Python Tool Handlers & Zero-Token Handlers.
 
 Architecture:
   - Zero-Token handlers: Greeting, Navigation, WhoAmI, FAQ
@@ -327,13 +327,11 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             if ans:
                 return {"answer": fb + str(ans), "action_buttons": []}
         except Exception as exc:
-            # Swallowed on purpose — the caller still gets the contact-admin
-            # reply below — but never silently: a persistently failing LLM here
+            # Swallowed on purpose, the caller still gets the contact-admin
+            # reply below, but never silently: a persistently failing LLM here
             # is invisible otherwise, since the user just sees a polite message.
             log.warning("Generic chatbot fallback could not reach the LLM: %s", exc)
         return {
-            # The trailing "(Debug: Generic fallback hit)" that used to be here
-            # was shipped verbatim to end users in the chat window.
             "answer": (
                 "I couldn't find an answer to that in your fleet data. "
                 "Please reach out to our admins at **neuromindspredictix@gmail.com** "

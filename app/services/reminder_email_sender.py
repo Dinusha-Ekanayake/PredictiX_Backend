@@ -1,4 +1,4 @@
-"""SMTP email sender — works with Gmail, SendGrid, Brevo, or any SMTP relay."""
+"""SMTP email sender, works with Gmail, SendGrid, Brevo, or any SMTP relay."""
 from __future__ import annotations
 
 import logging

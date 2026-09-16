@@ -1,7 +1,7 @@
 """Selects, re-dates and regionally conditions real v11 vehicle trajectories.
 
 Why resample instead of synthesise: v11 trajectories are already internally
-coherent — odometer rises monotonically, ``days_since_last_service`` accumulates
+coherent, odometer rises monotonically, ``days_since_last_service`` accumulates
 and resets exactly on service events, component health decays then jumps back
 when that component is serviced, and ``lifetime_service_count`` increments in
 step. Reproducing all of that from scratch is how synthetic fleets go subtly
@@ -12,9 +12,8 @@ Three transformations are applied on the way out:
 
 1. **Re-dating.** v11 vehicles stop at different dates (all start 2020-01-01,
    last snapshots run 2025-07..2025-11). Each trajectory is re-anchored so its
-   final snapshot is *today* — this is the fix for the defect that motivated the
-   rebuild, where the live fleet's newest reading was 139 days stale and
-   ``days_since_last_service`` was consequently understated ~4x.
+   final snapshot is *today*. Left at their original dates the fleet's newest
+   reading is months stale, which understates ``days_since_last_service``.
 
 2. **Seasonal re-draw.** Because the shift differs per vehicle, a reading's
    calendar month moves, which would leave monsoon rainfall landing in the wrong
@@ -46,7 +45,7 @@ SEASONAL_COLS = ["ambient_temp_avg_c", "ambient_humidity_avg_pct", "rainfall_mm_
 # (peak rain May-Sep). Badulla sits in Uva, where the Northeast monsoon
 # dominates (peak rain Dec-Feb). Sampling Badulla's seasonal values from the
 # month six months opposite approximates that phase inversion. It is an
-# approximation, not a meteorological model — but it is much closer to reality
+# approximation, not a meteorological model, but it is much closer to reality
 # than giving an upcountry depot Colombo's rainfall calendar.
 SEASONAL_PHASE_SHIFT_MONTHS = {"COL": 0, "BDL": 6, "GLE": 0}
 
@@ -71,7 +70,7 @@ class TrajectorySource:
         self._by_vehicle = {vid: g for vid, g in self._df.groupby("vehicle_id", sort=True)}
         self._rng = random.Random(seed)
 
-        # Hard bounds for clipping — v11's own observed extremes, so a
+        # Hard bounds for clipping, v11's own observed extremes, so a
         # regionally-adjusted value can never leave the trained domain.
         self._bounds = {c: (float(self._df[c].min()), float(self._df[c].max()))
                         for c in C.ENV_COLS}

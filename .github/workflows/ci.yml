@@ -36,9 +36,12 @@ jobs:
           cache: pip
 
       - name: Every Python file compiles
-        # Seq2Seq is model-training scratch, not shipped code, and its paths
-        # contain characters that break compileall's cache writes.
-        run: python -m compileall -q app scripts -x "(Seq2Seq|__pycache__)"
+        # Two exclusions, both model-training material rather than shipped code:
+        # Seq2Seq paths contain characters that break compileall's cache writes,
+        # and predictix_breakdown_cost_model_v5.py is a notebook export that
+        # opens with `!pip install`, so it is not valid Python. Only the .pkl
+        # it produces is loaded at runtime.
+        run: python -m compileall -q app scripts -x "(Seq2Seq|__pycache__|predictix_breakdown_cost_model_v5)"
 
       - name: No secrets committed
         run: |
@@ -147,7 +150,7 @@ jobs:
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          CHATBOT_GROQ_API_KEY: ${{ secrets.CHATBOT_GROQ_API_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_AI_SPACE_URL: ${{ secrets.HF_AI_SPACE_URL }}
           DISABLE_HF_MODELS: "true"
@@ -183,6 +186,9 @@ jobs:
         # unreachable, and leaving inference off would make it skip rather than
         # report — which is the thing it was written to catch.
         env:
+          # gradio_client resolves a Space through the huggingface_hub API, so
+          # HF_HUB_OFFLINE must be 0 or every summary call falls back to the
+          # template and AS-09 reports a pass it did not earn.
           HF_HUB_OFFLINE: "0"
           TRANSFORMERS_OFFLINE: "0"
           DISABLE_HF_MODELS: "false"
@@ -190,7 +196,15 @@ jobs:
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          # Warehouse report generation, which also reads WH_GROQ_MODEL.
+          WH_GROQ_API_KEY: ${{ secrets.WH_GROQ_API_KEY }}
+          WH_GROQ_MODEL: ${{ vars.WH_GROQ_MODEL }}
+          # Chatbot LLM, the fallback key when the first is rate-limited.
+          CHATBOT_GROQ_API_KEY: ${{ secrets.CHATBOT_GROQ_API_KEY }}
+          # Summary Spaces and the token that reaches them.
+          ASSET_SUMMARY_SPACE: ${{ vars.ASSET_SUMMARY_SPACE }}
+          TICKET_SUMMARY_SPACE: ${{ vars.TICKET_SUMMARY_SPACE }}
+          HF_TOKEN_space: ${{ secrets.HF_TOKEN_SPACE }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_AI_SPACE_URL: ${{ secrets.HF_AI_SPACE_URL }}
         run: python scripts/run_functional_tests.py --detail

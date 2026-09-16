@@ -1,11 +1,10 @@
 """Per-user notification preferences.
 
-Every endpoint here is scoped to the caller. Previously none of them took the
-caller's identity into account at all: the create took a ``user_id`` from the
-request body, the list took one from the query string, and the delete accepted
-any preference id — so any authenticated user could set, read or remove another
-person's notification settings. Administrators may still act on anyone, which
-is what makes support able to fix a colleague's settings.
+Every endpoint here is scoped to the caller, and none of them take the subject
+from the request. A ``user_id`` in the body, one in the query string, or a bare
+preference id would each let any authenticated user set, read or remove another
+person's notification settings. Administrators may act on anyone, which is what
+makes support able to fix a colleague's settings.
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session

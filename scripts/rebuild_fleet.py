@@ -116,7 +116,7 @@ def cmd_load() -> None:
         print(f"  dropped {n} {t} rows referencing an uncreated account")
 
     conn = connect()
-    # Warehouses and departments first — profiles carry FKs to both.
+    # Warehouses and departments first, profiles carry FKs to both.
     L.load_tables(conn, {k: tables[k] for k in ("warehouses", "departments")})
     L.upsert_profiles(conn, [p for p in tables["profiles"] if p["id"] in valid])
     # Then everything that references a profile.
@@ -143,7 +143,7 @@ def cmd_export() -> None:
     """Dump every public table straight from the database to CSV.
 
     Exported from the DB rather than from the generator's in-memory tables so
-    the evidence reflects what is actually stored — including rows the
+    the evidence reflects what is actually stored, including rows the
     application itself produced (PdM predictions, prediction history, the
     notifications the pipeline raised) and any post-load corrections.
 

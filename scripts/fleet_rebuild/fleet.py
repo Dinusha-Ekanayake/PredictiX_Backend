@@ -43,7 +43,7 @@ _FORKLIFT_SERIAL_PREFIX = {
 }
 
 PARKING_BAYS_PER_ZONE = 60
-_ZONE_LETTERS = "ABCDEFGHJKLMNP"   # I and O skipped — same confusion problem
+_ZONE_LETTERS = "ABCDEFGHJKLMNP"   # I and O skipped, same confusion problem
 
 
 def _vin(rng: random.Random, make_model: str) -> str:
@@ -61,7 +61,7 @@ def _health_band(mean_health: float) -> str:
 
     Thresholds are calibrated against the actual distribution rather than set to
     round numbers. v11's component medians sit near 46-50% because that is what
-    mid-service-interval wear looks like — a component at 50% of its life is a
+    mid-service-interval wear looks like, a component at 50% of its life is a
     normal component, not a failing one. Banding it as "poor" (which naive
     80/65/45/25 cut-offs do) would paint half a healthy fleet red.
 
@@ -70,7 +70,7 @@ def _health_band(mean_health: float) -> str:
     real minority needing attention, a small critical tail.
 
     Note this is a coarse rollup for list filtering and the health-distribution
-    chart. It is deliberately *not* the PdM signal — component-level risk comes
+    chart. It is deliberately *not* the PdM signal, component-level risk comes
     from the survival models and the tier from pdm_decision_service, both of
     which can flag a vehicle whose average looks unremarkable.
     """
@@ -132,7 +132,7 @@ def build_fleet(
 ) -> tuple[list[dict], dict[str, pd.DataFrame]]:
     """Select trajectories and derive one asset row per vehicle.
 
-    Returns ``(asset_rows, {asset_id: conditioned_trajectory})`` — the
+    Returns ``(asset_rows, {asset_id: conditioned_trajectory})``, the
     trajectories are handed on to the sensor-reading builder so both are
     guaranteed to describe the same vehicle history.
     """

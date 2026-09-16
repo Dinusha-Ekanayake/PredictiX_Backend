@@ -69,7 +69,7 @@ class DashboardCache:
             refreshing = entry["refreshing"] if entry else False
 
         if payload is None:
-            # First ever call for this key — build synchronously.
+            # First ever call for this key, build synchronously.
             return self._build_sync(db, build_fn, k)
 
         if stale and not refreshing:

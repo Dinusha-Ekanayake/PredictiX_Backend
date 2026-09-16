@@ -46,7 +46,7 @@ class UserAssignedAssetOut(BaseModel):
     status: str          # asset status
     # The asset's health score from pdm_batch_predictions.health_score, which is
     # what the UI's health bar draws. Nullable on purpose: an asset with no
-    # completed prediction has no health to report, and the card renders "—".
+    # completed prediction has no health to report, and the card renders ", ".
     # A default value here would claim perfect health for a never-scored asset.
     healthPercent: Optional[float] = None
     nextServiceDate: Optional[str]

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .db import bulk_insert, connect, count
 
-# Cleared by the rebuild. Order does not matter — CASCADE resolves dependants —
+# Cleared by the rebuild. Order does not matter, CASCADE resolves dependants, 
 # but `profiles` is deliberately absent: profiles are removed by deleting their
 # auth.users parent (FK ON DELETE CASCADE), and recreated by the
 # on_auth_user_created trigger when the new accounts are made.
@@ -111,7 +111,7 @@ def wipe(conn, progress=print) -> dict[str, int]:
     Note that CASCADE reaches further than this list: it truncates every table
     holding a foreign key *to* one of these. ``profiles`` references
     ``warehouses`` and ``departments``, so profiles are emptied here too even
-    though the table is not named — which is why profiles are written with an
+    though the table is not named, which is why profiles are written with an
     UPSERT (see ``upsert_profiles``) rather than an UPDATE of trigger-created
     rows.
     """
@@ -138,7 +138,7 @@ def upsert_profiles(conn, profiles: list[dict], progress=print) -> int:
     An UPSERT rather than an UPDATE because the trigger-created row cannot be
     relied on to still exist: ``profiles`` carries foreign keys to
     ``warehouses`` and ``departments``, so ``TRUNCATE warehouses CASCADE``
-    during the wipe also truncates ``profiles`` — CASCADE propagates to
+    during the wipe also truncates ``profiles``, CASCADE propagates to
     *referencing* tables, not just referenced ones. Any account created before
     the wipe therefore loses its profile, and an UPDATE-only path would silently
     leave that person unable to resolve a profile at sign-in.
@@ -183,7 +183,7 @@ def set_password_hashes(conn, profiles: list[dict], progress=print) -> int:
     This is what actually governs signing in. The backend's ``POST /auth/login``
     (app/routers/auth.py::_authenticate_profile) checks
     ``profile.meta['password_hash']`` first and only falls back to the single
-    global ``DEFAULT_PASSWORD`` when no hash is stored — so without this step
+    global ``DEFAULT_PASSWORD`` when no hash is stored, so without this step
     every account would share one password regardless of what was set in
     Supabase Auth. The Supabase accounts are still required (``profiles.id``
     is a foreign key to ``auth.users``) and are what Google/Supabase-side flows

@@ -1,13 +1,11 @@
 """Regression test: app.main's call into run_batch_for_all_assets must
 always match the real function signature.
 
-Guards against the bug found in the asset-domain audit (2026-08): main.py
-called run_batch_for_all_assets(..., cost_bundle=breakdown_cost_bundle)
-after the parameter had been renamed to breakdown_cost_bundle, so the
-scheduled batch job's daily prediction refresh silently failed on every
-run — a bare `except Exception: log.exception(...)` swallowed the
-TypeError, so pdm_batch_predictions only ever got refreshed via manual
-admin-triggered runs.
+A keyword argument that does not match the parameter name raises TypeError
+at call time, and the bare `except Exception: log.exception(...)` around the
+scheduled job swallows it. The daily prediction refresh then fails on every
+run while still appearing to be scheduled, and pdm_batch_predictions is only
+ever refreshed by manual admin-triggered runs.
 
 This inspects the real function signature via ast/inspect directly (no DB
 connection or loaded ML models needed), so it fails fast if this class of
@@ -29,7 +27,7 @@ _MAIN_PY = Path(app.__file__).resolve().parent / "main.py"
 def _kwargs_passed_to_run_batch_for_all_assets() -> set[str]:
     """Statically extract the keyword-argument names app/main.py's
     _run_scheduled_batch passes to run_batch_for_all_assets, by parsing the
-    call — avoids importing app.main (which has heavyweight startup-time
+    call. Avoids importing app.main (which has heavyweight startup-time
     side effects: model loading, scheduler setup) just to introspect one
     call site."""
     tree = ast.parse(_MAIN_PY.read_text(encoding="utf-8"))

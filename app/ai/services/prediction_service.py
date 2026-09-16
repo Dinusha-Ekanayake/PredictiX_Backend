@@ -47,13 +47,12 @@ def get_risk_and_action(prob: float, clf_threshold: float) -> tuple[str, str]:
     endpoints, using the exact same tier boundaries the real batch
     pipeline's decision layer (pdm_decision_service) does.
 
-    Previously used its own disconnected, hardcoded 0.8/0.5 probability
-    cuts (with a 7/30-day override build_decision's tier never considers
-    at all) — a probability that read e.g. "High" here could read
-    "medium" risk_level in the real pdm_batch_predictions row for the
-    same evidence. days_until is intentionally not used for
-    classification here, matching build_decision (it only affects how
-    the predicted date is framed for display, never the risk tier).
+    Sharing those boundaries is what keeps this endpoint honest: separate
+    cuts here would let one probability read "High" on this endpoint and
+    "medium" in the pdm_batch_predictions row for the same evidence.
+    days_until is deliberately not used for classification, matching
+    build_decision, where it only affects how the predicted date is framed
+    for display and never the risk tier.
     """
     tier = classifier_only_tier(prob, clf_threshold)
     label = _TIER_TO_RISK_LABEL[tier]
@@ -219,8 +218,8 @@ def run_health_score(data: dict) -> dict:
         # Same shared band definition the batch pipeline and the dashboard use,
         # so this endpoint cannot describe an asset differently from the rest of
         # the system. The previous local scale (>=80 "Healthy" / >=60 / >=40)
-        # had an unreachable top band — health scores on this scale top out
-        # around 79 — so nothing could ever come back healthy.
+        # had an unreachable top band, health scores on this scale top out
+        # around 79, so nothing could ever come back healthy.
         health_status = band_for(health_score)
 
         all_factors = contributions + penalties

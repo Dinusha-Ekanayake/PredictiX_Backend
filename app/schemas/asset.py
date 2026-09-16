@@ -66,10 +66,10 @@ class AssetUpdate(BaseModel):
     vehicle_age_years: Optional[int] = None
     lifetime_service_count: Optional[int] = None
     lifetime_breakdown_count: Optional[int] = None
-    # created_by intentionally omitted — an audit-trail field recording who
+    # created_by intentionally omitted, an audit-trail field recording who
     # created the asset, not something an edit should ever be able to
     # change. AssetCreate still has it (server-derived from the caller at
-    # creation time, not client-trusted either — see create_asset).
+    # creation time, not client-trusted either, see create_asset).
 
 
 class AssetOut(BaseModel):
@@ -117,7 +117,7 @@ class AssetOut(BaseModel):
 class AssetListOut(BaseModel):
     """Trimmed projection for the assets list view (table + summary cards +
     warehouse-option extraction). Only the fields that screen actually
-    renders — the full AssetOut (34 fields) is reserved for the single-asset
+    renders, the full AssetOut (34 fields) is reserved for the single-asset
     detail endpoint, which is what the detail panel needs."""
     id: UUID
     asset_code: str

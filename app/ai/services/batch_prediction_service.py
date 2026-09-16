@@ -15,7 +15,7 @@ The whole-fleet run fetches every asset's latest sensor reading in a single
 set-based query (``DISTINCT ON``), runs both models once on a batched
 DataFrame (classifier + regressor + SHAP all support multi-row input), and
 upserts every result in one multi-row ``INSERT ... ON CONFLICT`` statement
-with a single commit — instead of one query + one insert + one commit per
+with a single commit, instead of one query + one insert + one commit per
 asset. For ~1000 assets this turns ~3000 DB round-trips/run into ~3.
 """
 from __future__ import annotations
@@ -38,7 +38,7 @@ from app.ai.services.pdm_decision_service import build_decision
 from app.services.in_app_notification_service import InAppNotificationService
 
 # v7 regressor was trained on days_until_next_maintenance up to 365 (see
-# regressor_v7_decision_log.json) — the old 180-day clamp was arbitrary and
+# regressor_v7_decision_log.json), the old 180-day clamp was arbitrary and
 # not something this model generation was trained to respect. Predictions at
 # or past this ceiling are flagged via horizon_saturated instead of being
 # rendered as a literal (and misleadingly precise) date.
@@ -62,8 +62,7 @@ def _model_version_tag() -> str:
 
 
 def _empty_prediction_fields() -> dict[str, Any]:
-    """All ``_UPSERT_COLUMNS`` set to their "nothing computed" default —
-    shared by the no-sensor-data and error branches so both stay in sync
+    """All ``_UPSERT_COLUMNS`` set to their "nothing computed" default, shared by the no-sensor-data and error branches so both stay in sync
     with the column list as it grows."""
     return {
         "failure_probability": None,
@@ -119,12 +118,11 @@ def _to_float(value: Any, default: float = 0.0) -> float:
 def _to_float_or_nan(value: Any) -> float:
     """Like _to_float, but a genuinely missing reading becomes NaN, not 0.
 
-    lgb_model_adapter.build_frame() is explicitly designed so missing
-    values reach LightGBM as NaN, which the model was trained to handle
-    natively — but _build_feature_dict previously called _to_float(...)
-    (default 0.0) for every sensor column, so a NULL reading (e.g. a
-    component with no data yet) reached the model as "0%", i.e. "component
-    totally failed", instead of "unknown". The same zero then fed directly
+    lgb_model_adapter.build_frame() is designed so missing values reach
+    LightGBM as NaN, which the model was trained to handle natively.
+    Defaulting to 0.0 instead would send a NULL reading (a component with no
+    data yet) to the model as "0%", meaning "component totally failed",
+    rather than "unknown". The same zero would then feed directly
     into _compute_health_score's average, dragging a genuinely healthy
     asset toward a false Critical band purely because one field wasn't
     populated yet.
@@ -142,15 +140,14 @@ def _to_float_or_nan(value: Any) -> float:
 def _fd_float(fd: dict, key: str, default: float) -> float:
     """Read a float feature out of a feature dict built by
     _build_feature_dict, treating a NaN value (its marker for "reading
-    genuinely missing" — see _to_float_or_nan) the same as the key being
+    genuinely missing", see _to_float_or_nan) the same as the key being
     absent: falls back to `default` either way.
 
-    Needed because every _SENSOR_FLOAT_COLS key is now always present in
-    fd (NaN when missing, never omitted) — plain ``fd.get(key, default)``
-    can no longer fall back to `default` for a missing reading, since the
-    key is never actually absent. Without this, downstream consumers that
-    need a real number (the breakdown cost model, the heuristic cost
-    formula) would receive NaN and silently produce a NaN cost estimate.
+    Every _SENSOR_FLOAT_COLS key is always present in fd (NaN when missing,
+    never omitted), so plain ``fd.get(key, default)`` never reaches `default`
+    for a missing reading. Without this, consumers that need a real number,
+    such as the breakdown cost model, would receive NaN and silently produce
+    a NaN cost estimate.
     """
     value = fd.get(key)
     try:
@@ -171,15 +168,15 @@ def _to_int(value: Any, default: int = 0) -> int:
 
 def _clamp_health_pct(value: float) -> float:
     """Clamp a health-percentage reading to its valid [0, 100] range. NaN
-    (see _to_float_or_nan) passes through unchanged — a genuinely missing
+    (see _to_float_or_nan) passes through unchanged, a genuinely missing
     reading is not a range violation.
 
     A small fraction of sensor_readings rows carry out-of-range values (seen
-    live: as low as -304.66%) — a data-generation defect, not a real
+    live: as low as -304.66%), a data-generation defect, not a real
     reading. Left unclamped, it flows straight into _compute_health_score's
     plain average (which, unlike the tree-based classifier/regressor, has
     no built-in resistance to an outlier's magnitude) and dominates both the
-    health score and its own contributing-factors breakdown — e.g. a single
+    health score and its own contributing-factors breakdown, e.g. a single
     -265.66 reading alone accounted for -53 of a 100-point scale, enough by
     itself to swing an otherwise-100%-healthy-looking asset into "Critical."
     Same fix as the one already applied on the survival-model side
@@ -193,7 +190,7 @@ def _clamp_health_pct(value: float) -> float:
 def _json_safe_fd(fd: dict[str, Any]) -> dict[str, Any]:
     """Feature dicts can hold NaN for genuinely-missing sensor readings
     (see _to_float_or_nan). json.dumps() happily emits the literal token
-    ``NaN`` for those by default, which is not valid JSON — Postgres's
+    ``NaN`` for those by default, which is not valid JSON, Postgres's
     json/jsonb columns reject it outright ("invalid input syntax for type
     json"), which broke every feature_snapshot write for an asset with
     any missing reading. NaN -> None here so it round-trips as JSON
@@ -202,7 +199,7 @@ def _json_safe_fd(fd: dict[str, Any]) -> dict[str, Any]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Feature dict (same shape as before — one dict per asset)
+# Feature dict (same shape as before, one dict per asset)
 # ──────────────────────────────────────────────────────────────────────────────
 
 _SENSOR_FLOAT_COLS = [
@@ -378,7 +375,7 @@ def _build_cost_input_from_fd(asset: Asset, fd: dict[str, Any]) -> dict[str, Any
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Vectorized model inference — runs on a DataFrame of N assets at once
+# Vectorized model inference, runs on a DataFrame of N assets at once
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _run_classifier_batch(
@@ -394,7 +391,7 @@ def _run_classifier_batch(
     score that row, after both the vectorized attempt and the per-row
     fallback below have failed. Callers MUST treat None as a failed
     prediction (pdm_batch_predictions status="error", no fabricated
-    numbers) — never substitute a default probability. A prior version of
+    numbers), never substitute a default probability. A prior version of
     the per-row fallback defaulted to 0.05 on failure with no error signal,
     which recorded a scoring failure as "5% chance of failure, healthy":
     the opposite of a fail-safe for a predictive-maintenance system.
@@ -465,8 +462,7 @@ _HEALTH_COMPONENT_COLS = [
 
 def _health_components(fd: dict) -> list[tuple[str, float]]:
     """(feature, value) pairs for the health-percentage components that make
-    up the health-score base average, excluding any that are missing (NaN —
-    see _to_float_or_nan). Shared by _compute_health_score and
+    up the health-score base average, excluding any that are missing (NaN, see _to_float_or_nan). Shared by _compute_health_score and
     _compute_contributing_factors so the two can never independently drift
     apart again."""
     out = []
@@ -487,16 +483,12 @@ def _compute_health_score(fd: dict, failure_probability: float, days_until: floa
     penalty = (failure_probability * 35.0) + max(0.0, (30.0 - min(days_until, 30.0))) * 0.5
     score = round(max(0.0, min(100.0, base - penalty)), 2)
 
-    # Band from the one shared definition. This block used to carry its own
-    # cut-offs (85/70/50/30 with a "Healthy" label that exists nowhere else in
-    # the system), which disagreed with health_bands.py for 602 of 850 assets —
-    # an asset stored as "Poor" here showed as moderate on the dashboard, and
-    # the chatbot quoted this column while the UI quoted the other. The
-    # asset_health_band Postgres enum is the schema-level authority and matches
-    # health_bands.py exactly, so that is what this now returns.
-    #
-    # The old top band was also unreachable: it needed score >= 85, and the
-    # highest score the fleet produces is 79.
+    # Band from the one shared definition rather than cut-offs local to this
+    # function. The asset_health_band Postgres enum is the schema-level
+    # authority and matches health_bands.py exactly, so any second set of
+    # cut-offs here would put this column and the dashboard on different
+    # scales for the same asset, and the chatbot and the UI would each quote
+    # a different band.
     status = band_for(score)
 
     return score, status
@@ -508,7 +500,7 @@ def _compute_contributing_factors(fd: dict, failure_probability: float, days_unt
     Each present health component contributes its equal share of the base
     average (impacts sum to `base`); the two penalty terms are the exact
     same values _compute_health_score subtracts from it (impacts sum to
-    `-penalty`) — so summing every impact here reproduces `score` before
+    `-penalty`), so summing every impact here reproduces `score` before
     the 0-100 clamp. A prior version used an independently-invented
     weighted formula (brake 22%, tire 18%, oil 18%, battery 15%,
     hydraulic 12%) that had no arithmetic relationship to the score it was
@@ -528,7 +520,7 @@ def _compute_contributing_factors(fd: dict, failure_probability: float, days_unt
     days_penalty = max(0.0, (30.0 - min(days_until, 30.0))) * 0.5
     factors.append({"feature": "days_until_maintenance", "impact": -round(days_penalty, 4)})
 
-    # Secondary diagnostic-only flags for out-of-range readings — these were
+    # Secondary diagnostic-only flags for out-of-range readings, these were
     # never part of the health-score formula itself, only additional "why"
     # context, and stay as-is.
     engine_temp = _to_float(fd.get("engine_temp_avg_c"))
@@ -565,16 +557,14 @@ def _estimate_cost(
 ) -> tuple[float | None, float | None, float | None]:
     """Estimate maintenance cost with the trained cost model.
 
-    Returns ``(None, None, None)`` when the model cannot produce a number —
-    the bundle failed to load, or prediction raised for this asset.
+    Returns ``(None, None, None)`` when the model cannot produce a number, the bundle failed to load, or prediction raised for this asset.
 
-    There used to be a heuristic fallback here: a hand-written formula
-    (base + vibration*1200 + faults*2500 + ...) that ran whenever the model
-    was unavailable. It wrote into the same ``estimated_cost_lkr`` column the
-    model writes to, with the same ``status="ok"``, so nothing downstream —
-    dashboards, reports, the LLM agent — could tell a model prediction from a
-    guess. That is worse than having no number at all: a fabricated cost still
-    gets summed into fleet spend totals and cited in generated reports.
+    There is deliberately no heuristic fallback. A hand-written formula
+    would write into the same ``estimated_cost_lkr`` column with the same
+    ``status="ok"``, leaving nothing downstream, dashboards, reports or the
+    LLM agent, able to tell a model prediction from a guess. That is worse
+    than having no number at all: a fabricated cost still gets summed into
+    fleet spend totals and cited in generated reports.
 
     A NULL is honest and every read path already handles it. Callers must not
     substitute a default; surface "estimate unavailable" instead.
@@ -615,13 +605,13 @@ def _fmt_cost(value: float | None) -> str:
 
 # pdm_decision_service.build_decision's tier is the authoritative
 # reconciliation of the classifier, regressor, and health score (it uses
-# the model's own tuned clf_threshold, not a guessed constant) — risk_level
+# the model's own tuned clf_threshold, not a guessed constant), risk_level
 # is derived from that same tier instead of independently re-deriving a
 # verdict from raw probability/days with a different threshold set.
-# Previously _compute_risk_level (0.8/0.6/0.35 probability cuts, 7/14/30 day
-# cuts) and build_decision's tier (clf_threshold ~0.52, health-score-aware)
-# could — and did — disagree for the same evidence, e.g. risk_level="high"
-# next to tier="urgent" on the exact same pdm_batch_predictions row.
+# Deriving risk_level separately from raw probability and days, on its own
+# cuts, lets it disagree with the tier for the same evidence, which surfaces
+# as risk_level="high" next to tier="urgent" on one pdm_batch_predictions
+# row.
 _TIER_TO_RISK_LEVEL = {
     "urgent": "critical",
     "conflict": "high",
@@ -635,7 +625,7 @@ def _risk_level_from_tier(tier: str) -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# DB access — batched fetch + batched upsert
+# DB access, batched fetch + batched upsert
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _fetch_latest_readings(db: Session, asset_ids: list[str]) -> dict[str, Any]:
@@ -673,7 +663,7 @@ def _notify_newly_critical_assets(db: Session, assets: list[Asset]) -> None:
 
     On a real batch run it's common for a large fraction of the fleet to
     flip critical at once (e.g. after a model swap, or in this project's
-    live data: 339/1065 assets were critical in one run) — calling
+    live data: 339/1065 assets were critical in one run), calling
     notify_admins() once per asset in that scenario turned into 1000+ DB
     round-trips (272 admin-id queries + 447 preference queries + 447
     profile queries + 447 inserts, measured on the real fleet). Instead:
@@ -682,7 +672,7 @@ def _notify_newly_critical_assets(db: Session, assets: list[Asset]) -> None:
     call, and admins get ONE digest notification per warehouse listing all
     of that warehouse's newly-critical assets, instead of N separate ones.
 
-    Never allowed to raise — a notification failure must not fail the
+    Never allowed to raise, a notification failure must not fail the
     batch run that computed these predictions.
     """
     if not assets:
@@ -746,12 +736,11 @@ def _upsert_batch_predictions(db: Session, rows: list[dict]) -> None:
 def sync_asset_health_bands(db: Session, asset_ids: list[str] | None = None) -> int:
     """Refresh ``assets.health_band`` from the score this run just wrote.
 
-    ``health_band`` previously had no writer anywhere in the backend — it was
-    populated once at seed time and only read afterwards, so it drifted further
-    from reality with every batch run. That is why the assets list and the admin
-    dashboard disagreed about the same fleet (13 "critical" against 161): two
-    numbers derived from different vintages of different measures, both labelled
-    critical.
+    Without this writer the column keeps whatever seed time put there and
+    drifts further from reality with every batch run, so the assets list and
+    the admin dashboard report different counts for the same fleet: two
+    numbers taken from different vintages of different measures, both
+    labelled critical.
 
     Banding here uses app.services.health_bands, the same definition the
     dashboard's distribution chart is generated from, so the two agree by
@@ -786,7 +775,7 @@ def sync_asset_health_bands(db: Session, asset_ids: list[str] | None = None) -> 
             log.info("[batch] health_band updated for %d assets", changed)
         return changed
     except Exception:
-        # Denormalised convenience column — never fail a prediction run over it.
+        # Denormalised convenience column, never fail a prediction run over it.
         db.rollback()
         log.warning("[batch] health_band sync failed (non-fatal)", exc_info=True)
         return 0
@@ -930,7 +919,7 @@ def run_batch_for_asset(
 ) -> dict:
     """Run the full PDM pipeline for a single asset and upsert the result.
 
-    breakdown_cost_bundle is optional — when supplied, uses the v4 XGBoost
+    breakdown_cost_bundle is optional, when supplied, uses the v4 XGBoost
     model for cost estimation. When None, falls back to the heuristic formula
     (original behaviour, fully preserved).
     """
@@ -1086,7 +1075,7 @@ def run_batch_for_all_assets(
 ) -> dict:
     """Run the full PDM batch for every active asset.
 
-    breakdown_cost_bundle is optional — when supplied, uses the v4 XGBoost
+    breakdown_cost_bundle is optional, when supplied, uses the v4 XGBoost
     model for cost estimation instead of the heuristic formula.
     Fully backward-compatible: passing None preserves the original behaviour.
     """

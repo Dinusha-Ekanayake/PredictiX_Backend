@@ -166,7 +166,7 @@ def update_my_profile(
 ):
     # PATCH semantics: "the client did not mention this field" and "the client
     # explicitly sent null to clear it" are different requests, and testing
-    # `is not None` collapsed them into one — so a user could set an address or
+    # `is not None` collapsed them into one, so a user could set an address or
     # phone number but never clear it again, and the API silently returned 200
     # as though the clear had worked. model_fields_set carries only the keys
     # actually present in the request body, which is the distinction we need.
@@ -194,7 +194,7 @@ def update_my_profile(
         if payload.address:
             meta["address"] = payload.address
         else:
-            # Drop the key entirely rather than storing null/"" — keeps meta
+            # Drop the key entirely rather than storing null/"", keeps meta
             # clean and makes "no address" a single representation.
             meta.pop("address", None)
         current_user.meta = meta
@@ -219,7 +219,7 @@ def update_my_profile(
             raise HTTPException(status_code=500, detail="Profile update failed")
 
         def send_notifications():
-            # Best-effort admin notification email via Brevo — never blocks the save.
+            # Best-effort admin notification email via Brevo, never blocks the save.
             try:
                 NotificationService.notify_on_profile_update(db, str(current_user.id))
             except Exception:
@@ -304,12 +304,12 @@ def get_my_assets(
         return []
 
     # Assigned via either the direct assets.assigned_to column OR an active
-    # row in asset_assignments — an asset reassigned only through the
+    # row in asset_assignments, an asset reassigned only through the
     # assignments table (without updating assigned_to) would otherwise
     # silently be missing from this list despite showing up elsewhere
     # (get_my_profile's asset count already checks both sources via
     # max(direct, via_table)). Only decommissioned (fully retired) assets
-    # are excluded — critical/under_maintenance assets must still show up,
+    # are excluded, critical/under_maintenance assets must still show up,
     # since those are exactly what most need the user's attention.
     assigned_asset_ids_subq = (
         db.query(AssetAssignment.asset_id)
@@ -373,7 +373,7 @@ def get_my_assets(
             "location": location,
             "status": asset.status or "active",
             # None, not 100.0, when the asset has no completed prediction: the
-            # UI already renders null as "—", whereas the old default asserted
+            # UI already renders null as ", ", whereas the old default asserted
             # perfect health for an asset nothing had actually scored.
             "healthPercent": (
                 float(health_by_asset[asset.id])
@@ -393,7 +393,7 @@ def get_my_stats(
         return {"assignedAssets": 0, "activeAssets": 0}
 
     # assignedAssets = everything assigned to this user (direct assigned_to
-    # OR an active asset_assignments row — same union as get_my_assets)
+    # OR an active asset_assignments row, same union as get_my_assets)
     # except fully decommissioned assets; activeAssets = specifically
     # status == "active". The two counts differ on purpose: a critical or
     # under_maintenance asset is still assigned to its holder even though it is
@@ -442,7 +442,7 @@ def get_my_colleagues(
     already scopes this to the caller's own site.
 
     ``limit`` exists because the dashboard's "My Team" card renders eight
-    people: unbounded, this returned the entire department — measured at 519
+    people: unbounded, this returned the entire department, measured at 519
     colleagues / 140 KB for one Colombo driver, ~98% of it discarded, and the
     slowest of that page's four parallel calls. The team directory still omits
     the parameter and receives everyone, because it filters client-side.
@@ -464,7 +464,7 @@ def get_my_colleagues(
         q = q.limit(limit)
     colleagues = q.all()
 
-    # All colleagues share the same department — resolve the name once
+    # All colleagues share the same department, resolve the name once
     # instead of one Department query per colleague (removes the N+1).
     dept = db.query(Department).filter(Department.id == current_user.department_id).first()
     dept_name = dept.name if dept else "Unknown"
