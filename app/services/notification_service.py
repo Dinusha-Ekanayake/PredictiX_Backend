@@ -463,7 +463,6 @@ class NotificationService:
                           "BREVO_API_KEY instead.", flush=True)
         else:
             api_key = os.getenv("BREVO_API_KEY")
-
         sender_email = os.getenv("BREVO_SENDER_EMAIL", "neuromindspredictix@11453287.brevosend.com")
         sender_name = os.getenv("BREVO_SENDER_NAME", "PredictiX Admin")
 

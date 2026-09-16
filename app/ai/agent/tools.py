@@ -639,13 +639,19 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             log.error("Critical asset fast-path failed: %s", e)
 
     # ── Fast-Path B: Category Breakdown & Count Queries ───────────────────────
-    breakdown_triggers = [
-        "how many ticket", "how many asset", "how many user", "number of ticket", "number of asset",
-        "number of user", "total ticket", "total asset", "total user", "count of ticket", "count of asset",
-        "count of user", "by category", "by sub category", "by sub categories", "by status", "by priority",
-        "by role", "by health", "breakdown", "all sub categories"
+    count_triggers = [
+        "how many", "number of", "count of", "count", "total", "breakdown",
+        "all sub categories", "by category", "by status", "by priority"
     ]
-    is_count_breakdown = any(t in q_lower for t in breakdown_triggers)
+    entity_keywords = ["ticket", "asset", "user", "warehouse", "profile", "fleet", "vehicle"]
+    
+    has_count_trigger = any(ct in q_lower for ct in count_triggers)
+    has_entity = any(e in q_lower for e in entity_keywords)
+    
+    is_count_breakdown = (has_count_trigger and has_entity) or any(k in q_lower for k in [
+        "how many ticket", "how many asset", "how many user", "how many open",
+        "tickets here", "assets here", "users here", "total ticket", "total asset", "total user"
+    ])
 
     if is_count_breakdown:
         try:
@@ -682,9 +688,9 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             w_clause_p = " WHERE (warehouse_id = :wid OR warehouse_id IS NULL) " if ctx.warehouse_id else ""
             params = {"wid": ctx.warehouse_id} if ctx.warehouse_id else {}
 
-            is_t = "ticket" in q_lower or "all sub categories" in q_lower
-            is_a = "asset" in q_lower or "all sub categories" in q_lower
-            is_u = "user" in q_lower or "all sub categories" in q_lower
+            is_t = "ticket" in q_lower or "all sub categories" in q_lower or "how many open" in q_lower or "tickets here" in q_lower
+            is_a = "asset" in q_lower or "all sub categories" in q_lower or "assets here" in q_lower or "fleet" in q_lower
+            is_u = "user" in q_lower or "all sub categories" in q_lower or "users here" in q_lower
             if not (is_t or is_a or is_u):
                 is_t = is_a = is_u = True
 
@@ -701,8 +707,11 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                 prio_items = ", ".join([f"{str(p).title()}: {c}" for p, c in t_prio if p])
                 cat_items = ", ".join([f"{str(cat).title()}: {c}" for cat, c in t_cat if cat])
 
+                open_count = sum(c for s, c in t_status if s and str(s).lower() in ("open", "in_progress", "pending"))
+                header_title = f"🎫 **Open Tickets: {open_count:,} (Total: {total_t:,})**" if "open" in q_lower else f"🎫 **Tickets Breakdown (Total: {total_t:,})**"
+
                 output_sections.append(
-                    f"🎫 **Tickets Breakdown (Total: {total_t:,})**\n\n"
+                    f"{header_title}\n\n"
                     f"• **By Status:** {status_items or 'None'}\n"
                     f"• **By Priority:** {prio_items or 'None'}\n"
                     f"• **By Category:** {cat_items or 'None'}"

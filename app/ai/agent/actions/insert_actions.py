@@ -107,10 +107,80 @@ If you cannot understand the action or it's a delete operation, return:
 """
 
 
+def _parse_action_rule_based(question: str) -> dict:
+    """Deterministic regex-based fallback for action parsing when LLM is unavailable."""
+    q = question.strip()
+    q_lower = q.lower()
+
+    # 1. Create Ticket
+    if any(k in q_lower for k in ["ticket", "fault", "issue", "breakdown", "complaint", "incident"]):
+        priority = "medium"
+        if "high priority" in q_lower or "urgent" in q_lower or "critical" in q_lower:
+            priority = "high"
+        elif "low priority" in q_lower:
+            priority = "low"
+
+        # Extract title
+        title = "New Maintenance Ticket"
+        title_match = re.search(r"titled\s+['\"]?([^'\"]+?)['\"]?(?:\s+with\s+description|\s+for|\s*$)", q, re.IGNORECASE)
+        if title_match:
+            title = title_match.group(1).strip()
+        else:
+            t_match2 = re.search(r"ticket\s+(?:for\s+[^'\"]+?\s+)?titled\s+['\"]?([^'\"]+?)['\"]?", q, re.IGNORECASE)
+            if t_match2:
+                title = t_match2.group(1).strip()
+
+        # Extract description
+        desc = "Created via Sidekick Chatbot"
+        desc_match = re.search(r"description\s+['\"]?([^'\"]+?)['\"]?$", q, re.IGNORECASE)
+        if desc_match:
+            desc = desc_match.group(1).strip()
+        elif "with description" in q_lower:
+            desc = q.split("with description", 1)[1].strip(" '\"")
+
+        # Extract asset
+        asset_name = None
+        asset_match = re.search(r"for\s+([A-Za-z0-9\-\s]+?)\s+(?:titled|with|priority)", q, re.IGNORECASE)
+        if asset_match:
+            asset_name = asset_match.group(1).strip()
+
+        return {
+            "action": "create_ticket",
+            "title": title,
+            "description": desc,
+            "priority": priority,
+            "asset_name": asset_name
+        }
+
+    # 2. Create Asset
+    if "asset" in q_lower and ("create" in q_lower or "add" in q_lower or "insert" in q_lower):
+        name_match = re.search(r"(?:asset|name)\s+['\"]?([^'\"]+?)['\"]?(?:\s+type|\s+code|$)", q, re.IGNORECASE)
+        name = name_match.group(1).strip() if name_match else "New Asset"
+        return {
+            "action": "create_asset",
+            "asset_name": name,
+            "asset_code": None,
+            "asset_type": "vehicle"
+        }
+
+    # 3. Create User
+    if "user" in q_lower and ("create" in q_lower or "add" in q_lower or "insert" in q_lower):
+        email_match = re.search(r"[\w\.-]+@[\w\.-]+\.\w+", q)
+        email = email_match.group(0) if email_match else None
+        return {
+            "action": "create_user",
+            "email": email,
+            "full_name": "New User",
+            "role": "user"
+        }
+
+    return {"action": "unauthorized"}
+
+
 def handle_action(question: str, ctx: ToolContext) -> dict:
     """Handles data insertion requests strictly."""
     
-    # 1. Use LLM to parse the intent into structured JSON
+    # 1. Use LLM to parse the intent into structured JSON with regex fallback
     try:
         raw_json, _ = call_groq(
             messages=[
@@ -123,10 +193,11 @@ def handle_action(question: str, ctx: ToolContext) -> dict:
         data = _extract_json_data(raw_json)
         action = data.get("action")
     except Exception as e:
-        log.error("Failed to parse action JSON from LLM: %s", e)
-        return {"answer": "⚠️ I couldn't understand the action details. Please try rephrasing with the title and description.", "action_buttons": []}
+        log.warning("LLM action parsing failed, falling back to rule-based parser: %s", e)
+        data = _parse_action_rule_based(question)
+        action = data.get("action")
         
-    if action == "unauthorized":
+    if not data or action == "unauthorized":
         return {"answer": "🔒 I am only allowed to create or update maintenance records. I cannot delete existing data.", "action_buttons": []}
 
     # Ensure valid database session
@@ -199,10 +270,15 @@ def handle_action(question: str, ctx: ToolContext) -> dict:
             db.commit()
             db.refresh(new_ticket)
 
-            # Trigger email notification
+            # Trigger email notification asynchronously
             try:
+                import threading
                 from app.services.notification_service import NotificationService
-                NotificationService.notify_on_new_ticket(db, str(new_ticket.id))
+                t_id_str = str(new_ticket.id)
+                threading.Thread(
+                    target=lambda: NotificationService.notify_on_new_ticket(None, t_id_str),
+                    daemon=True
+                ).start()
             except Exception as notify_err:
                 log.warning("Notification dispatch failed on chatbot ticket create: %s", notify_err)
             

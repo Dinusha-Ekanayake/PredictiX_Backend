@@ -93,7 +93,7 @@ def _classify_intent(question: str) -> str:
     if any(dt in q for dt in DATA_TRIGGERS) or re.search(r"\b(tkt-\d+|t-\d+|#\d+)\b", q):
         return INTENT_DATABASE
 
-    # Fast-path: navigation phrases, "open X", "go to X", "take me to X", "navigate to X"
+    # Fast-path: navigation phrases — "open X", "go to X", "take me to X", "navigate to X"
     NAV_TRIGGERS = (
         "open ", "go to ", "take me to ", "navigate to ",
         "bring me to ", "launch ", "redirect to ", "i want to go to ",
