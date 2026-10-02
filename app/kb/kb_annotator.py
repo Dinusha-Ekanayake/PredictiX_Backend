@@ -123,32 +123,27 @@ SHAP_KB_MAP: dict[str, dict] = {
 
 HEALTH_BAND_KB: list[dict] = [
     {
-        "band": "90–100%",
+        "band": "80-100%",
         "db_enum": "excellent",
         "kb_interpretation": "Optimal — maintain current schedule",
     },
     {
-        "band": "80–89%",
+        "band": "70-79%",
         "db_enum": "good",
         "kb_interpretation": "Good — monitor; preventive care on-track",
     },
     {
-        "band": "70–79%",
+        "band": "50-69%",
         "db_enum": "moderate",
-        "kb_interpretation": "Moderate — schedule service within 2 weeks",
+        "kb_interpretation": "Moderate — schedule within 30 days",
     },
     {
-        "band": "60–69%",
+        "band": "30-49%",
         "db_enum": "poor",
         "kb_interpretation": "At-Risk — schedule service within 14 days",
     },
     {
-        "band": "50–59%",
-        "db_enum": "poor",
-        "kb_interpretation": "High Risk — service within 7 days",
-    },
-    {
-        "band": "Below 50%",
+        "band": "Below 30%",
         "db_enum": "critical",
         "kb_interpretation": "Critical — immediate intervention required",
     },
@@ -285,9 +280,59 @@ def _canon_feature(name: str) -> str:
 _SHAP_KB_CANON: dict[str, dict] = {_canon_feature(k): v for k, v in SHAP_KB_MAP.items()}
 
 
+def _get_dynamic_shap_annotations_batch(features: list[str]) -> dict[str, dict]:
+    """Dynamically query Llama 3.3 for unmapped SHAP features."""
+    if not features:
+        return {}
+    
+    import os
+    import json
+    
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        return {}
+        
+    try:
+        from langchain_openai import ChatOpenAI
+        from langchain_core.messages import HumanMessage, SystemMessage
+        
+        llm = ChatOpenAI(
+            api_key=api_key,
+            base_url="https://openrouter.ai/api/v1",
+            model_name="meta-llama/llama-3.3-70b-instruct",
+            temperature=0.1,
+            max_tokens=500,
+            model_kwargs={"response_format": {"type": "json_object"}}
+        )
+        
+        sys_prompt = """You are an expert industrial equipment maintenance AI analyzing SHAP features.
+For each SHAP feature provided, generate a meaningful 'kb_threshold', 'action', and 'standard'.
+Return ONLY valid JSON in this format mapping the exact feature name to its dict:
+{
+  "feature_name_1": {
+    "kb_threshold": ">95°C → critical",
+    "action": "Inspect cooling system",
+    "standard": "SMRP BP 2.2"
+  }
+}"""
+        resp = llm.invoke([
+            SystemMessage(content=sys_prompt),
+            HumanMessage(content=json.dumps(features))
+        ])
+        content = resp.content.strip()
+        if content.startswith("```json"):
+            content = content[7:-3]
+        elif content.startswith("```"):
+            content = content[3:-3]
+        return json.loads(content.strip())
+    except Exception as e:
+        print(f"Dynamic SHAP LLM Error: {e}")
+        return {}
+
 def annotate_shap_features(top_shap_features: list) -> list[dict]:
     """
     Cross-reference SHAP top features against KB threshold mappings.
+    If a feature is missing from the KB, dynamically query the LLM.
 
     Input:  list of (feature_name, count_or_score) tuples from DB
     Output: list of dicts with feature, impact_pct, kb_threshold, action
@@ -297,6 +342,21 @@ def annotate_shap_features(top_shap_features: list) -> list[dict]:
 
     total = sum(score for _, score in top_shap_features) or 1
     result = []
+    
+    unmapped_feats = []
+    # Identify unmapped features
+    for feat, score in top_shap_features:
+        lookup_key = feat.lower().strip()
+        kb = (
+            SHAP_KB_MAP.get(lookup_key)
+            or SHAP_KB_MAP.get(lookup_key.replace(" ", "_"))
+            or _SHAP_KB_CANON.get(_canon_feature(feat))
+        )
+        if not kb:
+            unmapped_feats.append(feat)
+            
+    # Dynamically resolve missing features
+    dynamic_kbs = _get_dynamic_shap_annotations_batch(unmapped_feats)
 
     for feat, score in top_shap_features:
         # Normalise key: lowercase, strip whitespace
@@ -306,8 +366,9 @@ def annotate_shap_features(top_shap_features: list) -> list[dict]:
             SHAP_KB_MAP.get(lookup_key)
             or SHAP_KB_MAP.get(lookup_key.replace(" ", "_"))
             or _SHAP_KB_CANON.get(_canon_feature(feat))
-            or {}
         )
+        if not kb:
+            kb = dynamic_kbs.get(feat, {})
 
         impact_pct = round((score / total) * 100, 1)
 

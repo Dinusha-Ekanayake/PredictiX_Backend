@@ -23,7 +23,7 @@ import os
 import json
 import re
 from typing import Any
-from langchain_groq import ChatGroq
+
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from sqlalchemy.orm import Session
@@ -64,18 +64,17 @@ from app.kb.kb_annotator import (
 # LLM SETUP — Groq Llama 3
 # ═══════════════════════════════════════════════════════════════
 
-def _get_llm(temperature: float = 0.3) -> ChatGroq:
-    """Return ChatGroq — raises RuntimeError if key missing."""
-    api_key = os.getenv("WH_GROQ_API_KEY") or os.getenv("GROQ_API_KEY") or os.getenv("CHATBOT_GROQ_API_KEY")
+def _get_llm(temperature: float = 0.3):
+    """Return ChatOpenAI configured for OpenRouter (Llama 3.3 Paid)."""
+    from langchain_openai import ChatOpenAI
+    api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
-        raise RuntimeError(
-            "No Groq API key configured in .env file. "
-            "Get a free key at https://console.groq.com and add: "
-            "WH_GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxxx"
-        )
-    return ChatGroq(
-        groq_api_key=api_key,
-        model_name=os.getenv("WH_GROQ_MODEL", "groq/compound"),
+        raise RuntimeError("OPENROUTER_API_KEY is not set in your .env file.")
+    
+    return ChatOpenAI(
+        api_key=api_key,
+        base_url="https://openrouter.ai/api/v1",
+        model_name="meta-llama/llama-3.3-70b-instruct",
         temperature=temperature,
         max_tokens=2048,
     )
