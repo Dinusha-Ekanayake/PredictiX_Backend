@@ -1,2 +1,3 @@
 app/ai/models/**/*.txt text eol=lf
 app/ai/models/**/*.json text eol=lf
+graphify-out/graph.json merge=graphify

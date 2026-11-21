@@ -77,3 +77,6 @@ app/chatbot/scratch/
 
 # Exported user reports carry names, emails and phone numbers.
 *_report.csv
+
+# Graphify knowledge graph (local, rebuilt with `graphify update .`)
+graphify-out/

@@ -1,0 +1,25 @@
+# Keep the code graph lean: datasets, model artefacts, backups and environments add only noise.
+.venv/
+venv/
+.pytest_cache/
+__pycache__/
+graphify-out/
+old-database/
+seed_data/
+scratch/
+app/chatbot/scratch/
+app/ai/dataset/
+app/warehouse_databases/*.csv
+scripts/backups/
+*.csv
+*.pkl
+*.ipynb
+*.safetensors
+*.onnx
+*.bundle
+*.pdf
+*.log
+*.out
+app/ai/models/**/*.txt
+app/ai/models/**/*.json
+.env*
