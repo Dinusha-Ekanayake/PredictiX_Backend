@@ -3,10 +3,10 @@
 Credentials are read from environment variables so nothing secret is committed.
 Set them before running, e.g.:
 
-    export SMTP_GMAIL_ADDRESS="you@gmail.com"
-    export SMTP_APP_PASSWORD="your-16-char-app-password"
+    export SMTP_GMAIL_ADDRESS="<your-gmail-address>"
+    export SMTP_APP_PASSWORD="<your-app-password>"
     export SMTP_SEND_TO="recipient@example.com"      # optional, defaults to sender
-    python -m app.test_email
+    python scripts/manual/test_email.py
 """
 import os
 import smtplib
