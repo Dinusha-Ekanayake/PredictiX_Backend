@@ -107,6 +107,9 @@ def _load_bundle() -> dict[str, Any]:
             f"Survival bundle not found at {path}. Train + deploy the v3 models "
             f"(app/ai/models/survival_analysis/train_survival_models.py)."
         )
+    from app.ai.model_integrity import verify_model_file
+
+    verify_model_file(path)
     with open(path, "rb") as f:
         return pickle.load(f)
 

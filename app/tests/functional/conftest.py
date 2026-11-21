@@ -24,11 +24,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Test accounts. The passwords come from the environment (GitHub Actions
+# secrets in CI, .env locally) because this repository is public.
 DEMO = {
-    "super": ("demosuperadmin@lankalogix.com", "superadmin@123"),
-    "admin": ("demoadmincolombo.adm@lankalogix.com", "demoadmin@123"),
-    "user": ("demousercolombo.adm@lankalogix.com", "demouser@123"),
+    "super": (os.getenv("TEST_SUPER_EMAIL", "demosuperadmin@lankalogix.com"), os.getenv("TEST_SUPER_PASSWORD", "")),
+    "admin": (os.getenv("TEST_ADMIN_EMAIL", "demoadmincolombo.adm@lankalogix.com"), os.getenv("TEST_ADMIN_PASSWORD", "")),
+    "user": (os.getenv("TEST_USER_EMAIL", "demousercolombo.adm@lankalogix.com"), os.getenv("TEST_USER_PASSWORD", "")),
 }
+MISSING_TEST_PASSWORDS = [role for role, (_, pw) in DEMO.items() if not pw]
 
 # Anything this suite creates carries the marker so a failed cleanup is
 # identifiable and never mistaken for real fleet data.
@@ -54,6 +57,8 @@ def frontend_only(reason: str):
 def client():
     if not os.getenv("DATABASE_URL"):
         pytest.skip("DATABASE_URL is not set")
+    if MISSING_TEST_PASSWORDS:
+        pytest.skip("TEST_SUPER_PASSWORD / TEST_ADMIN_PASSWORD / TEST_USER_PASSWORD not set")
     from fastapi.testclient import TestClient
     from app.main import app
 

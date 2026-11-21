@@ -17,6 +17,9 @@ concurrency:
 
 env:
   PYTHON_VERSION: "3.12"
+  # CI shares the database with the deployed API, so test runs must never start
+  # the nightly prediction batch or the reminder mail jobs.
+  SCHEDULER_ENABLED: "false"
 
 permissions:
   contents: read
@@ -67,9 +70,12 @@ jobs:
           # which is worse than no check. Placeholders (gsk_xxxxxxxx,
           # "<project-ref>", "your-api-key") are filtered out rather than
           # failing the build.
-          FILES=$(git ls-files | grep -vE '\.(pkl|csv|pdf|ipynb|png|jpg|svg|lock)$' || true)
-          MATCHES=$(echo "$FILES" | xargs -r grep -InE \
-            'postgres(ql)?(\+psycopg2)?://[^:]+:[^@]{6,}@|gsk_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|eyJhbGciOi[A-Za-z0-9]{20,}' \
+          # Notebooks are scanned too: a token pasted into a login() cell is
+          # saved in the .ipynb. Paths are NUL-separated because several model
+          # folders contain spaces.
+          FILES=$(git ls-files | grep -vE '\.(pkl|csv|pdf|png|jpg|svg|lock)$' || true)
+          MATCHES=$(echo "$FILES" | tr '\n' '\0' | xargs -0 -r grep -InE \
+            'postgres(ql)?(\+psycopg2)?://[^:]+:[^@]{6,}@|gsk_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|sk-or-v1-[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{30,}|xkeysib-[A-Za-z0-9]{20,}|eyJhbGciOi[A-Za-z0-9]{20,}|\b[A-Z_]*(PASSWORD|SECRET|API_KEY)\s*=\s*["'"'"'][A-Za-z0-9_-]{12,}["'"'"']' \
             2>/dev/null \
             | grep -viE 'x{6,}|your[-_ ]?(api[-_ ])?key|placeholder|example|<[a-z_-]+>|\$\{' || true)
           if [[ -n "$MATCHES" ]]; then
@@ -148,6 +154,9 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          TEST_SUPER_PASSWORD: ${{ secrets.TEST_SUPER_PASSWORD }}
+          TEST_ADMIN_PASSWORD: ${{ secrets.TEST_ADMIN_PASSWORD }}
+          TEST_USER_PASSWORD: ${{ secrets.TEST_USER_PASSWORD }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           CHATBOT_GROQ_API_KEY: ${{ secrets.CHATBOT_GROQ_API_KEY }}
@@ -194,6 +203,9 @@ jobs:
           DISABLE_HF_MODELS: "false"
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          TEST_SUPER_PASSWORD: ${{ secrets.TEST_SUPER_PASSWORD }}
+          TEST_ADMIN_PASSWORD: ${{ secrets.TEST_ADMIN_PASSWORD }}
+          TEST_USER_PASSWORD: ${{ secrets.TEST_USER_PASSWORD }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           # Warehouse report generation, which also reads WH_GROQ_MODEL.

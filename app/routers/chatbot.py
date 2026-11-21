@@ -4,30 +4,47 @@ from __future__ import annotations
 from typing import Any, Optional, Dict
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
 from app.ai.agent.agent_service import run_agent
 from app.ai.agent.tools import ToolContext
 from app.chatbot.knowledge_service import search_knowledge
 from app.ai.services.llm_service import ask_llm
+from app.ai.agent.guardrails import (
+    MAX_HISTORY_CHARS,
+    MAX_HISTORY_TURNS,
+    MAX_QUESTION_CHARS,
+    bounded_frontend_context,
+    clamp,
+    sanitize_action_buttons,
+)
+from app.core.rate_limit import ai_rate_limit
 from app.deps import get_current_user, get_db, require_user
 
 # Every endpoint here spends Groq quota on the caller's behalf, so a valid
-# token is required at the router level rather than per route. Without it an
-# anonymous POST to the public URL returns a real model answer, and with no
-# rate limiting anywhere in the application that is an open tap on a paid API.
+# token is required at the router level, and each user is limited to
+# AI_RATE_LIMIT calls per minute (see app/core/rate_limit.py).
 router = APIRouter(
     prefix="/chatbot",
     tags=["Chatbot"],
-    dependencies=[Depends(require_user)],
+    dependencies=[Depends(require_user), Depends(ai_rate_limit)],
 )
 
 
 # ─── Models ───────────────────────────────────────────────────────────────────
 
+def _bounded_question(value: str) -> str:
+    return clamp((value or "").strip(), MAX_QUESTION_CHARS)
+
+
 class ChatRequest(BaseModel):
     question: str
+
+    @field_validator("question")
+    @classmethod
+    def _bound_question(cls, value: str) -> str:
+        return _bounded_question(value)
 
 
 class ChatResponse(BaseModel):
@@ -52,9 +69,35 @@ class ToolTraceItem(BaseModel):
 
 
 class AgentRequest(BaseModel):
+    """Chat input, bounded so one request cannot carry an unbounded prompt.
+
+    Over-long input is trimmed rather than rejected, so a long paste still
+    gets an answer.
+    """
+
     question: str
     history: Optional[list[ChatHistoryTurn]] = None
     frontend_context: Optional[dict] = None
+
+    @field_validator("question")
+    @classmethod
+    def _bound_question(cls, value: str) -> str:
+        return _bounded_question(value)
+
+    @field_validator("history")
+    @classmethod
+    def _bound_history(cls, value):
+        if not value:
+            return value
+        recent = value[-MAX_HISTORY_TURNS:]
+        for turn in recent:
+            turn.content = clamp(turn.content, MAX_HISTORY_CHARS)
+        return recent
+
+    @field_validator("frontend_context")
+    @classmethod
+    def _bound_context(cls, value):
+        return bounded_frontend_context(value)
 
 
 class AgentResponse(BaseModel):
@@ -127,10 +170,8 @@ def chatbot_agent(
             )
         )
 
-    # Normalize action_buttons
-    clean_buttons = []
-    for btn in result.get("action_buttons", []):
-        clean_buttons.append(ActionButton(label=btn.get("label", "Go"), path=btn.get("path", "/")))
+    # Only in-app paths and copy actions reach the browser.
+    clean_buttons = [ActionButton(**btn) for btn in sanitize_action_buttons(result.get("action_buttons"))]
 
     return AgentResponse(
         answer=result.get("answer", "I'm sorry, I couldn't generate a response."),

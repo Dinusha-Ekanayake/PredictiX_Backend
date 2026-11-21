@@ -7,6 +7,7 @@ Full pipeline:
 Used by app/routers/asset_reports.py.
 """
 
+import logging
 import uuid
 import os
 from uuid import UUID
@@ -22,6 +23,8 @@ from app.services.context_builder import AssetContextBuilder
 from app.services.ai_insights import AIInsightService
 from app.services.pdf_render import PDFRenderService
 from app.core.storage import supabase_storage
+
+log = logging.getLogger(__name__)
 
 
 def _get_supabase() -> Client:
@@ -102,7 +105,7 @@ class ReportService:
                 self.supabase.table("reports").insert(report_row).execute()
             except Exception as db_err:
                 # Log but don't fail — PDF was generated and uploaded successfully
-                print(f"[report_service] WARNING: Could not save report row to DB: {db_err}")
+                log.warning(f"[report_service] WARNING: Could not save report row to DB: {db_err}")
 
             return public_url, pdf_path
 

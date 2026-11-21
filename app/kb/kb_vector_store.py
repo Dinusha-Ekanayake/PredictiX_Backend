@@ -1,190 +1,127 @@
 """
 PredictiX KB Vector Store
 ===========================
-pgvector based vector store using SentenceTransformers (if available).
-Falls back to TF-IDF based vector store using sklearn (already in .venv — zero new installs).
+Retrieval over the maintenance-standards corpus in the kb_documents table,
+used by the warehouse report agent.
 
-Loads KB_DOCUMENTS dynamically from the PostgreSQL database (via SQLAlchemy) or Supabase.
-
-Features lazy loading so it doesn't run blocking network requests during module import
-or FastAPI app startup.
+The query is embedded with the same all-MiniLM-L6-v2 model the stored vectors
+were made with (app.chatbot.knowledge_service.embed_text: local model first,
+hosted endpoint second), and ranked by cosine similarity in Postgres. When no
+embedding can be made, the same kb_documents rows are ranked by TF-IDF
+instead, so both paths search one corpus and only their scoring differs.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
+
 import numpy as np
-import os
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from app.db.supabase_client import supabase
+from sqlalchemy import text
+
+from app.chatbot.knowledge_service import embed_text, embedding_literal
 from app.db.session import SessionLocal
-from app.models import KBDocument
-from sqlalchemy import select
 
 log = logging.getLogger("predictix.kb_vector_store")
 
-try:
-    from sentence_transformers import SentenceTransformer
-    HAS_SENTENCE_TRANSFORMERS = True
-except ImportError:
-    HAS_SENTENCE_TRANSFORMERS = False
-
 
 class KBVectorStore:
-    """
-    Hybrid Vector Store:
-    Uses pgvector + SentenceTransformers if available, otherwise falls back to
-    lightweight in-memory vector store using TF-IDF + cosine similarity.
-    """
+    """Semantic search over kb_documents, with a TF-IDF fallback on the same rows."""
 
     def __init__(self) -> None:
-        self.use_pgvector = HAS_SENTENCE_TRANSFORMERS
-        
-        # TF-IDF state
-        self._docs = None
-        self._ids = []
-        self._texts = []
-        self._tags = []
+        self._lock = threading.Lock()
+        self._docs: list[dict] | None = None
         self._vectorizer = None
         self._matrix = None
-        
-        # PGVector state
-        self.model = None
-        if self.use_pgvector:
-            try:
-                self.model = SentenceTransformer("all-MiniLM-L6-v2")
-            except Exception as e:
-                log.warning("Failed to load SentenceTransformer: %s. Falling back to TF-IDF.", e)
-                self.use_pgvector = False
+
+    # ── corpus for the fallback and the tag/full-context helpers ──────────
 
     def _ensure_loaded(self) -> None:
-        """Lazy load documents and fit the TF-IDF index if not loaded yet."""
+        """Load kb_documents once and fit the TF-IDF index."""
         if self._docs is not None:
             return
-
-        try:
-            log.info("Lazy-loading knowledge base documents from Supabase...")
-            # Query active articles from database
-            response = supabase.from_("knowledge_base").select("id, title, content, category, tags, source").eq("is_active", True).execute()
-            docs = []
-            for r in (response.data or []):
-                docs.append({
-                    "id": r["id"],
-                    "section": f"{r.get('category') or 'General'}: {r['title']}",
-                    "text": r["content"],
-                    "tags": r.get("tags") or [],
-                    "source": r.get("source") or ""
-                })
-            
-            self._docs = docs
-            log.info("Loaded %d active articles from database.", len(docs))
-        except Exception as e:
-            log.error("Failed to load knowledge base articles from database: %s", e)
-            self._docs = []
-
-        self._ids   = [d["id"]   for d in self._docs]
-        self._texts = [d["text"] for d in self._docs]
-        self._tags  = [d.get("tags", []) for d in self._docs]
-
-        # Fit TF-IDF matrix if we have documents
-        if self._texts:
-            self._vectorizer = TfidfVectorizer(
-                strip_accents="unicode",
-                lowercase=True,
-                stop_words="english",
-                ngram_range=(1, 2),
-                max_features=2000,
-                sublinear_tf=True,
-            )
-            self._matrix = self._vectorizer.fit_transform(self._texts)
-        else:
-            self._vectorizer = None
-            self._matrix = None
-
-    def retrieve(self, query: str, top_k: int = 4, min_score: float = 0.05) -> list[dict]:
-        """
-        Retrieve top_k most relevant KB chunks for a query string.
-        """
-        if self.use_pgvector:
+        with self._lock:
+            if self._docs is not None:
+                return
             try:
-                q_vec = self.model.encode(query).tolist()
                 with SessionLocal() as db:
-                    stmt = select(KBDocument, KBDocument.embedding.cosine_distance(q_vec).label("distance")) \
-                           .order_by("distance") \
-                           .limit(top_k)
-                    
-                    results = db.execute(stmt).all()
-                    out = []
-                    for doc, dist in results:
-                        similarity = 1.0 - float(dist)
-                        if similarity >= min_score:
-                            out.append({
-                                "id": doc.id,
-                                "text": doc.text,
-                                "tags": doc.tags,
-                                "section": doc.id,
-                                "score": similarity
-                            })
-                    if out:
-                        return out
+                    rows = db.execute(text("SELECT id, text, tags FROM kb_documents")).mappings().all()
+                docs = [
+                    {"id": r["id"], "section": r["id"], "text": r["text"], "tags": list(r["tags"] or [])}
+                    for r in rows
+                ]
+                log.info("Loaded %d knowledge documents for keyword search.", len(docs))
             except Exception as e:
-                log.warning("pgvector retrieval failed (%s), falling back to TF-IDF", e)
-                
-        # Fallback to TF-IDF
+                log.error("Failed to load kb_documents: %s", e)
+                docs = []
+
+            if docs:
+                self._vectorizer = TfidfVectorizer(
+                    strip_accents="unicode",
+                    lowercase=True,
+                    stop_words="english",
+                    ngram_range=(1, 2),
+                    max_features=5000,
+                    sublinear_tf=True,
+                )
+                self._matrix = self._vectorizer.fit_transform(d["text"] for d in docs)
+            self._docs = docs
+
+    def _lexical(self, query: str, top_k: int, min_score: float) -> list[dict]:
         self._ensure_loaded()
-        # `not self._matrix` raises on a scipy sparse matrix, which has no
-        # single truth value, so this must test for None explicitly. The old
-        # form made retrieve() raise ValueError on every call once documents
-        # had loaded, and only never showed up because the report path calls
-        # build_full_kb_context() instead of retrieving.
         if self._matrix is None or self._vectorizer is None:
             return []
-
-        q_vec  = self._vectorizer.transform([query])
-        scores = cosine_similarity(q_vec, self._matrix)[0]
+        scores = cosine_similarity(self._vectorizer.transform([query]), self._matrix)[0]
         top_idx = np.argsort(scores)[::-1][:top_k]
         return [
+            {**self._docs[i], "score": float(scores[i]), "retrieval": "lexical"}
+            for i in top_idx
+            if scores[i] >= min_score
+        ]
+
+    # ── public API ────────────────────────────────────────────────────────
+
+    def retrieve(self, query: str, top_k: int = 4, min_score: float = 0.25) -> list[dict]:
+        """Top `top_k` documents for `query` scoring at least `min_score`."""
+        try:
+            vector = embed_text(query)
+        except Exception as e:
+            log.warning("Query embedding failed (%s); using keyword search over kb_documents.", e)
+            return self._lexical(query, top_k, min_score=0.05)
+
+        try:
+            with SessionLocal() as db:
+                rows = db.execute(text(
+                    "SELECT id, text, tags, 1 - (embedding <=> CAST(:v AS vector)) AS score "
+                    "FROM kb_documents WHERE embedding IS NOT NULL "
+                    "ORDER BY embedding <=> CAST(:v AS vector) LIMIT :k"
+                ), {"v": embedding_literal(vector), "k": int(top_k)}).mappings().all()
+        except Exception as e:
+            log.warning("pgvector retrieval failed (%s); using keyword search over kb_documents.", e)
+            return self._lexical(query, top_k, min_score=0.05)
+
+        return [
             {
-                **self._docs[i],
-                "score": float(scores[i]),
+                "id": r["id"],
+                "section": r["id"],
+                "text": r["text"],
+                "tags": list(r["tags"] or []),
+                "score": float(r["score"]),
+                "retrieval": "semantic",
             }
-              for i in top_idx
-              if scores[i] >= min_score
+            for r in rows
+            if float(r["score"]) >= min_score
         ]
 
     def retrieve_by_tags(self, tags: list[str], top_k: int = 6) -> list[dict]:
-        """
-        Retrieve documents matching any of the provided tags (exact match).
-        """
-        if self.use_pgvector:
-            try:
-                with SessionLocal() as db:
-                    docs = db.query(KBDocument).all()
-                    if docs:
-                        results = []
-                        for doc in docs:
-                            doc_tags = set(doc.tags or [])
-                            overlap = doc_tags.intersection(set(tags))
-                            if overlap:
-                                results.append({
-                                    "id": doc.id, 
-                                    "text": doc.text, 
-                                    "tags": doc.tags, 
-                                    "section": doc.id, 
-                                    "tag_matches": len(overlap)
-                                })
-                        results.sort(key=lambda x: -x["tag_matches"])
-                        return results[:top_k]
-            except Exception as e:
-                log.warning("pgvector retrieve_by_tags failed (%s), falling back to TF-IDF", e)
-                
-        # Fallback to TF-IDF
+        """Documents sharing the most tags with `tags` (exact match)."""
         self._ensure_loaded()
+        wanted = set(tags)
         results = []
-        for doc in self._docs:
-            doc_tags = set(doc.get("tags", []))
-            overlap = doc_tags.intersection(set(tags))
+        for doc in self._docs or []:
+            overlap = wanted.intersection(doc.get("tags", []))
             if overlap:
                 results.append({**doc, "tag_matches": len(overlap)})
         results.sort(key=lambda x: -x["tag_matches"])
@@ -200,41 +137,28 @@ class KBVectorStore:
         )
 
     def build_full_kb_context(self) -> str:
-        """
-        Return ALL KB documents as a structured, source-grouped string for
-        full-context LLM injection. Preferred for the complete warehouse report.
-        """
+        """Every KB document as one source-grouped string, for full-context prompts."""
+        self._ensure_loaded()
         lines = [
             "=" * 64,
             "PREDICTIX KNOWLEDGE BASE — MAINTENANCE STANDARDS & SOURCES",
             "Layers: Statutory (law) — OEM schedules — ISO 55000/55001 — SMRP — FMEA — Climate",
             "=" * 64,
         ]
-        
-        if self.use_pgvector:
-            try:
-                with SessionLocal() as db:
-                    docs = db.query(KBDocument).all()
-                    if docs:
-                        for doc in docs:
-                            lines.append(f"\n[{doc.id}]")
-                            lines.append(doc.text)
-                        return "\n".join(lines)
-            except Exception as e:
-                log.warning("pgvector build_full_kb_context failed (%s), falling back to TF-IDF", e)
-                
-        # Fallback to TF-IDF
-        self._ensure_loaded()
-        for doc in (self._docs or []):
+        for doc in self._docs or []:
             lines.append(f"\n[{doc.get('section', doc['id'])}]")
             lines.append(doc["text"])
-            
         return "\n".join(lines)
 
+
 _store: KBVectorStore | None = None
+_store_lock = threading.Lock()
+
 
 def get_kb_store() -> KBVectorStore:
     global _store
     if _store is None:
-        _store = KBVectorStore()
+        with _store_lock:
+            if _store is None:
+                _store = KBVectorStore()
     return _store

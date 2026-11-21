@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from app.deps import get_db, require_user, get_current_user, is_admin_role
+from app.deps import get_db, require_user, get_current_user, is_admin_role, assert_in_active_warehouse, scoped_warehouse_id
 from app.models import Profile, Ticket, TicketComment
 from app.schemas.misc import TicketCommentCreate, TicketCommentOut
 
@@ -18,7 +18,9 @@ def _can_view_ticket(ticket: Ticket, current_user: Profile) -> bool:
     their warehouse. Comment/edit rights on the comment itself stay
     narrower, see delete_ticket_comment."""
     if is_admin_role(current_user):
-        return True
+        # Admins see every ticket in their active warehouse, and only those.
+        wh_id = scoped_warehouse_id(current_user)
+        return bool(wh_id) and str(ticket.warehouse_id) == wh_id
     uid = str(getattr(current_user, "id", ""))
     user_wh_id = getattr(current_user, "warehouse_id", None)
     if user_wh_id is not None and str(ticket.warehouse_id) == str(user_wh_id):
@@ -43,6 +45,8 @@ def create_ticket_comment(
     # attributed to someone else's identity.
     data = payload.model_dump()
     data["user_id"] = current_user.id
+    if not is_admin_role(current_user):
+        data["is_internal"] = False
 
     obj = TicketComment(**data)
     db.add(obj)
@@ -65,7 +69,9 @@ def list_ticket_comments(
             raise HTTPException(status_code=404, detail="Ticket not found")
         q = db.query(TicketComment).filter(TicketComment.ticket_id == ticket_id)
     elif is_admin_role(current_user):
-        q = db.query(TicketComment)
+        q = db.query(TicketComment).join(Ticket, Ticket.id == TicketComment.ticket_id).filter(
+            Ticket.warehouse_id == scoped_warehouse_id(current_user)
+        )
     else:
         # No ticket_id filter and not an admin, scope to comments on
         # tickets this user can actually see (own warehouse, or tickets
@@ -81,6 +87,9 @@ def list_ticket_comments(
             )
         else:
             q = q.filter((Ticket.created_by == uid) | (Ticket.assigned_to == uid))
+    if not is_admin_role(current_user):
+        # Internal comments are staff notes, never shown to the reporter.
+        q = q.filter(TicketComment.is_internal.isnot(True))
     return q.order_by(TicketComment.created_at.asc()).offset(offset).limit(limit).all()
 
 
@@ -93,6 +102,9 @@ def delete_ticket_comment(
     obj = db.query(TicketComment).filter(TicketComment.id == comment_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Comment not found")
+    if is_admin_role(current_user):
+        parent = db.query(Ticket).filter(Ticket.id == obj.ticket_id).first()
+        assert_in_active_warehouse(current_user, parent.warehouse_id if parent else None, "Comment")
     if not is_admin_role(current_user) and str(obj.user_id) != str(getattr(current_user, "id", "")):
         raise HTTPException(status_code=403, detail="You can only delete your own comments.")
     db.delete(obj)

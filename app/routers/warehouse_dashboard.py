@@ -5,7 +5,8 @@ import calendar
 import logging
 from datetime import datetime, timedelta
 
-from ..deps import get_db, get_current_user, require_user, active_warehouse_id
+from ..deps import get_db, get_current_user, require_admin, require_user, active_warehouse_id, scoped_warehouse_id
+from ..core.rate_limit import report_rate_limit
 from ..models import Department
 
 log = logging.getLogger("predictix")
@@ -685,7 +686,7 @@ def _build_survival_data(db: Session, warehouse_id: str | None = None):
     }
 
 
-@warehouse_dashboard_router.get("/generate-report")
+@warehouse_dashboard_router.get("/generate-report", dependencies=[Depends(require_admin), Depends(report_rate_limit)])
 def generate_warehouse_report(
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user)
@@ -713,19 +714,33 @@ def generate_warehouse_report(
         raise HTTPException(status_code=500, detail=f"Report generation failed: {str(e)}")
 
 
-@warehouse_dashboard_router.post("/chat-route")
-def chat_route(request: ChatRequest, db: Session = Depends(get_db)):
+@warehouse_dashboard_router.post("/chat-route", dependencies=[Depends(report_rate_limit)])
+def chat_route(
+    request: ChatRequest,
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(require_admin),
+):
     """
     Main Router Agent endpoint for chatbot integration.
     Routes user message to the correct agent and returns response.
+    Admin only, scoped to the caller's active warehouse like the report page.
     """
+    wh_id = scoped_warehouse_id(current_user)
+    if request.asset_id:
+        import uuid as _uuid
+        try:
+            asset = db.query(Asset).filter(Asset.id == _uuid.UUID(str(request.asset_id))).first()
+        except ValueError:
+            asset = None
+        if asset is None or (wh_id and str(asset.warehouse_id) != wh_id):
+            raise HTTPException(status_code=404, detail="Asset not found")
     try:
         from app.agents.report_agents import route_request, run_warehouse_agent, run_asset_agent
 
         intent = route_request(request.message)
 
         if intent == "warehouse_report":
-            result = run_warehouse_agent(db)
+            result = run_warehouse_agent(db, warehouse_id=wh_id)
             return {
                 "intent": intent,
                 "response": result["ai_sections"].get("insight_summary", ""),
@@ -751,7 +766,7 @@ def chat_route(request: ChatRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Chat routing failed: {str(e)}")
 from app.services.report_notification_service import ReportNotificationService
 
-@warehouse_dashboard_router.post("/notify-print")
+@warehouse_dashboard_router.post("/notify-print", dependencies=[Depends(require_admin)])
 def notify_report_print(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),

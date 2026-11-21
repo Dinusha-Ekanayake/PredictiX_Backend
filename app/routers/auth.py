@@ -12,7 +12,8 @@ POST /auth/login
 POST /auth/login/select-warehouse
     - Super admin submits a warehouse_id they chose from the dropdown.
     - A short-lived (5-min) signed intermediate token from the first step is
-      verified, then a full 24-hour JWT is issued scoped to that warehouse.
+      verified, then a full access token is issued scoped to that warehouse.
+      Access tokens live for ACCESS_TOKEN_TTL_MINUTES (8 hours by default).
 
 GET  /auth/warehouses
     - Returns all active warehouses (used to populate the dropdown).
@@ -25,28 +26,28 @@ import logging
 import os
 import uuid
 
-from fastapi import APIRouter, HTTPException
-from jose import JWTError, jwt
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.core.security import verify_password
-from app.core.config import jwt_secret, jwt_algorithm
+from app.core.config import access_token_ttl_minutes, demo_accounts_enabled
+from app.core.rate_limit import login_email_rate_limit, login_rate_limit
+from app.core.security import InvalidTokenError, decode_token, encode_token, verify_password
+from app.deps import require_super_admin
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 log = logging.getLogger(__name__)
 
 # ─── helpers ──────────────────────────────────────────────────────────────────
 
-def _default_password() -> str:
-    raw = os.getenv("DEFAULT_PASSWORD", "Predictix@123")
-    return raw.strip().strip('"').strip("'").strip() or "Predictix@123"
+def _mask_email(email: str) -> str:
+    """Shorten an email for logs so they identify an account without storing it."""
+    local, _, domain = (email or "").partition("@")
+    return f"{local[:3]}***@{domain}" if domain else "***"
 
-def _secret() -> str:
-    # Centralised: fails fast if JWT_SECRET is unset (no public-constant fallback).
-    return jwt_secret()
 
-def _algorithm() -> str:
-    return jwt_algorithm()
+def is_demo_email(email: str) -> bool:
+    """True when the email is a built-in demo account and demo logins are enabled."""
+    return demo_accounts_enabled() and (email or "").strip().lower() in _DEMO_USERS
 
 # ─── schemas ──────────────────────────────────────────────────────────────────
 
@@ -84,6 +85,8 @@ class GoogleLoginRequest(BaseModel):
     token: str
 
 # ─── demo fallback accounts (no DB row) ──────────────────────────────────────
+# Accepted only while ENABLE_DEMO_ACCOUNTS is true (the default). The passwords
+# are public, so a production deployment should turn the flag off.
 
 _DEMO_USERS: dict[str, dict] = {
     "nuwan.gunasekara.tra1@lankalogix.lk": {
@@ -120,36 +123,52 @@ _DEMO_USERS: dict[str, dict] = {
 
 # ─── POST /auth/login ─────────────────────────────────────────────────────────
 
-@router.post("/login", response_model=LoginResponse)
+@router.post("/login", response_model=LoginResponse, dependencies=[Depends(login_rate_limit)])
 def post_login(request: LoginRequest):
     email = request.email.strip().lower()
     password = request.password.strip()
+    login_email_rate_limit(email)
 
     profile = _lookup_profile(email)
     if profile is not None:
         return _authenticate_profile(profile, email, password)
 
-    log.info("[LOGIN] No DB profile for %s; trying demo fallback", email)
+    if not is_demo_email(email):
+        log.info("[LOGIN] ✗ %s | no account", _mask_email(email))
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
     return _authenticate_demo(email, password)
 
 
 # ─── POST /auth/login/select-warehouse ────────────────────────────────────────
 
-@router.post("/login/select-warehouse", response_model=LoginResponse)
+@router.post("/login/select-warehouse", response_model=LoginResponse, dependencies=[Depends(login_rate_limit)])
 def select_warehouse(request: WarehouseSelectRequest):
     """Step 2 for super_admin: verify the short-lived selection token and
     issue a full JWT scoped to the chosen warehouse."""
     try:
-        payload = jwt.decode(request.selection_token, _secret(), algorithms=[_algorithm()])
-    except JWTError:
+        payload = decode_token(request.selection_token)
+    except InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid or expired selection token. Please log in again.")
 
     if payload.get("type") != "warehouse_selection":
         raise HTTPException(status_code=401, detail="Invalid token type.")
 
     user_id: str = payload["sub"]
-    email: str = payload["email"]
+    email: str = payload.get("email", "")
     full_name: str = payload.get("full_name", "")
+
+    # The account may have been demoted or deactivated in the minutes since
+    # step 1, so it is checked again before a full token is issued.
+    profile = _lookup_profile(email.strip().lower()) if email else None
+    if profile is not None:
+        if (
+            str(profile.id) != user_id
+            or (profile.role or "").strip().lower() != "super_admin"
+            or (profile.status or "").strip().lower() != "active"
+        ):
+            raise HTTPException(status_code=401, detail="This account can no longer select a warehouse.")
+    elif not is_demo_email(email):
+        raise HTTPException(status_code=401, detail="Invalid or expired selection token. Please log in again.")
 
     # Validate the chosen warehouse exists and is active.
     warehouse = _lookup_warehouse(request.warehouse_id)
@@ -162,7 +181,7 @@ def select_warehouse(request: WarehouseSelectRequest):
     wh_name = warehouse.name
 
     token = _create_token(user_id, email, "super_admin", warehouse_id=wh_id)
-    log.info("[LOGIN] ✓ super_admin %s selected warehouse %s (%s)", email, wh_name, wh_id[:8])
+    log.info("[LOGIN] ✓ super_admin %s selected warehouse %s (%s)", _mask_email(email), wh_name, wh_id[:8])
 
     return LoginResponse(
         access_token=token,
@@ -179,8 +198,12 @@ def select_warehouse(request: WarehouseSelectRequest):
 # ─── GET /auth/warehouses ──────────────────────────────────────────────────────
 
 @router.get("/warehouses", response_model=list[WarehouseOption])
-def list_warehouses():
-    """Return all active warehouses for the super_admin picker."""
+def list_warehouses(_=Depends(require_super_admin)):
+    """Return all active warehouses, for a signed-in super admin.
+
+    The login picker gets the same list in the /auth/login response, so this
+    needs no anonymous access.
+    """
     try:
         from app.db import SessionLocal
         from app.models import Warehouse
@@ -212,21 +235,17 @@ def _authenticate_profile(profile, email: str, password: str) -> LoginResponse:
     full_name = profile.full_name or "Unknown"
 
     if status != "active":
-        log.info("[LOGIN] ✗ %s | inactive account", email)
+        log.info("[LOGIN] ✗ %s | inactive account", _mask_email(email))
         raise HTTPException(status_code=401, detail="This account is inactive.")
 
-    # Password check: hashed → demo override → default password.
+    # Every account signs in with its own stored bcrypt hash. An account with no
+    # hash cannot sign in with a password; it can still use Google sign-in.
     meta = profile.meta if isinstance(profile.meta, dict) else {}
     stored_hash = meta.get("password_hash") or ""
-
-    if stored_hash:
-        ok = verify_password(password, stored_hash)
-    else:
-        demo_pw = _DEMO_USERS.get(email, {}).get("password")
-        ok = password == _default_password() or (demo_pw is not None and password == demo_pw)
+    ok = bool(stored_hash) and verify_password(password, stored_hash)
 
     if not ok:
-        log.info("[LOGIN] ✗ %s | wrong password", email)
+        log.info("[LOGIN] ✗ %s | wrong password", _mask_email(email))
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 
     user_id = str(profile.id)
@@ -235,7 +254,7 @@ def _authenticate_profile(profile, email: str, password: str) -> LoginResponse:
     if role == "super_admin":
         warehouses = _fetch_all_warehouses()
         selection_token = _create_selection_token(user_id, email, full_name)
-        log.info("[LOGIN] ✓ super_admin %s — awaiting warehouse selection", email)
+        log.info("[LOGIN] ✓ super_admin %s — awaiting warehouse selection", _mask_email(email))
         return LoginResponse(
             requires_warehouse_selection=True,
             selection_token=selection_token,
@@ -251,7 +270,7 @@ def _authenticate_profile(profile, email: str, password: str) -> LoginResponse:
         wh_id = str(profile.warehouse_id) if profile.warehouse_id else None
         wh_name = _warehouse_name(wh_id)
         token = _create_token(user_id, email, role, warehouse_id=wh_id)
-        log.info("[LOGIN] ✓ admin %s | warehouse=%s | id=%s", email, wh_name, user_id[:8])
+        log.info("[LOGIN] ✓ admin %s | warehouse=%s | id=%s", _mask_email(email), wh_name, user_id[:8])
         return LoginResponse(
             access_token=token,
             user_id=user_id,
@@ -265,7 +284,7 @@ def _authenticate_profile(profile, email: str, password: str) -> LoginResponse:
 
     # ── user: token issued immediately ────────────────────────────────────────
     token = _create_token(user_id, email, role)
-    log.info("[LOGIN] ✓ user %s | id=%s", email, user_id[:8])
+    log.info("[LOGIN] ✓ user %s | id=%s", _mask_email(email), user_id[:8])
     return LoginResponse(
         access_token=token,
         user_id=user_id,
@@ -278,7 +297,7 @@ def _authenticate_profile(profile, email: str, password: str) -> LoginResponse:
 
 def _authenticate_demo(email: str, password: str) -> LoginResponse:
     """Fallback for hardcoded demo accounts with no DB row."""
-    if email not in _DEMO_USERS:
+    if not is_demo_email(email):
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 
     demo = _DEMO_USERS[email]
@@ -299,7 +318,7 @@ def _authenticate_demo(email: str, password: str) -> LoginResponse:
             wh_name = _warehouse_name(wh_id)
 
     token = _create_token(user_id, email, role, warehouse_id=wh_id)
-    log.info("[LOGIN] ✓ (demo) %s | role=%s", email, role)
+    log.info("[LOGIN] ✓ (demo) %s | role=%s", _mask_email(email), role)
     return LoginResponse(
         access_token=token,
         user_id=user_id,
@@ -406,7 +425,10 @@ def _resolve_user_id(email: str) -> str:
 # ─── internal: token creation ─────────────────────────────────────────────────
 
 def _create_token(user_id: str, email: str, role: str, *, warehouse_id: Optional[str] = None) -> str:
-    """Issue a 24-hour JWT. Includes warehouse_id when provided."""
+    """Issue an access token that lives for ACCESS_TOKEN_TTL_MINUTES.
+
+    Includes warehouse_id when provided.
+    """
     now = datetime.now(timezone.utc)
     payload: dict = {
         "sub": user_id,
@@ -414,11 +436,12 @@ def _create_token(user_id: str, email: str, role: str, *, warehouse_id: Optional
         "role": role,
         "iat": now,
         "nbf": now,
-        "exp": now + timedelta(hours=24),
+        "exp": now + timedelta(minutes=access_token_ttl_minutes()),
+        "type": "access",
     }
     if warehouse_id:
         payload["warehouse_id"] = warehouse_id
-    return jwt.encode(payload, _secret(), algorithm=_algorithm())
+    return encode_token(payload)
 
 
 def _create_selection_token(user_id: str, email: str, full_name: str) -> str:
@@ -433,12 +456,12 @@ def _create_selection_token(user_id: str, email: str, full_name: str) -> str:
         "nbf": now,
         "exp": now + timedelta(minutes=5),
     }
-    return jwt.encode(payload, _secret(), algorithm=_algorithm())
+    return encode_token(payload)
 
 
 # ─── POST /auth/google-login ─────────────────────────────────────────────────
 
-@router.post("/google-login", response_model=LoginResponse)
+@router.post("/google-login", response_model=LoginResponse, dependencies=[Depends(login_rate_limit)])
 def post_google_login(request: GoogleLoginRequest):
     """Google login verification endpoint.
     Verifies the Supabase JWT token, extracts user email, checks Profile,
@@ -469,6 +492,15 @@ def post_google_login(request: GoogleLoginRequest):
     if not email:
         raise HTTPException(status_code=400, detail="Google session contains no email.")
 
+    # The session must come from Google with a confirmed address. Otherwise an
+    # unconfirmed email/password sign-up on the same Supabase project could
+    # claim any employee's email and sign in as them.
+    app_meta = getattr(user_resp.user, "app_metadata", None) or {}
+    providers = set(app_meta.get("providers") or []) | {app_meta.get("provider")}
+    if "google" not in providers or not getattr(user_resp.user, "email_confirmed_at", None):
+        log.info("[GOOGLE-LOGIN] ✗ %s | not a confirmed Google identity", _mask_email(email))
+        raise HTTPException(status_code=401, detail="Please sign in with your Google account.")
+
     # Get avatar url from Google metadata
     google_avatar = None
     if user_resp.user.user_metadata:
@@ -482,7 +514,7 @@ def post_google_login(request: GoogleLoginRequest):
         full_name = profile.full_name or "Unknown"
 
         if status != "active":
-            log.info("[GOOGLE-LOGIN] ✗ %s | inactive account", email)
+            log.info("[GOOGLE-LOGIN] ✗ %s | inactive account", _mask_email(email))
             raise HTTPException(status_code=401, detail="This account is inactive.")
 
         user_id = str(profile.id)
@@ -500,7 +532,7 @@ def post_google_login(request: GoogleLoginRequest):
                         db_profile.avatar_url = google_avatar
                         db.commit()
                         avatar_url = google_avatar
-                        log.info("[GOOGLE-LOGIN] Updated avatar URL in DB for %s", email)
+                        log.info("[GOOGLE-LOGIN] Updated avatar URL in DB for %s", _mask_email(email))
                 finally:
                     db.close()
             except Exception as e:
@@ -513,7 +545,7 @@ def post_google_login(request: GoogleLoginRequest):
         if role == "super_admin":
             warehouses = _fetch_all_warehouses()
             selection_token = _create_selection_token(user_id, email, full_name)
-            log.info("[GOOGLE-LOGIN] ✓ super_admin %s — awaiting warehouse selection", email)
+            log.info("[GOOGLE-LOGIN] ✓ super_admin %s — awaiting warehouse selection", _mask_email(email))
             return LoginResponse(
                 requires_warehouse_selection=True,
                 selection_token=selection_token,
@@ -529,7 +561,7 @@ def post_google_login(request: GoogleLoginRequest):
             wh_id = str(profile.warehouse_id) if profile.warehouse_id else None
             wh_name = _warehouse_name(wh_id)
             jwt_token = _create_token(user_id, email, role, warehouse_id=wh_id)
-            log.info("[GOOGLE-LOGIN] ✓ admin %s | warehouse=%s | id=%s", email, wh_name, user_id[:8])
+            log.info("[GOOGLE-LOGIN] ✓ admin %s | warehouse=%s | id=%s", _mask_email(email), wh_name, user_id[:8])
             return LoginResponse(
                 access_token=jwt_token,
                 user_id=user_id,
@@ -542,7 +574,7 @@ def post_google_login(request: GoogleLoginRequest):
             )
 
         jwt_token = _create_token(user_id, email, role)
-        log.info("[GOOGLE-LOGIN] ✓ user %s | id=%s", email, user_id[:8])
+        log.info("[GOOGLE-LOGIN] ✓ user %s | id=%s", _mask_email(email), user_id[:8])
         return LoginResponse(
             access_token=jwt_token,
             user_id=user_id,
@@ -553,7 +585,7 @@ def post_google_login(request: GoogleLoginRequest):
         )
 
     # Fallback to demo users check
-    if email in _DEMO_USERS:
+    if is_demo_email(email):
         demo = _DEMO_USERS[email]
         user_id = _resolve_user_id(email)
         role = demo["role"]
@@ -569,7 +601,7 @@ def post_google_login(request: GoogleLoginRequest):
                 wh_name = _warehouse_name(wh_id)
 
         jwt_token = _create_token(user_id, email, role, warehouse_id=wh_id)
-        log.info("[GOOGLE-LOGIN] ✓ (demo) %s | role=%s", email, role)
+        log.info("[GOOGLE-LOGIN] ✓ (demo) %s | role=%s", _mask_email(email), role)
         return LoginResponse(
             access_token=jwt_token,
             user_id=user_id,
@@ -581,7 +613,7 @@ def post_google_login(request: GoogleLoginRequest):
             avatar_url=avatar_url,
         )
 
-    log.info("[GOOGLE-LOGIN] ✗ %s | no profile found", email)
+    log.info("[GOOGLE-LOGIN] ✗ %s | no profile found", _mask_email(email))
     raise HTTPException(
         status_code=404,
         detail="No profile found for this Google email. Please contact an admin."

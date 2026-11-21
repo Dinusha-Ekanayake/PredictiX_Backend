@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy import String, cast, func
 
-from app.deps import get_db, get_current_user, require_admin, require_user, is_admin_role, active_warehouse_id
+from app.deps import get_db, get_current_user, require_admin, require_user, is_admin_role, active_warehouse_id, scoped_warehouse_id, user_can_view_asset
 from app.models import (
     Asset,
     Notification,
@@ -97,16 +97,25 @@ def create_ticket(
     if data.get("predicted_category"):
         data["predicted_category"] = _normalize_category(data["predicted_category"])
 
-    # Tag the ticket with a warehouse so it shows up in warehouse-scoped
-    # ticket lists, prefer the linked asset's warehouse (authoritative),
-    # falling back to the creating admin's active warehouse. Without this,
-    # tickets silently had a NULL warehouse_id and were invisible to the
-    # scoped list/status-count endpoints.
-    if not data.get("warehouse_id"):
-        if data.get("asset_id"):
-            data["warehouse_id"] = db.query(Asset.warehouse_id).filter(Asset.id == data["asset_id"]).scalar()
-        if not data.get("warehouse_id") and is_admin_role(current_user):
-            data["warehouse_id"] = active_warehouse_id(current_user)
+    # The ticket is always raised in the caller's name, against an asset they
+    # can see, and in the warehouse that asset belongs to (or the caller's own
+    # warehouse when no asset is linked). None of these is taken from the
+    # request body, so a ticket cannot be attributed to someone else or
+    # planted in another warehouse.
+    data["created_by"] = current_user.id
+    if data.get("asset_id"):
+        asset = db.query(Asset).filter(Asset.id == data["asset_id"]).first()
+        if asset is None:
+            raise HTTPException(status_code=404, detail="Asset not found")
+        if is_admin_role(current_user):
+            wh_id = scoped_warehouse_id(current_user)
+            if not wh_id or str(asset.warehouse_id) != wh_id:
+                raise HTTPException(status_code=404, detail="Asset not found")
+        elif not user_can_view_asset(asset, current_user):
+            raise HTTPException(status_code=404, detail="Asset not found")
+        data["warehouse_id"] = asset.warehouse_id
+    else:
+        data["warehouse_id"] = scoped_warehouse_id(current_user)
 
     obj = Ticket(**data)
     db.add(obj)
@@ -451,7 +460,11 @@ def update_my_ticket(
     obj = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    if not _is_admin(current_user) and str(obj.created_by) != str(current_user.id):
+    if _is_admin(current_user):
+        wh_id = scoped_warehouse_id(current_user)
+        if not wh_id or str(obj.warehouse_id) != wh_id:
+            raise HTTPException(status_code=404, detail="Ticket not found")
+    elif str(obj.created_by) != str(current_user.id):
         raise HTTPException(status_code=403, detail="You can only edit tickets you created.")
 
     # Record old values
@@ -497,7 +510,11 @@ def delete_my_ticket(
     obj = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    if not _is_admin(current_user) and str(obj.created_by) != str(current_user.id):
+    if _is_admin(current_user):
+        wh_id = scoped_warehouse_id(current_user)
+        if not wh_id or str(obj.warehouse_id) != wh_id:
+            raise HTTPException(status_code=404, detail="Ticket not found")
+    elif str(obj.created_by) != str(current_user.id):
         raise HTTPException(status_code=403, detail="You can only delete tickets you created.")
     
     # Gather details for deletion notification before purging
@@ -543,7 +560,11 @@ def get_ticket(ticket_id: str, db: Session = Depends(get_db), current_user: Prof
     # (and comment on) any ticket in their own warehouse; only owners/admins
     # may edit one (enforced in update_my_ticket/update_ticket). Without
     # this, any authenticated user could read any ticket by
-    # guessing/incrementing its id.
+    # guessing/incrementing its id. Admins are held to their active warehouse.
+    if is_admin_role(current_user):
+        wh_id = scoped_warehouse_id(current_user)
+        if wh_id and str(obj.warehouse_id) != wh_id:
+            raise HTTPException(status_code=404, detail="Ticket not found")
     if not is_admin_role(current_user):
         uid = str(current_user.id)
         user_wh_id = getattr(current_user, "warehouse_id", None)
@@ -566,6 +587,9 @@ def update_ticket(
         raise HTTPException(status_code=403, detail="Only admins can update tickets")
     obj = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not obj:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    wh_id = scoped_warehouse_id(current_user)
+    if wh_id and str(obj.warehouse_id) != wh_id:
         raise HTTPException(status_code=404, detail="Ticket not found")
 
     updates = payload.model_dump(exclude_unset=True)
@@ -646,6 +670,9 @@ def delete_ticket(
     """
     obj = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not obj:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    wh_id = scoped_warehouse_id(current_user)
+    if wh_id and str(obj.warehouse_id) != wh_id:
         raise HTTPException(status_code=404, detail="Ticket not found")
 
     # Gather details for deletion notification before purging

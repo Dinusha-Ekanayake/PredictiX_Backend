@@ -17,6 +17,9 @@ from sqlalchemy import text, or_, and_, func, cast, String
 from sqlalchemy.orm import Session
 
 from app.db.supabase_client import supabase
+from app.ai.agent.safe_sql import SqlScope, UnsafeSQLError, run_scoped_query, strip_code_fences
+from app.ai.agent.guardrails import fence_untrusted
+from app.ai.agent.scoping import scope_asset_query, scope_profile_query, scope_ticket_query
 
 log = logging.getLogger("predictix.tools")
 
@@ -57,7 +60,7 @@ class ToolContext:
 DB_SCHEMAS: dict[str, str] = {
     "warehouses": "id, code, name, address, city, district, country, timezone, is_active, climate_zone, warehouse_type, metadata, created_at, updated_at",
     "departments": "id, warehouse_id, code, name, description, is_active, created_at, updated_at",
-    "profiles": "id, employee_id, full_name, email, phone, role(ENUM: admin|super_admin|user), status(ENUM: active|inactive|suspended), warehouse_id, department_id, avatar_url, meta, created_at, updated_at",
+    "profiles": "id, employee_id, full_name, email, phone, role(ENUM: admin|super_admin|user), status(ENUM: active|inactive|suspended), warehouse_id, department_id, avatar_url, created_at, updated_at",
     "assets": "id, asset_code, warehouse_id, department_id, asset_name, asset_type, category(e.g. Heavy Truck (16T), Forklift 2.5T, Delivery Van (1.5T), Medium Truck (7T), Light Truck (3.5T), Mini Truck (1T)), vehicle_type, make, model, manufacture_year, registration_number, vin, status(ENUM: active|inactive|under_maintenance|decommissioned), health_band(ENUM: excellent|good|moderate|poor|critical), criticality_score(float 0-100), purchase_date, warranty_expiry_date, assigned_to, current_mileage, last_service_date, next_service_date, description, fuel_type, transmission, make_model, maintenance_priority, created_at, updated_at",
     "maintenance_events": "id, asset_id, event_type(ENUM: preventive|corrective|inspection|emergency), title, description, performed_by, scheduled_date, performed_at, odometer_reading, downtime_hours, cost_amount, currency, vendor_name, notes, metadata, created_at, updated_at",
     "sensor_readings": "id, asset_id, recorded_at, temperature, vibration, pressure, humidity, rpm, voltage, fuel_level, odometer, engine_hours_since_last_service, days_since_last_service, tire_health_pct, brake_health_pct, battery_health_pct, oil_life_pct, hydraulic_health_pct, vibration_rms_mm_s, fuel_efficiency_km_per_l, engine_hours_total, coolant_temp_max_c, battery_voltage_v, odometer_km",
@@ -160,7 +163,7 @@ def handle_navigation(question: str, ctx: ToolContext) -> dict:
 
 def handle_faq(question: str, ctx: ToolContext) -> dict:
     """Fetch FAQs from Supabase, synthesize with LLM, and fallback to admin if not found."""
-    from app.ai.services.llm_service import call_groq
+    from app.ai.agent.guardrails import guarded_call_groq as call_groq
 
     def _get_faq_fallback() -> dict:
         return {
@@ -242,7 +245,7 @@ def handle_faq(question: str, ctx: ToolContext) -> dict:
 
 def handle_knowledge(question: str, ctx: ToolContext) -> dict:
     """Semantic search on knowledge base, then synthesize and format cleanly with fast model."""
-    from app.ai.services.llm_service import call_groq
+    from app.ai.agent.guardrails import guarded_call_groq as call_groq
     from app.chatbot.knowledge_service import search_knowledge
 
     raw_results = search_knowledge(question, match_count=4)
@@ -252,15 +255,20 @@ def handle_knowledge(question: str, ctx: ToolContext) -> dict:
             "action_buttons": [],
         }
 
-    # Filter out low-similarity noisy matches (keep only relevant results with similarity >= 0.20)
-    filtered = [r for r in raw_results if r.get("similarity", 0) >= 0.20]
-    results = filtered if filtered else [raw_results[0]]
-
-    context_parts = [
-        f"Article Title: {r.get('title', 'Article')}\nContent: {r.get('content', '')}"
-        for r in results
-    ]
-    context_str = "\n\n".join(context_parts)
+    # search_knowledge already drops articles below its relevance threshold,
+    # so every result here is related to the question.
+    results = raw_results
+    context_str = fence_untrusted(
+        "knowledge_base_articles",
+        "\n\n".join(
+            f"Article Title: {r.get('title', 'Article')}\nContent: {r.get('content', '')}"
+            for r in results
+        ),
+        limit=8000,
+    )
+    sources_line = "\n\n📎 *Source: " + ", ".join(
+        dict.fromkeys(str(r.get("title") or "Knowledge Base") for r in results)
+    ) + "*"
 
     fallback_msg = ""
     try:
@@ -269,7 +277,8 @@ def handle_knowledge(question: str, ctx: ToolContext) -> dict:
                 {
                     "role": "system",
                     "content": (
-                        "You are PredictiX Assistant. Answer the user's question directly using ONLY the provided Knowledge Base articles.\n\n"
+                        "You are PredictiX Assistant. Answer the user's question directly using ONLY the provided Knowledge Base articles. "
+                        "If they do not answer it, say that the knowledge base does not cover it.\n\n"
                         "CRITICAL FORMATTING INSTRUCTIONS:\n"
                         "1. Focus ONLY on the article that directly answers the question. Ignore any unrelated background articles.\n"
                         "2. Format the response with clean, professional line breaks and spacing. Use bold titles, bullet points, or numbered steps for instructions.\n"
@@ -286,7 +295,7 @@ def handle_knowledge(question: str, ctx: ToolContext) -> dict:
         )
         if summary:
             return {
-                "answer": fallback_msg + str(summary).strip(),
+                "answer": fallback_msg + str(summary).strip() + sources_line,
                 "action_buttons": [],
             }
     except Exception as e:
@@ -303,7 +312,7 @@ def handle_knowledge(question: str, ctx: ToolContext) -> dict:
 
 def handle_database(question: str, ctx: ToolContext) -> dict:
     """Two-agent pipeline: Table Selector → SQL Generator → Execute → Summarize."""
-    from app.ai.services.llm_service import call_groq
+    from app.ai.agent.guardrails import guarded_call_groq as call_groq
 
     def _get_generic_fallback() -> dict:
         # Instead of just throwing an email, let the LLM try to answer it based on general persona
@@ -350,8 +359,8 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                             "role": "system",
                             "content": (
                                 "You are Sidekick, the PredictiX AI Assistant. "
-                                "We had trouble querying the database directly, but we have this cached frontend dashboard state: "
-                                f"{str(fc)}\n\n"
+                                "We had trouble querying the database directly, but we have this cached frontend dashboard state:\n"
+                                f"{fence_untrusted('cached_page_data', fc)}\n\n"
                                 "Answer the user's question as best as you can using only this cached data. Keep it friendly, helpful, and concise. "
                                 "Do NOT mention 'frontend context', 'cached data', 'database errors', or 'SQL'. Just answer the question naturally. "
                                 "Do NOT include general fleet statistics, counts of critical assets, or predicted failures from the cached state (e.g. '205 assets at critical risk', '125 predicted to fail') unless the user's question explicitly asks for numbers, counts, or statistics. "
@@ -392,9 +401,9 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             target_num = ticket_match.group(0).replace("#", "").strip() if ticket_match else None
             t = None
             if target_num:
-                t = ctx.db.query(Ticket).filter(Ticket.ticket_number.ilike(f"%{target_num}%")).first()
+                t = scope_ticket_query(ctx.db.query(Ticket), ctx).filter(Ticket.ticket_number.ilike(f"%{target_num}%")).first()
             if not t and "detail" in q_lower:
-                t = ctx.db.query(Ticket).order_by(Ticket.created_at.desc()).first()
+                t = scope_ticket_query(ctx.db.query(Ticket), ctx).order_by(Ticket.created_at.desc()).first()
 
             if t:
                 creator = ctx.db.query(Profile).filter(Profile.id == t.created_by).first() if t.created_by else None
@@ -451,7 +460,7 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
         clean_user = re.sub(r'\b(user|profile|details|info)\b', '', clean_user, flags=re.IGNORECASE).strip(' "\'')
         
         if clean_user and len(clean_user) >= 2:
-            target_user = ctx.db.query(Profile).filter(
+            target_user = scope_profile_query(ctx.db.query(Profile), ctx).filter(
                 or_(
                     Profile.full_name.ilike(f"%{clean_user}%"),
                     Profile.email.ilike(f"%{clean_user}%"),
@@ -519,7 +528,7 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             clean_asset = re.sub(r'\b(asset|vehicle|details|info)\b', '', clean_asset, flags=re.IGNORECASE).strip(' "\'')
         
         if clean_asset and len(clean_asset) >= 2:
-            target_asset = ctx.db.query(Asset).filter(
+            target_asset = scope_asset_query(ctx.db.query(Asset), ctx).filter(
                 or_(
                     Asset.asset_code.ilike(f"%{clean_asset}%"),
                     Asset.asset_name.ilike(f"%{clean_asset}%"),
@@ -945,17 +954,15 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             f"Table '{t}': columns → {DB_SCHEMAS[t]}" for t in selected_tables
         )
 
-        # Build role-based scoping instruction
-        if ctx.is_admin:
-            role_instructions = "SECURITY RULE: The user is an ADMIN. You may query ALL records across the entire system."
-            if ctx.warehouse_id:
-                role_instructions += f" The admin is scoped to warehouse_id = '{ctx.warehouse_id}'."
-        else:
-            role_instructions = (
-                f"SECURITY RULE: The current user is a STANDARD USER (id='{ctx.user_id}'). "
-                "You MUST add a WHERE clause to only show records where created_by = '{user_id}' OR assigned_to = '{user_id}'. "
-                "Never expose other users' private data."
-            ).replace("{user_id}", ctx.user_id)
+        # Row access is enforced by safe_sql.run_scoped_query, which only lets
+        # the query see the rows this caller may see. The note below just
+        # tells the model so it does not add filters of its own.
+        role_instructions = (
+            "The tables are already filtered to the records this user may see, "
+            "so do not add warehouse or user filters unless the question asks for them. "
+            f"The current user's id is '{ctx.user_id}'. "
+            "Use unqualified table names only (no schema prefix)."
+        )
 
         sql_prompt = (
             f"You are a PostgreSQL expert for the PredictiX Smart Asset Management System.\n"
@@ -986,7 +993,7 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                 temperature=0.1,
             )
             if fb and not fallback_msg: fallback_msg = fb
-            sql = str(raw_sql).strip().lstrip("```sql").lstrip("```").rstrip("```").strip()
+            sql = strip_code_fences(raw_sql)
         except Exception as e:
             log.error("SQL generator failed: %s", e)
             return _get_contextual_fallback("SQL generator failed")
@@ -997,39 +1004,30 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                 "action_buttons": [],
             }
 
-        if sql.startswith("ERROR: Permission Denied"):
-            return {
-                "answer": "🔒 You do not have permission to view system-wide data. You can only view records assigned to or created by you.",
-                "action_buttons": [],
-            }
-
         if sql.startswith("ERROR:"):
             return _get_contextual_fallback(sql)
-
-        # Security guard: block any mutation
-        import re
-        sql_upper = sql.upper()
-        for dangerous in ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE", "GRANT"]:
-            if re.search(rf"\b{dangerous}\b", sql_upper):
-                return _get_generic_fallback()
 
         # ── Step 3: Execute (with self-healing retry on DB error) ────────────────
         if ctx.db is None:
             return {"answer": "⚠️ Database is not available right now. Please try again in a moment.", "action_buttons": []}
 
+        scope = SqlScope.build(user_id=ctx.user_id, is_admin=ctx.is_admin, warehouse_id=ctx.warehouse_id)
+        engine = ctx.db.get_bind()
+
         def _run_sql(sql_to_run: str):
-            result = ctx.db.execute(text(sql_to_run)).fetchall()
-            if not result:
-                return None
-            keys = list(result[0]._mapping.keys())
-            return [dict(zip(keys, row)) for row in result[:50]]
+            # Validation and scoping happen inside run_scoped_query, for the
+            # first attempt and for the corrected retry alike.
+            result = run_scoped_query(engine, sql_to_run, scope)
+            return result[:50] if result else None
 
         rows = None
         try:
             rows = _run_sql(sql)
+        except UnsafeSQLError as rejected:
+            log.warning("Generated SQL rejected: %s | SQL: %s", rejected, sql)
+            return _get_generic_fallback()
         except Exception as first_err:
             log.warning("SQL execution failed (attempt 1): %s | SQL: %s", first_err, sql)
-            ctx.db.rollback()
             # Self-healing: feed the error back to the LLM to fix the SQL
             try:
                 fix_prompt = (
@@ -1049,13 +1047,15 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                     max_tokens=350,
                     temperature=0.1,
                 )
-                corrected_sql = str(corrected_sql_raw).strip().lstrip("```sql").lstrip("```").rstrip("```").strip()
+                corrected_sql = strip_code_fences(corrected_sql_raw)
                 log.info("Self-healed SQL: %s", corrected_sql)
                 rows = _run_sql(corrected_sql)
                 sql = corrected_sql  # update for logging
+            except UnsafeSQLError as rejected:
+                log.warning("Corrected SQL rejected: %s | SQL: %s", rejected, corrected_sql)
+                return _get_generic_fallback()
             except Exception as second_err:
                 log.error("SQL self-healing also failed: %s", second_err)
-                ctx.db.rollback()
                 return _get_contextual_fallback(str(second_err))
 
         if rows is None:

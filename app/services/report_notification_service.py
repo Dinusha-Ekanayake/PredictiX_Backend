@@ -3,11 +3,14 @@ Report Notification Service
 Handles sending emails when an admin generates and prints a Warehouse AI Report.
 """
 
+import logging
 from typing import List
 from datetime import datetime
 from sqlalchemy.orm import Session
 from app.services.notification_service import NotificationService
 from app.models import Profile, Department
+
+log = logging.getLogger(__name__)
 
 class ReportEmailTemplates:
     @staticmethod
@@ -113,7 +116,7 @@ class ReportNotificationService:
             recipients.add("neuromindspredictix@gmail.com")
             
             email_list = list(recipients)
-            print(f"[NOTIFICATION] Sending Report Print email to: {email_list}")
+            log.info(f"[NOTIFICATION] Sending Report Print email to: {email_list}")
             
             subject, html_body = ReportEmailTemplates.report_printed_notification(
                 admin_name=admin_name
@@ -124,5 +127,5 @@ class ReportNotificationService:
             return result
             
         except Exception as e:
-            print(f"[NOTIFICATION-ERROR] Failed to send report notification: {str(e)}")
+            log.error(f"[NOTIFICATION-ERROR] Failed to send report notification: {str(e)}")
             return False

@@ -9,6 +9,7 @@ Keeps the router thin by centralising:
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Iterable, Optional
 from uuid import UUID
@@ -23,6 +24,8 @@ from app.models import (
     TicketComment,
     TicketStatusHistory,
 )
+
+log = logging.getLogger(__name__)
 
 # AI services, imported lazily inside helpers so a missing HF token doesn't
 # prevent the rest of the user-ticket section from importing.
@@ -297,7 +300,7 @@ def fetch_ticket_history(db: Session, ticket_id: UUID) -> list[TicketStatusHisto
 
 
 def _safe_log(prefix: str, exc: Exception) -> None:
-    print(f"[USER-TICKETS][{prefix}] {type(exc).__name__}: {exc}", flush=True)
+    log.warning(f"[USER-TICKETS][{prefix}] {type(exc).__name__}: {exc}")
 
 
 def predict_priority_safely(title: str, description: str) -> Optional[object]:

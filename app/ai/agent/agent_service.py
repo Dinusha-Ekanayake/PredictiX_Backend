@@ -28,7 +28,7 @@ from .tools import (
     handle_prediction_info,
 )
 from .actions.insert_actions import handle_action
-from app.ai.services.llm_service import call_groq
+from app.ai.agent.guardrails import guarded_call_groq as call_groq
 
 log = logging.getLogger("predictix.agent")
 

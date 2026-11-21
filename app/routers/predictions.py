@@ -152,6 +152,8 @@ def _run_cost_prediction_for_asset(asset_id: str, db: Session, current_user: Pro
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
     assert_asset_in_scope(asset, current_user)
+    if not is_admin_role(current_user) and not user_can_view_asset(asset, current_user):
+        raise HTTPException(status_code=404, detail="Asset not found")
 
     last_event = (
         db.query(MaintenanceEvent)

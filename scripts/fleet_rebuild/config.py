@@ -16,6 +16,8 @@ therefore inherited, not re-derived.
 
 from __future__ import annotations
 
+import os
+
 # ── Source dataset ────────────────────────────────────────────────────────────
 V11_CSV = "app/ai/dataset/srilanka_single_warehouse_vehicle_maintenance_dataset_v11_realistic.csv"
 
@@ -193,11 +195,28 @@ SUPER_ADMINS = [
     {"email": "tajmibhagya@gmail.com",          "full_name": "Tajmi Bhagya"},
 ]
 
-PASSWORD_SUPER_ADMIN = "superadmin@123"
-PASSWORD_ADMIN       = "admin@123"
-PASSWORD_USER        = "user@123"
-PASSWORD_DEMO_ADMIN  = "demoadmin@123"
-PASSWORD_DEMO_USER   = "demouser@123"
+# Seed passwords come from the environment, never from this file: the
+# repository is public, so a literal here is a password anyone can read.
+# Set FLEET_PASSWORD_SUPER_ADMIN, FLEET_PASSWORD_ADMIN, FLEET_PASSWORD_USER,
+# FLEET_PASSWORD_DEMO_ADMIN and FLEET_PASSWORD_DEMO_USER before a rebuild.
+_PASSWORD_ENV = {
+    "PASSWORD_SUPER_ADMIN": "FLEET_PASSWORD_SUPER_ADMIN",
+    "PASSWORD_ADMIN": "FLEET_PASSWORD_ADMIN",
+    "PASSWORD_USER": "FLEET_PASSWORD_USER",
+    "PASSWORD_DEMO_ADMIN": "FLEET_PASSWORD_DEMO_ADMIN",
+    "PASSWORD_DEMO_USER": "FLEET_PASSWORD_DEMO_USER",
+}
+
+
+def __getattr__(name: str) -> str:
+    """Read a PASSWORD_* setting from its environment variable when it is used."""
+    env_name = _PASSWORD_ENV.get(name)
+    if env_name is None:
+        raise AttributeError(name)
+    value = (os.getenv(env_name) or "").strip()
+    if len(value) < 8:
+        raise RuntimeError(f"Set {env_name} (8+ characters) before rebuilding the fleet.")
+    return value
 
 # Per-warehouse demo pair, e.g. demoadmingalle.adm@lankalogix.com /
 # demousergalle.adm@lankalogix.com, both sit in the Admin department.

@@ -6,12 +6,15 @@ using the Supabase Python REST client (no direct DB connection required).
 RLS-blocked tables are handled gracefully and return None / empty list.
 """
 
+import logging
 from uuid import UUID
 from datetime import datetime
 from fastapi import HTTPException
 from supabase import create_client, Client
 import os
 from dotenv import load_dotenv
+
+log = logging.getLogger(__name__)
 
 load_dotenv(override=True)
 
@@ -75,7 +78,7 @@ class AssetContextBuilder:
             result = query.limit(1).execute()
             return result.data[0] if result.data else None
         except Exception as e:
-            print(f"[context_builder] WARNING: Could not fetch from '{table}': {e}")
+            log.warning(f"[context_builder] WARNING: Could not fetch from '{table}': {e}")
             return None
 
     def _fetch_many(self, table: str, filters: dict, order_col: str = None,
@@ -89,7 +92,7 @@ class AssetContextBuilder:
             result = query.execute()
             return result.data or []
         except Exception as e:
-            print(f"[context_builder] WARNING: Could not fetch from '{table}': {e}")
+            log.warning(f"[context_builder] WARNING: Could not fetch from '{table}': {e}")
             return []
 
     def build_context(self, asset_id: UUID) -> dict:

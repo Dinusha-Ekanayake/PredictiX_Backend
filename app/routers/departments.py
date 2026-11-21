@@ -1,6 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from app.deps import (
+    scoped_warehouse_id,
+    assert_in_active_warehouse,
     get_db,
     get_current_user,
     require_admin,
@@ -21,8 +23,16 @@ router = APIRouter(
 
 
 @router.post("/", response_model=DepartmentOut, dependencies=[Depends(require_admin)])
-def create_department(payload: DepartmentCreate, db: Session = Depends(get_db)):
-    obj = Department(**payload.model_dump())
+def create_department(
+    payload: DepartmentCreate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    data = payload.model_dump()
+    if data.get("warehouse_id") is None and scoped_warehouse_id(current_user):
+        data["warehouse_id"] = scoped_warehouse_id(current_user)
+    assert_in_active_warehouse(current_user, data.get("warehouse_id"), "Warehouse")
+    obj = Department(**data)
     db.add(obj)
     db.commit()
     db.refresh(obj)
@@ -58,12 +68,21 @@ def get_department(department_id: str, db: Session = Depends(get_db)):
 
 
 @router.put("/{department_id}", response_model=DepartmentOut, dependencies=[Depends(require_admin)])
-def update_department(department_id: str, payload: DepartmentUpdate, db: Session = Depends(get_db)):
+def update_department(
+    department_id: str,
+    payload: DepartmentUpdate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
     obj = db.query(Department).filter(Department.id == department_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Department not found")
+    assert_in_active_warehouse(current_user, obj.warehouse_id, "Department")
+    changes = payload.model_dump(exclude_unset=True)
+    if "warehouse_id" in changes:
+        assert_in_active_warehouse(current_user, changes["warehouse_id"], "Warehouse")
 
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    for key, value in changes.items():
         setattr(obj, key, value)
 
     db.commit()
@@ -73,10 +92,15 @@ def update_department(department_id: str, payload: DepartmentUpdate, db: Session
 
 
 @router.delete("/{department_id}", dependencies=[Depends(require_admin)])
-def delete_department(department_id: str, db: Session = Depends(get_db)):
+def delete_department(
+    department_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
     obj = db.query(Department).filter(Department.id == department_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Department not found")
+    assert_in_active_warehouse(current_user, obj.warehouse_id, "Department")
     db.delete(obj)
     db.commit()
     invalidate_department_names()

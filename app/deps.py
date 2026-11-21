@@ -5,11 +5,11 @@ from typing import Generator, Optional
 
 from fastapi import Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
-from jose import JWTError, jwt
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.db import SessionLocal
-from app.core.config import jwt_secret, jwt_algorithm
+from app.core.security import InvalidTokenError, decode_token
 
 log = logging.getLogger(__name__)
 
@@ -48,23 +48,25 @@ def get_current_user(
 ):
     """Decode JWT and return the matching Profile.
 
-    Falls back to a lightweight in-memory profile when the DB row is
-    missing, supports development logins for accounts that exist in
-    auth's TEST_USERS but not yet in the profiles table.
+    A token whose profile row no longer exists is rejected, so deleting an
+    account ends its sessions. The one exception is a built-in demo account
+    (see app/routers/auth.py), which has no row and gets an in-memory profile
+    while demo logins are enabled.
     """
     try:
-        payload = jwt.decode(
-            token,
-            jwt_secret(),
-            algorithms=[jwt_algorithm()],
-        )
-    except JWTError as exc:
+        payload = decode_token(token)
+    except InvalidTokenError as exc:
         log.warning("JWT decode failed: %s", exc)
         raise HTTPException(status_code=401, detail="Not authenticated")
 
     user_id = payload.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid token")
+
+    # The 5-minute warehouse-selection token from the super admin login step is
+    # signed with the same key, but it is not a session token.
+    if payload.get("type", "access") != "access":
+        raise HTTPException(status_code=401, detail="Invalid token type")
 
     from app.models import Profile  # local import to avoid circular deps
 
@@ -77,17 +79,30 @@ def get_current_user(
             if (user.status or "").strip().lower() != "active":
                 raise HTTPException(status_code=401, detail="Account is not active")
 
-            # Super admin JWT carries the warehouse they selected at login.
-            # Override the profile's warehouse_id so all downstream queries
-            # are automatically scoped to the chosen warehouse.
+            # A super admin's token carries the warehouse they selected at
+            # login, and every downstream query is scoped to it. The value is
+            # set as the loaded state rather than as a change, so a commit later
+            # in the request never writes it back to their profile row. Admins
+            # and users are always scoped by their profile, so a stale token
+            # cannot keep them in a warehouse they were moved out of.
+            # A commit expires the loaded state and the next read reloads the
+            # profile's own warehouse, so the selection is also kept on a plain
+            # attribute that active_warehouse_id() reads first.
             jwt_warehouse_id = payload.get("warehouse_id")
-            if jwt_warehouse_id:
-                user.warehouse_id = jwt_warehouse_id
+            if jwt_warehouse_id and _role_of(user) == "super_admin":
+                set_committed_value(user, "warehouse_id", jwt_warehouse_id)
+                user._active_warehouse_id = str(jwt_warehouse_id)
             return user
+
+    from app.routers.auth import is_demo_email
+
+    email = payload.get("email") or ""
+    if not is_demo_email(email):
+        raise HTTPException(status_code=401, detail="Account no longer exists")
 
     return _build_mock_profile(
         user_id=user_id,
-        email=payload.get("email", "test@example.com"),
+        email=email,
         role=payload.get("role", "user"),
         warehouse_id=payload.get("warehouse_id"),
         db=db,
@@ -202,6 +217,91 @@ def is_admin_role(user) -> bool:
     return _role_of(user) in ADMIN_ROLES
 
 
+# Roles a regular admin may give out. Creating or promoting a super admin is a
+# super admin's decision alone.
+ROLES_ASSIGNABLE_BY_ADMIN = {"user", "admin"}
+
+
+def assert_can_manage_user(current_user, target) -> None:
+    """Allow an admin to read or change `target` only within their scope.
+
+    A super admin may manage anyone. A regular admin may manage users and
+    admins of their own active warehouse, never a super admin. Out-of-scope
+    targets get 404, so the response does not reveal that the account exists.
+    """
+    if is_super_admin(current_user):
+        return
+    if _role_of(target) == "super_admin":
+        raise HTTPException(status_code=404, detail="User not found")
+    wh_id = scoped_warehouse_id(current_user)
+    if wh_id and str(getattr(target, "warehouse_id", None)) != wh_id:
+        raise HTTPException(status_code=404, detail="User not found")
+
+
+def assert_can_assign(
+    current_user,
+    *,
+    role: Optional[str] = None,
+    warehouse_id=None,
+    clears_warehouse: bool = False,
+) -> None:
+    """Block a regular admin from granting super admin or moving users elsewhere.
+
+    `clears_warehouse` is set when the request explicitly sets warehouse_id to
+    null, which would leave the user outside every warehouse's scope.
+    """
+    if is_super_admin(current_user):
+        return
+    if clears_warehouse:
+        raise HTTPException(status_code=403, detail="Only a super admin can remove a user's warehouse")
+    if role is not None and role.strip().lower() not in ROLES_ASSIGNABLE_BY_ADMIN:
+        raise HTTPException(status_code=403, detail="Only a super admin can assign that role")
+    wh_id = scoped_warehouse_id(current_user)
+    if warehouse_id is not None and wh_id and str(warehouse_id) != wh_id:
+        raise HTTPException(status_code=403, detail="Admins can only place users in their own warehouse")
+
+
+VALID_ROLES = {"user", "admin", "super_admin"}
+VALID_STATUSES = {"active", "inactive", "suspended"}
+_EMAIL_RE = __import__("re").compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$")
+
+
+def validate_account_fields(db, target, *, role=None, status=None, email=None) -> None:
+    """Reject an invalid role or status, or an email another account already uses.
+
+    Email addresses identify accounts at login and in Google sign-in, so two
+    profiles must never share one.
+    """
+    from app.models import Profile
+
+    if role is not None and str(role).strip().lower() not in VALID_ROLES:
+        raise HTTPException(status_code=422, detail="role must be user, admin or super_admin")
+    if status is not None and str(status).strip().lower() not in VALID_STATUSES:
+        raise HTTPException(status_code=422, detail="status must be active, inactive or suspended")
+    if email is not None:
+        normalized = str(email).strip().lower()
+        if not _EMAIL_RE.match(normalized):
+            raise HTTPException(status_code=422, detail="email is not a valid address")
+        from sqlalchemy import func
+
+        clash = db.query(Profile.id).filter(func.lower(Profile.email) == normalized)
+        if target is not None:
+            clash = clash.filter(Profile.id != target.id)
+        if clash.first() is not None:
+            raise HTTPException(status_code=409, detail="Another account already uses this email")
+
+
+def assert_in_active_warehouse(current_user, warehouse_id, what: str = "Record") -> None:
+    """404 unless an admin's active warehouse covers `warehouse_id`.
+
+    Super admins act in the warehouse chosen at login, so they are held to it
+    the same way. An admin with no warehouse is unscoped.
+    """
+    wh_id = scoped_warehouse_id(current_user)
+    if wh_id and str(warehouse_id) != wh_id:
+        raise HTTPException(status_code=404, detail=f"{what} not found")
+
+
 def assert_asset_in_scope(asset, current_user) -> None:
     """Block admins/super_admins from reading/writing an asset outside their
     active warehouse. Raises 404 (not 403) so the asset's existence isn't
@@ -250,7 +350,13 @@ def active_warehouse_id(user) -> Optional[str]:
     login while a regular admin is pinned to their own, so both are enforced the
     same way here, via the single active warehouse on the token.
     """
-    wid = getattr(user, "warehouse_id", None)
+    wid = scoped_warehouse_id(user)
     if not wid:
         raise HTTPException(status_code=400, detail="User is not assigned to any warehouse")
-    return str(wid)
+    return wid
+
+
+def scoped_warehouse_id(user) -> Optional[str]:
+    """Like active_warehouse_id, but None instead of an error when there is none."""
+    wid = getattr(user, "_active_warehouse_id", None) or getattr(user, "warehouse_id", None)
+    return str(wid) if wid else None

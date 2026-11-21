@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from app.deps import get_db, require_admin, require_user, get_current_user, is_admin_role
+from app.deps import get_db, require_admin, require_user, get_current_user, is_admin_role, assert_in_active_warehouse, scoped_warehouse_id
 from app.models import Profile, Ticket, TicketStatusHistory
 from app.schemas.misc import TicketStatusHistoryCreate, TicketStatusHistoryOut
 
@@ -15,7 +15,9 @@ def _can_view_ticket(ticket: Ticket, current_user: Profile) -> bool:
     """Same rule as tickets.py's get_ticket/list scoping, see there for
     the full rationale."""
     if is_admin_role(current_user):
-        return True
+        # Admins see every ticket in their active warehouse, and only those.
+        wh_id = scoped_warehouse_id(current_user)
+        return bool(wh_id) and str(ticket.warehouse_id) == wh_id
     uid = str(getattr(current_user, "id", ""))
     user_wh_id = getattr(current_user, "warehouse_id", None)
     if user_wh_id is not None and str(ticket.warehouse_id) == str(user_wh_id):
@@ -29,10 +31,15 @@ def _can_view_ticket(ticket: Ticket, current_user: Profile) -> bool:
 # liked. The application writes history itself when a ticket actually changes
 # (see the ticket services), so nothing in the product posts here.
 @router.post("/", response_model=TicketStatusHistoryOut, dependencies=[Depends(require_admin)])
-def create_ticket_status_history(payload: TicketStatusHistoryCreate, db: Session = Depends(get_db)):
+def create_ticket_status_history(
+    payload: TicketStatusHistoryCreate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
     ticket = db.query(Ticket).filter(Ticket.id == payload.ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
+    assert_in_active_warehouse(current_user, ticket.warehouse_id, "Ticket")
 
     obj = TicketStatusHistory(**payload.model_dump())
     db.add(obj)

@@ -10,7 +10,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.deps import get_db, get_current_user, is_admin_role, require_user
+from app.deps import get_db, get_current_user, is_admin_role, require_user, scoped_warehouse_id
 from app.models import Asset, Profile, Ticket
 from app.schemas.ticket_summary import TicketSummaryRequest, TicketSummaryResponse
 from app.ai.services.ticket_summary_service import (
@@ -75,6 +75,10 @@ async def get_summary_by_ticket(
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
 
+    if is_admin_role(current_user):
+        wh_id = scoped_warehouse_id(current_user)
+        if not wh_id or str(ticket.warehouse_id) != wh_id:
+            raise HTTPException(status_code=404, detail="Ticket not found")
     if not is_admin_role(current_user) and str(current_user.id) not in (
         str(ticket.created_by), str(ticket.assigned_to)
     ):

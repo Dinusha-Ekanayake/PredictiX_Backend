@@ -34,6 +34,7 @@ from app.schemas.user_tickets import (
 )
 from app.services import user_ticket_service as svc
 from app.services.notification_service import NotificationService
+from app.core.storage import is_project_storage_url
 
 router = APIRouter(prefix="/user/tickets", tags=["User - Tickets"])
 
@@ -317,6 +318,8 @@ def add_my_ticket_attachment(
         raise HTTPException(
             status_code=403, detail="Not allowed to add attachments to this ticket"
         )
+    if not is_project_storage_url(payload.file_path):
+        raise HTTPException(status_code=422, detail="Attachments must be uploaded to the PredictiX storage bucket.")
 
     obj = svc.add_user_attachment(
         db,

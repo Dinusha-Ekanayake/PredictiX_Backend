@@ -19,11 +19,17 @@ import os
 import uuid as _uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from pydantic import BaseModel, Field
 from sqlalchemy import String, cast, func, or_, text
 from sqlalchemy.orm import Session
 
-from app.deps import get_current_user, get_db, require_admin, require_user, active_warehouse_id
+from app.deps import (
+    get_current_user, get_db, require_admin, require_user, active_warehouse_id,
+    assert_can_assign, assert_can_manage_user, validate_account_fields,
+)
 from app.models import Asset, AssetAssignment, Department, PdmBatchPrediction, Profile, Warehouse
+from app.core.rate_limit import login_rate_limit
+from app.core.security import hash_password, verify_password
 from app.schemas.profile import ProfileOut, ProfileUpdate
 from app.schemas.user_profile import UserProfileUpdate
 from app.services.notification_service import NotificationService
@@ -157,6 +163,56 @@ def get_my_profile(
 
 from fastapi import BackgroundTasks
 
+# Login passwords are bcrypt-hashed; 8 characters is the floor NIST SP 800-63B sets.
+MIN_PASSWORD_LENGTH = 8
+
+
+class PasswordChange(BaseModel):
+    current_password: str = Field(..., min_length=1, max_length=128)
+    new_password: str = Field(..., min_length=MIN_PASSWORD_LENGTH, max_length=128)
+
+
+@router.put("/me/password", dependencies=[Depends(login_rate_limit)])
+def change_my_password(
+    payload: PasswordChange,
+    current_user: Profile = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Change the caller's own password after confirming the current one.
+
+    A wrong current password is a 400, not a 401: the frontend treats any 401
+    as an expired session and would sign the user out.
+    """
+    profile = db.query(Profile).filter(Profile.id == current_user.id).first()
+    if profile is None:
+        raise HTTPException(status_code=400, detail="This account's password cannot be changed here.")
+
+    meta = dict(profile.meta or {}) if isinstance(profile.meta, dict) else {}
+    stored_hash = meta.get("password_hash") or ""
+    if not stored_hash:
+        raise HTTPException(status_code=400, detail="This account signs in with Google and has no password to change.")
+    if not verify_password(payload.current_password, stored_hash):
+        raise HTTPException(status_code=400, detail="Current password is incorrect.")
+    if payload.new_password == payload.current_password:
+        raise HTTPException(status_code=400, detail="Choose a password different from the current one.")
+    if payload.new_password.strip() != payload.new_password or payload.new_password.isdigit():
+        raise HTTPException(
+            status_code=400,
+            detail="Passwords cannot start or end with spaces or be numbers only.",
+        )
+
+    meta["password_hash"] = hash_password(payload.new_password)
+    profile.meta = meta
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        log.exception("Password change failed for %s", profile.id)
+        raise HTTPException(status_code=500, detail="Password could not be changed. Please try again.")
+    log.info("Password changed for profile %s", str(profile.id)[:8])
+    return {"message": "Password changed"}
+
+
 @router.put("/me")
 def update_my_profile(
     payload: UserProfileUpdate,
@@ -253,13 +309,18 @@ def upload_my_avatar(
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image.")
 
-    contents = file.file.read()
+    contents = file.file.read(5 * 1024 * 1024 + 1)
     if len(contents) > 5 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File size must be less than 5MB.")
 
-    ext = (file.filename or "avatar.jpg").rsplit(".", 1)[-1].lower()
-    if ext not in {"jpg", "jpeg", "png", "gif", "webp"}:
-        ext = "jpg"
+    # The type is read from the file's bytes, not the browser's header or the
+    # file name, because it ends up in the stored object and the data: URL.
+    from app.routers.assets import _IMAGE_CONTENT_TYPES, _image_extension
+
+    ext = _image_extension(contents)
+    if ext is None:
+        raise HTTPException(status_code=400, detail="Upload a JPG, PNG, WebP or GIF image.")
+    content_type = _IMAGE_CONTENT_TYPES[ext]
 
     user_id = str(current_user.id)
     filename = f"{user_id}/{_uuid.uuid4()}.{ext}"
@@ -269,7 +330,7 @@ def upload_my_avatar(
         supabase.storage.from_("avatars").upload(
             path=filename,
             file=contents,
-            file_options={"content-type": file.content_type, "upsert": "true"},
+            file_options={"content-type": content_type, "upsert": "true"},
         )
         supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
         avatar_url = f"{supabase_url}/storage/v1/object/public/avatars/{filename}"
@@ -277,7 +338,7 @@ def upload_my_avatar(
         log.warning("[AVATAR] Supabase upload failed: %s — falling back to base64", e)
         import base64
         b64 = base64.b64encode(contents).decode()
-        avatar_url = f"data:{file.content_type};base64,{b64}"
+        avatar_url = f"data:{content_type};base64,{b64}"
 
     real_user = db.query(Profile).filter(Profile.id == current_user.id).first()
     if not real_user:
@@ -492,20 +553,42 @@ def get_my_colleagues(
 # greedily matches "me" and shadows the self-service profile endpoint.
 
 @router.get("/{profile_id}", response_model=ProfileOut, dependencies=[Depends(require_admin)])
-def get_profile(profile_id: str, db: Session = Depends(get_db)):
+def get_profile(
+    profile_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
     obj = db.query(Profile).filter(Profile.id == profile_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Profile not found")
+    assert_can_manage_user(current_user, obj)
     return obj
 
 
 @router.put("/{profile_id}", response_model=ProfileOut, dependencies=[Depends(require_admin)])
-def update_profile(profile_id: str, payload: ProfileUpdate, db: Session = Depends(get_db)):
+def update_profile(
+    profile_id: str,
+    payload: ProfileUpdate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
     obj = db.query(Profile).filter(Profile.id == profile_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Profile not found")
+    assert_can_manage_user(current_user, obj)
+    changes = payload.model_dump(exclude_unset=True)
+    for field in ("role", "status"):
+        if field in changes and changes[field] is None:
+            raise HTTPException(status_code=422, detail=f"{field} cannot be empty")
+    assert_can_assign(
+        current_user,
+        role=changes.get("role"),
+        warehouse_id=changes.get("warehouse_id"),
+        clears_warehouse="warehouse_id" in changes and changes["warehouse_id"] is None,
+    )
+    validate_account_fields(db, obj, role=changes.get("role"), status=changes.get("status"), email=changes.get("email"))
 
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    for key, value in changes.items():
         setattr(obj, key, value)
 
     db.commit()

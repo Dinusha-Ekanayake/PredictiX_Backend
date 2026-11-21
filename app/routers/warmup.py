@@ -54,6 +54,9 @@ def warmup_inference_space() -> dict:
             # Report the real cached outcome rather than an optimistic True.
             return {"warmed": _last_result, "cached": True,
                     "age_seconds": round(age, 1)}
+        # Claim the slot before the slow ping, so requests arriving while it
+        # runs get the cached answer instead of each starting their own ping.
+        _last_ping_at = now
 
     from app.ai.services._gradio_space import ping_gradio_space
 

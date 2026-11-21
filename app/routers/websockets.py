@@ -2,9 +2,8 @@ import logging
 from typing import Dict, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, status
-from jose import JWTError, jwt
 
-from app.core.config import jwt_secret, jwt_algorithm
+from app.core.security import InvalidTokenError, decode_token
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +20,10 @@ def _verify_ws_token(token: Optional[str], user_id: str) -> bool:
     if not token:
         return False
     try:
-        payload = jwt.decode(token, jwt_secret(), algorithms=[jwt_algorithm()])
-    except JWTError:
+        payload = decode_token(token)
+    except InvalidTokenError:
+        return False
+    if payload.get("type", "access") != "access":
         return False
     return str(payload.get("sub") or "") == str(user_id)
 

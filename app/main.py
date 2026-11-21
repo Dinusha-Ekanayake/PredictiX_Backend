@@ -23,7 +23,17 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import InterfaceError, OperationalError
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.core.config import allowed_frontend_origins
+from app.core.config import allowed_frontend_origins, scheduler_enabled
+
+# Application loggers write through the root logger. uvicorn configures only its
+# own loggers, so without this every INFO line from the app is dropped. Applied
+# only when nothing else has configured logging (pytest, a custom runner).
+if not logging.getLogger().handlers:
+    _level = logging.getLevelName(os.getenv("LOG_LEVEL", "INFO").strip().upper())
+    logging.basicConfig(
+        level=_level if isinstance(_level, int) else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
 # ─── Routers ──────────────────────────────────────────────────────────────────
 from .routers.admin_dashboard import admin_dashboard_router
@@ -363,6 +373,15 @@ async def lifespan(_: FastAPI):
         # Asset & ticket summaries run online on HF Spaces, no local warmup.
     else:
         log.info("HuggingFace models disabled (DISABLE_HF_MODELS=true). Skipping warmup.")
+
+    # Only the deployed API should run the background jobs, since every process
+    # that runs them writes predictions and sends reminder mail against the same
+    # database. Dev servers and CI set SCHEDULER_ENABLED=false.
+    if not scheduler_enabled():
+        log.info("Background jobs disabled (SCHEDULER_ENABLED=false).")
+        yield
+        log.info("Shutting down PredictiX API.")
+        return
 
     # ── Batch PDM scheduler ─────────────────────────────────────────────────────
     batch_interval_hours = int(os.getenv("BATCH_INTERVAL_HOURS", "24"))

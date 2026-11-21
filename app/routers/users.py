@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import String, cast, func
@@ -24,7 +25,11 @@ import os
 
 from app.core.security import hash_password
 from app.db.session import SessionLocal
-from app.deps import get_db, get_current_user, require_admin, require_user, active_warehouse_id
+from app.deps import (
+    scoped_warehouse_id,
+    get_db, get_current_user, require_admin, require_user, active_warehouse_id, is_admin_role,
+    assert_can_assign, assert_can_manage_user, is_super_admin, validate_account_fields,
+)
 from app.models import Asset, Department, PdmBatchPrediction, Profile, Warehouse
 from app.services.reference_data_cache import get_department_names, get_warehouse_names
 from app.schemas.user_profile import (
@@ -44,6 +49,22 @@ router = APIRouter(
     tags=["Users"],
     dependencies=[Depends(require_user)],
 )
+
+
+def _department_by_name(db: Session, name: Optional[str], warehouse_id) -> Optional[Department]:
+    """Find a department by name within a warehouse.
+
+    Department rows are per warehouse and share names across sites, so a
+    lookup by name alone can return another warehouse's row.
+    """
+    if not name:
+        return None
+    query = db.query(Department).filter(Department.name == name)
+    if warehouse_id is not None:
+        scoped = query.filter(Department.warehouse_id == warehouse_id).first()
+        if scoped is not None:
+            return scoped
+    return query.first() if warehouse_id is None else None
 
 
 def _default_password() -> str:
@@ -257,9 +278,19 @@ def list_users(
 
 
 @router.post("/", response_model=UserItemOut, dependencies=[Depends(require_admin)])
-def create_user(data: UserCreate, db: Session = Depends(get_db)):
-    dept = db.query(Department).filter(Department.name == data.department).first()
+def create_user(
+    data: UserCreate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
     wh = db.query(Warehouse).filter(Warehouse.name == data.warehouse).first()
+    if wh is None and not is_super_admin(current_user):
+        # A regular admin always adds users to their own warehouse.
+        own_wh = scoped_warehouse_id(current_user)
+        wh = db.query(Warehouse).filter(Warehouse.id == own_wh).first() if own_wh else None
+    assert_can_assign(current_user, role=data.role, warehouse_id=wh.id if wh else None)
+    validate_account_fields(db, None, role=data.role, status=getattr(data, "status", None), email=data.email)
+    dept = _department_by_name(db, data.department, wh.id if wh else None)
 
     # Hash the supplied password, or fall back to the configured default
     # so users created by the frontend (which sends no password yet) can log in.
@@ -313,10 +344,20 @@ def create_user(data: UserCreate, db: Session = Depends(get_db)):
 
 
 @router.put("/{user_id}", response_model=UserItemOut, dependencies=[Depends(require_admin)])
-def update_user(user_id: str, data: UserUpdate, db: Session = Depends(get_db)):
+def update_user(
+    user_id: str,
+    data: UserUpdate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
     user = db.query(Profile).filter(Profile.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    assert_can_manage_user(current_user, user)
+
+    new_wh = db.query(Warehouse).filter(Warehouse.name == data.warehouse).first() if data.warehouse else None
+    assert_can_assign(current_user, role=data.role, warehouse_id=new_wh.id if new_wh else None)
+    validate_account_fields(db, user, role=data.role or None, status=data.status or None, email=data.email or None)
 
     if data.name:           user.full_name = data.name
     if data.email:          user.email = data.email
@@ -324,15 +365,13 @@ def update_user(user_id: str, data: UserUpdate, db: Session = Depends(get_db)):
     if data.role:           user.role = data.role
     if data.status:         user.status = data.status
 
+    if new_wh:
+        user.warehouse_id = new_wh.id
+
     if data.department:
-        dept = db.query(Department).filter(Department.name == data.department).first()
+        dept = _department_by_name(db, data.department, user.warehouse_id)
         if dept:
             user.department_id = dept.id
-
-    if data.warehouse:
-        wh = db.query(Warehouse).filter(Warehouse.name == data.warehouse).first()
-        if wh:
-            user.warehouse_id = wh.id
 
     if data.address:
         meta = dict(user.meta or {})
@@ -351,7 +390,11 @@ def update_user(user_id: str, data: UserUpdate, db: Session = Depends(get_db)):
 
 
 @router.delete("/{user_id}", dependencies=[Depends(require_admin)])
-def delete_user(user_id: str, db: Session = Depends(get_db)):
+def delete_user(
+    user_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
     """Delete a user: removes both the profile row and the Supabase auth user.
 
     Blocks (409) if the user still has assets assigned, to avoid orphaning
@@ -361,6 +404,7 @@ def delete_user(user_id: str, db: Session = Depends(get_db)):
     profile = db.query(Profile).filter(Profile.id == user_id).first()
     if not profile:
         raise HTTPException(status_code=404, detail="User not found")
+    assert_can_manage_user(current_user, profile)
 
     # Guard: don't orphan assets that are still assigned to this user.
     assigned_count = (
@@ -409,7 +453,22 @@ def delete_user(user_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/{user_id}/assets", response_model=list[UserAssignedAssetOut])
-def list_user_assets(user_id: str, db: Session = Depends(get_db)):
+def list_user_assets(
+    user_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    # A user may list their own assigned assets. An admin may list those of a
+    # user in their active warehouse. Anyone else gets the same 404 as an
+    # unknown id, so the endpoint does not reveal which users exist.
+    if str(user_id) != str(current_user.id):
+        if not is_admin_role(current_user):
+            raise HTTPException(status_code=404, detail="User not found")
+        target = db.query(Profile).filter(Profile.id == user_id).first()
+        wh_id = scoped_warehouse_id(current_user)
+        if target is None or (wh_id and str(target.warehouse_id) != wh_id):
+            raise HTTPException(status_code=404, detail="User not found")
+
     assets = (
         db.query(Asset)
         .filter(Asset.assigned_to == user_id, cast(Asset.status, String) == "active")

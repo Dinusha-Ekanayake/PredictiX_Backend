@@ -6,13 +6,50 @@ class Settings(BaseSettings):
     DATABASE_URL: str
     JWT_SECRET: str
     JWT_ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    # Lifetime of an access token. The frontend has no refresh flow, so this is
+    # also the longest a session lasts before the user signs in again.
+    ACCESS_TOKEN_TTL_MINUTES: int = 480
 
     class Config:
         env_file = ".env"
         extra = "ignore"
 
 settings = Settings()
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().strip('"').strip("'").lower() in {"1", "true", "yes", "on"}
+
+
+def access_token_ttl_minutes() -> int:
+    """Access-token lifetime in minutes, read from ACCESS_TOKEN_TTL_MINUTES."""
+    raw = os.getenv("ACCESS_TOKEN_TTL_MINUTES")
+    try:
+        value = int(raw) if raw and raw.strip() else settings.ACCESS_TOKEN_TTL_MINUTES
+    except ValueError:
+        value = settings.ACCESS_TOKEN_TTL_MINUTES
+    return value if value > 0 else 480
+
+
+def demo_accounts_enabled() -> bool:
+    """Whether the built-in demo logins in app/routers/auth.py are accepted.
+
+    They have public passwords and no database row, so production should set
+    ENABLE_DEMO_ACCOUNTS=false once demos are no longer needed.
+    """
+    return _env_flag("ENABLE_DEMO_ACCOUNTS", True)
+
+
+def scheduler_enabled() -> bool:
+    """Whether this process runs the background jobs (PdM batch, reminders).
+
+    Every process that runs them writes to the same database, so only the
+    deployed API should. Local dev servers and CI set SCHEDULER_ENABLED=false.
+    """
+    return _env_flag("SCHEDULER_ENABLED", True)
 
 
 def jwt_secret() -> str:

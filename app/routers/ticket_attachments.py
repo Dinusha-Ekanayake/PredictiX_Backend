@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from app.deps import get_db, get_current_user, is_admin_role
+from app.deps import get_db, get_current_user, is_admin_role, assert_in_active_warehouse, scoped_warehouse_id
 from app.models import Ticket, TicketAttachment, Profile
 from app.schemas.misc import TicketAttachmentCreate, TicketAttachmentOut
+from app.core.storage import is_project_storage_url
 
 router = APIRouter(prefix="/ticket-attachments", tags=["Ticket Attachments"])
 
@@ -13,7 +14,9 @@ def _can_view_ticket(ticket: Ticket, current_user: Profile) -> bool:
     also keep visibility into tickets they created or are assigned to
     outside their warehouse. Deletion of an attachment stays narrower, see delete_ticket_attachment."""
     if is_admin_role(current_user):
-        return True
+        # Admins see every ticket in their active warehouse, and only those.
+        wh_id = scoped_warehouse_id(current_user)
+        return bool(wh_id) and str(ticket.warehouse_id) == wh_id
     uid = str(getattr(current_user, "id", ""))
     user_wh_id = getattr(current_user, "warehouse_id", None)
     if user_wh_id is not None and str(ticket.warehouse_id) == str(user_wh_id):
@@ -31,6 +34,8 @@ def create_ticket_attachment(payload: TicketAttachmentCreate, db: Session = Depe
 
     # uploaded_by is always the authenticated caller, never trust a
     # client-supplied value.
+    if not is_project_storage_url(payload.file_path):
+        raise HTTPException(status_code=422, detail="Attachments must be uploaded to the PredictiX storage bucket.")
     data = payload.model_dump()
     data["uploaded_by"] = current_user.id
 
@@ -53,7 +58,9 @@ def list_ticket_attachments(
             raise HTTPException(status_code=404, detail="Ticket not found")
         q = db.query(TicketAttachment).filter(TicketAttachment.ticket_id == ticket_id)
     elif is_admin_role(current_user):
-        q = db.query(TicketAttachment)
+        q = db.query(TicketAttachment).join(Ticket, Ticket.id == TicketAttachment.ticket_id).filter(
+            Ticket.warehouse_id == scoped_warehouse_id(current_user)
+        )
     else:
         uid = str(getattr(current_user, "id", ""))
         user_wh_id = getattr(current_user, "warehouse_id", None)
@@ -74,6 +81,9 @@ def delete_ticket_attachment(attachment_id: str, db: Session = Depends(get_db), 
     obj = db.query(TicketAttachment).filter(TicketAttachment.id == attachment_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Ticket attachment not found")
+    if is_admin_role(current_user):
+        parent = db.query(Ticket).filter(Ticket.id == obj.ticket_id).first()
+        assert_in_active_warehouse(current_user, parent.warehouse_id if parent else None, "Ticket attachment")
     if not is_admin_role(current_user) and str(obj.uploaded_by) != str(getattr(current_user, "id", "")):
         raise HTTPException(status_code=403, detail="You can only delete your own attachments.")
     db.delete(obj)

@@ -6,7 +6,8 @@ from sqlalchemy import String, cast
 from sqlalchemy.orm import Session
 from uuid import UUID
 
-from ..deps import get_db, get_current_user, is_admin_role
+from ..deps import get_db, get_current_user, is_admin_role, is_super_admin, scoped_warehouse_id
+from app.ai.agent.guardrails import is_in_app_path
 from ..models import Notification, Profile
 from ..schemas.notification import NotificationCreate, NotificationOut
 
@@ -183,6 +184,10 @@ async def create_notification(
     if data.priority:
         meta_data["priority"] = data.priority
     if data.link_url:
+        # The bell turns link_url into a navigation target, so only in-app
+        # paths are stored.
+        if not is_in_app_path(data.link_url):
+            raise HTTPException(status_code=422, detail="link_url must be an in-app path such as /admin/tickets")
         meta_data["link_url"] = data.link_url
 
     notif_type = data.type or "system"
@@ -202,6 +207,12 @@ async def create_notification(
                 status_code=403,
                 detail="Only admins can create notifications for another user",
             )
+        target = db.query(Profile).filter(Profile.id == data.user_id).first()
+        wh_id = scoped_warehouse_id(current_user)
+        if target is None or (
+            not is_super_admin(current_user) and str(target.warehouse_id) != str(wh_id)
+        ):
+            raise HTTPException(status_code=404, detail="User not found")
         target_user_id = data.user_id
 
     notification = Notification(
@@ -234,9 +245,10 @@ async def create_notification(
             "meta": notification.meta,
             "is_from_client": True
         }
-        await notifier.send_personal_message(payload, str(current_user.id))
+        await notifier.send_personal_message(payload, str(target_user_id))
         
         return notification
-    except Exception as e:
+    except Exception:
         db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        log.exception("Creating a notification failed")
+        raise HTTPException(status_code=500, detail="The notification could not be created.")

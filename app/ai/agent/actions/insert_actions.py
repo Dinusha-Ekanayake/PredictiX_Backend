@@ -8,8 +8,12 @@ from datetime import datetime, timezone
 import uuid
 
 from app.ai.agent.tools import ToolContext
-from app.ai.services.llm_service import call_groq
+from app.ai.agent.guardrails import guarded_call_groq as call_groq
 from app.models import Ticket, Asset, Profile
+from app.ai.agent.scoping import scope_asset_query, scope_ticket_query
+from app.ai.agent.guardrails import clamp
+from app.deps import assert_can_assign
+from fastapi import HTTPException
 from app.services.user_ticket_service import generate_ticket_number
 
 log = logging.getLogger("predictix.actions")
@@ -216,29 +220,20 @@ def handle_action(question: str, ctx: ToolContext) -> dict:
             asset_ref = data.get("asset_name") or data.get("asset_code")
             if asset_ref:
                 asset_clean = str(asset_ref).strip()
-                asset = (
-                    db.query(Asset)
-                    .filter(
-                        or_(
-                            Asset.asset_code.ilike(f"%{asset_clean}%"),
-                            Asset.asset_name.ilike(f"%{asset_clean}%"),
-                            Asset.registration_number.ilike(f"%{asset_clean}%"),
-                        )
+                asset_query = db.query(Asset).filter(
+                    or_(
+                        Asset.asset_code.ilike(f"%{asset_clean}%"),
+                        Asset.asset_name.ilike(f"%{asset_clean}%"),
+                        Asset.registration_number.ilike(f"%{asset_clean}%"),
                     )
-                    .first()
                 )
+                asset = scope_asset_query(asset_query, ctx).first()
 
-            # Resolve creator UUID
-            created_by_uuid = None
-            if ctx.user_id:
-                try:
-                    created_by_uuid = uuid.UUID(str(ctx.user_id))
-                except Exception:
-                    pass
-            if not created_by_uuid:
-                first_prof = db.query(Profile).filter(Profile.status == "active").first()
-                if first_prof:
-                    created_by_uuid = first_prof.id
+            # The ticket is always raised in the caller's own name.
+            try:
+                created_by_uuid = uuid.UUID(str(ctx.user_id))
+            except (ValueError, TypeError, AttributeError):
+                return {"answer": "⚠️ I could not confirm who you are, so I did not create the ticket. Please sign in again.", "action_buttons": []}
 
             # Resolve warehouse ID
             wh_id = None
@@ -252,8 +247,8 @@ def handle_action(question: str, ctx: ToolContext) -> dict:
 
             ticket_num = generate_ticket_number(db)
             priority_val = _normalize_priority(data.get("priority"))
-            title_val = data.get("title") or "New Maintenance Ticket"
-            desc_val = data.get("description") or "Created via Sidekick Chatbot"
+            title_val = clamp(data.get("title") or "New Maintenance Ticket", 255)
+            desc_val = clamp(data.get("description") or "Created via Sidekick Chatbot", 5000)
 
             new_ticket = Ticket(
                 id=uuid.uuid4(),
@@ -332,9 +327,20 @@ def handle_action(question: str, ctx: ToolContext) -> dict:
             if not ctx.is_admin:
                 return {"answer": "🔒 You do not have permission to create users. Only admins can perform this action.", "action_buttons": []}
                 
-            email = data.get("email")
-            if not email:
-                return {"answer": "⚠️ I need an email address to create a new user.", "action_buttons": []}
+            email = str(data.get("email") or "").strip().lower()
+            if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[A-Za-z]{2,}", email):
+                return {"answer": "⚠️ I need a valid email address to create a new user.", "action_buttons": []}
+            role_val = str(data.get("role") or "user").strip().lower()
+            if role_val not in ("user", "admin", "super_admin"):
+                role_val = "user"
+            # Same rules as POST /users: a regular admin cannot grant
+            # super_admin or add users outside their own warehouse.
+            try:
+                assert_can_assign(ctx.user, role=role_val, warehouse_id=ctx.warehouse_id)
+            except HTTPException as denied:
+                return {"answer": f"🔒 {denied.detail}.", "action_buttons": []}
+            if db.query(Profile).filter(Profile.email == email).first():
+                return {"answer": f"⚠️ A user with the email `{email}` already exists.", "action_buttons": []}
                 
             wh_id = None
             if ctx.warehouse_id:
@@ -346,8 +352,8 @@ def handle_action(question: str, ctx: ToolContext) -> dict:
             new_profile = Profile(
                 id=uuid.uuid4(),
                 email=email,
-                full_name=data.get("full_name") or "New User",
-                role=data.get("role") or "user",
+                full_name=clamp(data.get("full_name") or "New User", 120),
+                role=role_val,
                 warehouse_id=wh_id
             )
             db.add(new_profile)
@@ -369,15 +375,15 @@ def handle_action(question: str, ctx: ToolContext) -> dict:
             ticket = None
             if ticket_id_str.isdigit() or ticket_id_str.startswith("#"):
                 num = ticket_id_str.replace("#", "")
-                ticket = db.query(Ticket).filter(Ticket.ticket_number.ilike(f"%{num}%")).first()
+                ticket = scope_ticket_query(db.query(Ticket), ctx).filter(Ticket.ticket_number.ilike(f"%{num}%")).first()
             elif ticket_id_str.upper().startswith("TKT-") or ticket_id_str.upper().startswith("T-"):
-                ticket = db.query(Ticket).filter(Ticket.ticket_number.ilike(f"%{ticket_id_str}%")).first()
+                ticket = scope_ticket_query(db.query(Ticket), ctx).filter(Ticket.ticket_number.ilike(f"%{ticket_id_str}%")).first()
             else:
                 try:
                     ticket_uuid = uuid.UUID(ticket_id_str)
-                    ticket = db.query(Ticket).filter(Ticket.id == ticket_uuid).first()
+                    ticket = scope_ticket_query(db.query(Ticket), ctx).filter(Ticket.id == ticket_uuid).first()
                 except ValueError:
-                    ticket = db.query(Ticket).filter(Ticket.ticket_number.ilike(f"%{ticket_id_str}%")).first()
+                    ticket = scope_ticket_query(db.query(Ticket), ctx).filter(Ticket.ticket_number.ilike(f"%{ticket_id_str}%")).first()
                     
             if not ticket:
                 return {"answer": f"⚠️ I couldn't find a ticket matching '{ticket_id_str}'. Please verify the ticket number.", "action_buttons": []}

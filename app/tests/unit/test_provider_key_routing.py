@@ -76,4 +76,4 @@ def test_falling_back_to_the_general_account_is_announced():
     src = inspect.getsource(notif.NotificationService.send_email)
     branch = src[src.index("if use_wh_key:"):]
 
-    assert re.search(r"print\(.*WARNING", branch, re.S)
+    assert re.search(r"log\.warning\(.*No warehouse Brevo key", branch, re.S)
