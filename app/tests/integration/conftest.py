@@ -87,3 +87,78 @@ def db():
         yield session
     finally:
         session.close()
+
+
+# ── Read-only fixtures that need no passwords ───────────────────────────────
+# Tokens are minted for real profiles with the API's own signing key, so the
+# authorization, sandbox and chatbot suites run wherever DATABASE_URL and
+# JWT_SECRET are set. Nothing here writes to the database.
+
+@pytest.fixture(scope="session")
+def api():
+    """A TestClient that does not run the app's startup hook (which writes the
+    model registry), for read-only and refused-before-write requests."""
+    if not os.getenv("DATABASE_URL"):
+        pytest.skip("DATABASE_URL is not set; skipping integration tests")
+    os.environ.setdefault("SCHEDULER_ENABLED", "false")
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    return TestClient(app)
+
+
+@pytest.fixture(scope="session")
+def world(api):
+    """Real ids from the admin's own warehouse and from another one."""
+    from sqlalchemy import text
+    from app.db.session import engine
+
+    with engine.connect() as c:
+        c.execute(text("SET TRANSACTION READ ONLY"))
+        admin = c.execute(text(
+            "SELECT id::text, email, warehouse_id::text FROM profiles "
+            "WHERE role='admin' AND status='active' AND warehouse_id IS NOT NULL LIMIT 1")).fetchone()
+        if admin is None:
+            pytest.skip("no active admin with a warehouse")
+        wh = admin[2]
+        one = lambda sql: c.execute(text(sql), {"w": wh}).scalar()  # noqa: E731
+        data = {
+            "admin": {"id": admin[0], "email": admin[1], "wh": wh},
+            "user_same": one("SELECT id::text FROM profiles WHERE role='user' AND status='active' AND warehouse_id::text=:w LIMIT 1"),
+            "user_other": one("SELECT id::text FROM profiles WHERE role='user' AND warehouse_id::text<>:w LIMIT 1"),
+            "super": c.execute(text("SELECT id::text, email FROM profiles WHERE role='super_admin' AND status='active' LIMIT 1")).fetchone(),
+            "ticket_same": one("SELECT id::text FROM tickets WHERE warehouse_id::text=:w LIMIT 1"),
+            "ticket_other": one("SELECT id::text FROM tickets WHERE warehouse_id::text<>:w LIMIT 1"),
+            "asset_same": one("SELECT id::text FROM assets WHERE warehouse_id::text=:w LIMIT 1"),
+            "asset_other": one("SELECT id::text FROM assets WHERE warehouse_id::text<>:w LIMIT 1"),
+            "event_other": one("SELECT m.id::text FROM maintenance_events m JOIN assets a ON a.id=m.asset_id WHERE a.warehouse_id::text<>:w LIMIT 1"),
+        }
+        user = c.execute(text("SELECT id::text, email, warehouse_id::text FROM profiles WHERE id::text=:u"), {"u": data["user_same"]}).fetchone()
+        data["user"] = {"id": user[0], "email": user[1], "wh": user[2]}
+        c.rollback()
+    return data
+
+
+@pytest.fixture(scope="session")
+def bearer(world):
+    """bearer(role) -> Authorization header for a real profile of that role."""
+    from app.routers.auth import _create_selection_token, _create_token
+
+    def _headers(role: str) -> dict:
+        if role == "admin":
+            a = world["admin"]
+            token = _create_token(a["id"], a["email"], "admin", warehouse_id=a["wh"])
+        elif role == "user":
+            u = world["user"]
+            token = _create_token(u["id"], u["email"], "user")
+        elif role == "super":
+            s = world["super"]
+            token = _create_token(s[0], s[1], "super_admin", warehouse_id=world["admin"]["wh"])
+        elif role == "selection":
+            s = world["super"]
+            token = _create_selection_token(s[0], s[1], "x")
+        else:
+            raise ValueError(role)
+        return {"Authorization": f"Bearer {token}"}
+
+    return _headers

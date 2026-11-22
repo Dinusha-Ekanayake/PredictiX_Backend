@@ -109,12 +109,13 @@ jobs:
         # makes them safe to run on pull requests from forks.
         run: python scripts/run_tests.py --unit
 
-      - name: Coverage report
-        if: always()
+      - name: Coverage (ratchet)
+        # .coveragerc measures shipped code only. The floor sits just under the
+        # current figure so coverage can rise but never quietly fall; raise it
+        # as tests are added. Integration and functional suites add more.
         run: |
           pytest app/tests/unit app/tests/qa_automated \
-            --cov=app --cov-report=term-missing:skip-covered --cov-report=xml
-        continue-on-error: true
+            --cov --cov-report=term --cov-report=xml --cov-fail-under=25
 
       - name: Upload coverage
         if: always()
@@ -163,7 +164,29 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_AI_SPACE_URL: ${{ secrets.HF_AI_SPACE_URL }}
           DISABLE_HF_MODELS: "true"
+          WARM_HELP_SEARCH: "false"
         run: pytest app/tests/integration -m integration
+
+      - name: RAG retrieval evaluation
+        # Golden-set quality gates (hit@1, hit@3, off-topic rejection). Run in
+        # its own process with the hub online, so the embedding model can be
+        # downloaded; importing the app elsewhere sets it offline.
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          HF_HUB_OFFLINE: "0"
+        run: pytest app/tests/eval -m "eval and not llm" -s
+
+      - name: Live LLM answer evaluation (manual runs only)
+        # Spends model quota, so it runs only when the workflow is started by
+        # hand. Checks grounded, cited answers and refusals on hard negatives.
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CHATBOT_GROQ_API_KEY: ${{ secrets.CHATBOT_GROQ_API_KEY }}
+          WH_GROQ_API_KEY: ${{ secrets.WH_GROQ_API_KEY }}
+          HF_HUB_OFFLINE: "0"
+          RUN_LLM_TESTS: "1"
+        run: pytest app/tests/eval -m llm -s
 
   # ── 4. Functional test plan. One case per row of the report's tables. ─────
   functional-tests:
