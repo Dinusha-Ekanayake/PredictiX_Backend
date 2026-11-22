@@ -16,7 +16,6 @@ from typing import Any, Optional
 from sqlalchemy import text, or_, and_, func, cast, String
 from sqlalchemy.orm import Session
 
-from app.db.supabase_client import supabase
 from app.ai.agent.safe_sql import SqlScope, UnsafeSQLError, run_scoped_query, strip_code_fences
 from app.ai.agent.guardrails import fence_untrusted
 from app.ai.agent.scoping import scope_asset_query, scope_profile_query, scope_ticket_query
@@ -25,6 +24,10 @@ log = logging.getLogger("predictix.tools")
 
 
 # ─── Context ─────────────────────────────────────────────────────────────────
+
+# Matches no row; used when a caller has no warehouse (see ToolContext).
+NO_WAREHOUSE = "00000000-0000-0000-0000-000000000000"
+
 
 @dataclass
 class ToolContext:
@@ -51,8 +54,17 @@ class ToolContext:
 
     @property
     def warehouse_id(self) -> Optional[str]:
-        wid = getattr(self.user, "warehouse_id", None)
-        return str(wid) if wid else None
+        """The caller's active warehouse (a super admin's choice at login)."""
+        from app.deps import scoped_warehouse_id
+
+        return scoped_warehouse_id(self.user)
+
+    @property
+    def scope_warehouse_id(self) -> str:
+        """Warehouse id for filters. Never None: a caller with no warehouse gets
+        an id that matches nothing, so a missing warehouse narrows to no rows
+        instead of widening to every warehouse."""
+        return self.warehouse_id or NO_WAREHOUSE
 
 
 # ─── Full Database Schema ─────────────────────────────────────────────────────
@@ -161,153 +173,100 @@ def handle_navigation(question: str, ctx: ToolContext) -> dict:
     }
 
 
-def handle_faq(question: str, ctx: ToolContext) -> dict:
-    """Fetch FAQs from Supabase, synthesize with LLM, and fallback to admin if not found."""
-    from app.ai.agent.guardrails import guarded_call_groq as call_groq
+HELP_NOT_FOUND = "NOT_FOUND"
+_SUPPORT_EMAIL = "neuromindspredictix@gmail.com"
 
-    def _get_faq_fallback() -> dict:
-        return {
-            "answer": "Please reach out to our admins at **neuromindspredictix@gmail.com** and they'll get back to you as soon as possible.",
-            "action_buttons": [{"label": "Copy Admin Email", "path": "copy:neuromindspredictix@gmail.com"}],
-        }
 
-    try:
-        resp = (
-            supabase.from_("faqs")
-            .select("id,question,answer,category")
-            .eq("is_active", True)
-            .execute()
-        )
-        all_faqs = resp.data or []
-    except Exception as e:
-        log.warning("FAQ fetch failed: %s", e)
-        all_faqs = []
-
-    q_lower = question.lower()
-    words = [w for w in q_lower.split() if len(w) > 2]
-    scored = []
-    for faq in all_faqs:
-        faq_q = faq.get("question", "").lower()
-        faq_a = faq.get("answer", "").lower()
-        score = sum(2 for w in words if w in faq_q) + sum(1 for w in words if w in faq_a)
-        if score > 0:
-            scored.append((score, faq))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    top = [faq for _, faq in scored[:4]]
-
-    if not top:
-        return handle_knowledge(question, ctx)
-
-    context_str = "\n".join(
-        f"Q: {faq['question']}\nA: {faq['answer']}" for faq in top
-    )
-    user_name = ctx.full_name.split()[0] if ctx.full_name else "there"
-
-    try:
-        summary, fb = call_groq(
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are PredictiX Assistant. Answer the user's question using ONLY the provided FAQ context. "
-                        "CRITICAL INSTRUCTION: If the provided context does NOT contain the exact answer to the user's specific question (for example, they ask how to delete a ticket, but the context only explains how to open or view tickets), you MUST reply EXACTLY with the word: NOT_FOUND. Do not try to guess or invent an answer based on unrelated context. "
-                        "If the context DOES answer the question accurately, be conversational, encouraging, and use simple language. "
-                        "Never mention 'the FAQ', 'the context', or 'the database'. Just answer naturally. "
-                        "Always start your response with a ✅ emoji and end with: '*Let me know if you need any more help! 😊*'"
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"My name is {user_name}. My question is: \"{question}\"\n\n"
-                        f"FAQ Context:\n{context_str}"
-                    ),
-                },
-            ],
-            max_tokens=400,
-            temperature=0.1,
-        )
-        
-        if not summary or "NOT_FOUND" in str(summary).strip():
-            return handle_knowledge(question, ctx)
-            
-        answer = fb + str(summary)
-    except Exception as e:
-        log.error("FAQ LLM synthesis failed: %s", e)
-        return handle_knowledge(question, ctx)
-
+def _help_not_covered() -> dict:
     return {
-        "answer": answer,
-        "action_buttons": [],
+        "answer": (
+            "📚 I couldn't find that in the PredictiX help content. "
+            f"Please reach out to our admins at **{_SUPPORT_EMAIL}** and they'll get back to you as soon as possible."
+        ),
+        "action_buttons": [{"label": "Copy Admin Email", "path": f"copy:{_SUPPORT_EMAIL}"}],
     }
 
 
-def handle_knowledge(question: str, ctx: ToolContext) -> dict:
-    """Semantic search on knowledge base, then synthesize and format cleanly with fast model."""
+def _sources_line(hits: list[dict]) -> str:
+    labels = []
+    for h in hits:
+        kind = "FAQ" if h.get("source") == "faq" else "Article"
+        labels.append(f"{kind}: {h.get('title') or 'Help content'}")
+    return "\n\n📎 *Sources: " + "; ".join(dict.fromkeys(labels)) + "*"
+
+
+def answer_from_help(question: str, ctx: ToolContext, hits: list[dict]) -> dict:
+    """Answer only from retrieved help content, citing it, or say it is not covered.
+
+    `hits` come from knowledge_service.search_help and are already filtered
+    for relevance. The model is told to answer from them alone and to reply
+    NOT_FOUND when they do not answer the question; the retrieved text is
+    passed as fenced data behind the shared security rules.
+    """
     from app.ai.agent.guardrails import guarded_call_groq as call_groq
-    from app.chatbot.knowledge_service import search_knowledge
 
-    raw_results = search_knowledge(question, match_count=4)
-    if not raw_results:
-        return {
-            "answer": "📚 I couldn't find anything relevant in the knowledge base for that question. Try rephrasing or ask about a specific asset/ticket.",
-            "action_buttons": [],
-        }
+    if not hits:
+        return _help_not_covered()
 
-    # search_knowledge already drops articles below its relevance threshold,
-    # so every result here is related to the question.
-    results = raw_results
-    context_str = fence_untrusted(
-        "knowledge_base_articles",
+    context = fence_untrusted(
+        "help_content",
         "\n\n".join(
-            f"Article Title: {r.get('title', 'Article')}\nContent: {r.get('content', '')}"
-            for r in results
+            f"[{'FAQ' if h.get('source') == 'faq' else 'Article'}] {h.get('title', '')}\n{h.get('content', '')}"
+            for h in hits
         ),
         limit=8000,
     )
-    sources_line = "\n\n📎 *Source: " + ", ".join(
-        dict.fromkeys(str(r.get("title") or "Knowledge Base") for r in results)
-    ) + "*"
-
-    fallback_msg = ""
+    first_name = ctx.full_name.split()[0] if ctx.full_name else "there"
     try:
         summary, fallback_msg = call_groq(
             messages=[
                 {
                     "role": "system",
                     "content": (
-                        "You are PredictiX Assistant. Answer the user's question directly using ONLY the provided Knowledge Base articles. "
-                        "If they do not answer it, say that the knowledge base does not cover it.\n\n"
-                        "CRITICAL FORMATTING INSTRUCTIONS:\n"
-                        "1. Focus ONLY on the article that directly answers the question. Ignore any unrelated background articles.\n"
-                        "2. Format the response with clean, professional line breaks and spacing. Use bold titles, bullet points, or numbered steps for instructions.\n"
-                        "3. Do NOT dump raw lists of article titles or unformatted bullet points.\n"
-                        "4. Do NOT include general fleet statistics, counts of critical assets, or predicted failures unless explicitly asked.\n"
-                        "5. Start your response with an appropriate professional emoji (e.g., 👤 for profile/account, ⚙️ for assets, 🎫 for tickets, 📚 for guides, 💡 for tips).\n"
-                        "6. End with a polite closing, e.g. '*Let me know if you need any more help! 😊*'"
+                        "You are PredictiX Assistant. Answer the user's question using ONLY the help content provided. "
+                        "Use the item that directly answers the question and ignore unrelated ones. "
+                        f"If the help content does not answer the question, reply with exactly {HELP_NOT_FOUND} and nothing else. "
+                        "Never invent steps, settings or features that the help content does not describe. "
+                        "Use simple, friendly language with short steps or bullet points where useful. "
+                        "Do not mention 'the context', 'the FAQ' or 'the database'. "
+                        "Start with one fitting emoji and end with: '*Let me know if you need any more help! 😊*'"
                     ),
                 },
-                {"role": "user", "content": f"User Question: \"{question}\"\n\nKnowledge Base Articles:\n{context_str}"},
+                {"role": "user", "content": f"My name is {first_name}. My question: {question}\n\n{context}"},
             ],
-            max_tokens=400,
-            temperature=0.2,
+            max_tokens=450,
+            temperature=0.1,
         )
-        if summary:
-            return {
-                "answer": fallback_msg + str(summary).strip() + sources_line,
-                "action_buttons": [],
-            }
+        text_out = str(summary or "").strip()
+        if not text_out or HELP_NOT_FOUND in text_out:
+            return _help_not_covered()
+        return {"answer": (fallback_msg or "") + text_out + _sources_line(hits), "action_buttons": []}
     except Exception as e:
-        log.error("Knowledge summarization failed: %s", e)
+        log.error("Help answer synthesis failed: %s", e)
 
-    # Fallback to single top article with clean formatting if LLM fails
-    top_art = results[0]
-    clean_ans = f"📚 **{top_art.get('title', 'Knowledge Article')}**\n\n{top_art.get('content', '')}\n\n*Let me know if you need any more help! 😊*"
+    # The model is unavailable: show the most relevant item as written.
+    top = hits[0]
     return {
-        "answer": fallback_msg + clean_ans,
+        "answer": (
+            f"📚 **{top.get('title', 'Help')}**\n\n{top.get('content', '')}"
+            f"{_sources_line([top])}\n\n*Let me know if you need any more help! 😊*"
+        ),
         "action_buttons": [],
     }
+
+
+def handle_faq(question: str, ctx: ToolContext) -> dict:
+    """How-to and help questions: FAQs and knowledge-base articles together."""
+    from app.chatbot.knowledge_service import search_help
+
+    return answer_from_help(question, ctx, search_help(question, match_count=4))
+
+
+def handle_knowledge(question: str, ctx: ToolContext) -> dict:
+    """Concept and reference questions: the same merged help search as handle_faq."""
+    from app.chatbot.knowledge_service import search_help
+
+    return answer_from_help(question, ctx, search_help(question, match_count=4))
 
 
 def handle_database(question: str, ctx: ToolContext) -> dict:
@@ -617,9 +576,8 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                     "FROM assets a JOIN pdm_batch_predictions p ON a.id = p.asset_id "
                 )
                 params = {}
-                if ctx.warehouse_id:
-                    sql_str += " WHERE a.warehouse_id = :wid "
-                    params["wid"] = ctx.warehouse_id
+                sql_str += " WHERE a.warehouse_id = :wid "
+                params["wid"] = ctx.scope_warehouse_id
                 sql_str += " ORDER BY p.failure_probability DESC, p.health_score ASC LIMIT 1"
                 query = ctx.db.execute(text(sql_str), params).mappings().first()
             
@@ -692,10 +650,10 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                 }
 
             # 2. Admin System / Warehouse Breakdown
-            w_clause_t = " WHERE warehouse_id = :wid " if ctx.warehouse_id else ""
-            w_clause_a = " WHERE warehouse_id = :wid " if ctx.warehouse_id else ""
-            w_clause_p = " WHERE (warehouse_id = :wid OR warehouse_id IS NULL) " if ctx.warehouse_id else ""
-            params = {"wid": ctx.warehouse_id} if ctx.warehouse_id else {}
+            w_clause_t = " WHERE warehouse_id = :wid "
+            w_clause_a = " WHERE warehouse_id = :wid "
+            w_clause_p = " WHERE warehouse_id = :wid "
+            params = {"wid": ctx.scope_warehouse_id}
 
             is_t = "ticket" in q_lower or "all sub categories" in q_lower or "how many open" in q_lower or "tickets here" in q_lower
             is_a = "asset" in q_lower or "all sub categories" in q_lower or "assets here" in q_lower or "fleet" in q_lower
@@ -803,8 +761,7 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             total_assets, operational, maintenance, critical_band, offline, avg_health_val = 0, 0, 0, 0, 0, 0
             if is_asset or not (is_ticket or is_user):
                 asset_q = ctx.db.query(Asset)
-                if ctx.warehouse_id:
-                    asset_q = asset_q.filter(Asset.warehouse_id == ctx.warehouse_id)
+                asset_q = asset_q.filter(Asset.warehouse_id == ctx.scope_warehouse_id)
                 asset_rows = asset_q.with_entities(
                     func.count(Asset.id),
                     func.count(Asset.id).filter(cast(Asset.status, String) == "active"),
@@ -827,8 +784,7 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                         (PdmBatchPrediction.asset_id == Asset.id) & (PdmBatchPrediction.status == "ok"),
                     )
                 )
-                if ctx.warehouse_id:
-                    health_q = health_q.filter(Asset.warehouse_id == ctx.warehouse_id)
+                health_q = health_q.filter(Asset.warehouse_id == ctx.scope_warehouse_id)
                 avg_health = health_q.scalar()
                 avg_health_val = int(round(float(avg_health))) if avg_health is not None else 64
 
@@ -836,8 +792,7 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             open_tickets, high_priority, tickets_resolved, avg_resolution_days = 0, 0, 0, 0.0
             if is_ticket or not (is_asset or is_user):
                 ticket_q = ctx.db.query(Ticket)
-                if ctx.warehouse_id:
-                    ticket_q = ticket_q.filter(Ticket.warehouse_id == ctx.warehouse_id)
+                ticket_q = ticket_q.filter(Ticket.warehouse_id == ctx.scope_warehouse_id)
                 
                 ticket_rows = ticket_q.with_entities(
                     func.count(Ticket.id).filter(Ticket.status.notin_(('closed', 'cancelled'))),
@@ -862,8 +817,7 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             total_users, active_users, admins, regular_users = 0, 0, 0, 0
             if is_user or not (is_asset or is_ticket):
                 users_q = ctx.db.query(Profile)
-                if ctx.warehouse_id:
-                    users_q = users_q.filter((Profile.warehouse_id == ctx.warehouse_id) | (Profile.warehouse_id.is_(None)))
+                users_q = users_q.filter(Profile.warehouse_id == ctx.scope_warehouse_id)
                 all_users = users_q.all()
                 total_users = len(all_users)
                 active_users = sum(1 for u in all_users if getattr(u, "status", "").lower() == "active")

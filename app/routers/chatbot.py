@@ -173,9 +173,12 @@ def chatbot_agent(
     # Only in-app paths and copy actions reach the browser.
     clean_buttons = [ActionButton(**btn) for btn in sanitize_action_buttons(result.get("action_buttons"))]
 
+    widget_type = result.get("widget_type")
     return AgentResponse(
         answer=result.get("answer", "I'm sorry, I couldn't generate a response."),
         action_buttons=clean_buttons,
         tool_trace=clean_trace,
         iterations=result.get("iterations", 1),
+        widget_type=widget_type if widget_type == "RECORD_SUMMARY" else None,
+        widget_data=result.get("widget_data") if widget_type == "RECORD_SUMMARY" else None,
     )

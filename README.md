@@ -914,31 +914,65 @@ Set `DISABLE_HF_MODELS=true` (default) to skip downloading and loading HuggingFa
 - **Pydantic validation** — All request/response bodies are fully typed with `from_attributes=True` for ORM compatibility
 - **Dashboard caching** — `DashboardCache` and `ai_summary_cache` decouple request latency from Supabase network RTT
 
-### Retrieval (RAG)
+### Chatbot architecture
 
-Two corpora, one embedding model (`sentence-transformers/all-MiniLM-L6-v2`, 384 dimensions,
-stored as pgvector columns):
+```mermaid
+graph TD
+    U["User prompt"] --> G["Input bounds · rate limit<br/>routers/chatbot.py"]
+    G --> R["Router agent<br/>agent_service.run_agent"]
+    R --> C{"Intent<br/>keyword rules, then LLM classifier"}
+    C -->|GREETING · WHOAMI · NAVIGATION| Z["Zero-token handlers"]
+    C -->|FAQ · KNOWLEDGE| H["Help retrieval<br/>FAQs + articles, merged"]
+    H --> HS["Help synthesizer<br/>answers only from sources, cites them"]
+    C -->|PREDICTION| P["Prediction info"]
+    C -->|ACTION| A["Action router<br/>same permission rules as the API"]
+    C -->|DATABASE| D["Database orchestrator<br/>scoped fast paths first"]
+    D --> TS["Table selector"] --> SG["SQL generator"]
+    SG --> SB{"SQL sandbox<br/>safe_sql.run_scoped_query"}
+    SB -->|error| SH["Self-healer"] --> SB
+    SB -->|one record| W["Record widget"]
+    SB -->|rows| S["Summarizer"]
+    SB -->|refused or failed| F["Fallback answer"]
+    Z & HS & P & A & W & S & F --> RC["Response compiler<br/>in-app buttons only"]
+    RC --> U
+
+    style SB fill:#0F4C5C,color:#fff
+    style G fill:#E6F1F4,stroke:#0F4C5C
+    style RC fill:#E6F1F4,stroke:#0F4C5C
+```
+
+Every model call goes through `guardrails.guarded_call_groq`, which puts the same security rules
+first. Text from the user, the browser or the database reaches the model only inside labelled
+data fences. What data each caller can reach is enforced in code, not by the prompt:
+`safe_sql.py` (generated SQL), `scoping.py` (chatbot lookups and actions) and `app/deps.py` (the
+REST API) apply the same warehouse and ownership rules.
+
+### Retrieval (RAG)
 
 | Corpus | Table | Used by | Code |
 |---|---|---|---|
-| Help and FAQ articles, edited by admins at `/admin/knowledge-base` | `knowledge_base` | Chatbot answers | `app/chatbot/knowledge_service.py` |
+| FAQs, edited by admins | `faqs` | Chatbot help answers | `app/chatbot/knowledge_service.py` (`search_help`) |
+| Help and reference articles, edited at `/admin/knowledge-base` | `knowledge_base` | Chatbot help answers | same |
 | Maintenance standards (statutory, OEM, ISO 55000, SMRP, FMEA, climate) | `kb_documents` | AI warehouse report | `app/kb/kb_vector_store.py` |
 
-- **Embedding.** A query is embedded with the local model when it is installed and cached,
-  otherwise through the Hugging Face feature-extraction endpoint (which needs inference credits).
-  `main.py` keeps the hub offline, so on a new server cache the model once:
+- **Embedding.** `sentence-transformers/all-MiniLM-L6-v2` (384 dimensions, normalised), the model
+  the stored vectors were made with. Queries use the local model when it is cached, otherwise the
+  Hugging Face endpoint (which needs inference credits). `main.py` keeps the hub offline, so cache
+  the model once on a new server:
   `HF_HUB_OFFLINE=0 python -c "from sentence_transformers import SentenceTransformer as S; S('all-MiniLM-L6-v2')"`.
-- **Ranking.** Cosine similarity in Postgres. Chatbot results must score at least 0.25 and come
-  from active articles only; on this corpus, articles that answer a question score 0.44 to 0.77
-  and off-topic questions at most 0.14. Report results must score at least 0.25.
-- **When nothing is relevant** the chatbot says the knowledge base does not cover the question
-  rather than answering from the nearest article. Answers name the articles they used.
-- **When no embedding can be made** both corpora fall back to TF-IDF keyword search over the same
-  rows, so retrieval degrades instead of returning nothing.
-- **Prompting.** Retrieved text is passed to the model inside labelled delimiters as data, after a
-  fixed set of security rules (`app/ai/agent/guardrails.py`).
-- Article create, edit, enable/disable and delete re-embed the article and refresh the keyword
-  index immediately.
+- **Help retrieval** searches FAQs and articles together and ranks them on one similarity scale.
+  Articles use their pgvector column; FAQs have no vector column, so their question, answer and
+  tags are embedded in memory and refreshed on every FAQ write. Only active rows are searched.
+- **Relevance threshold 0.30.** Measured with `python scripts/eval_rag.py` (20 paraphrased
+  questions with known answers, 6 off-topic): hit@1 85%, hit@3 90%, every off-topic question
+  rejected. Correct hits score 0.41 to 0.79, off-topic questions at most 0.14. Adding synonyms to
+  an FAQ's tags ("sign out" for "log out") is the way to fix a miss.
+- **Answering.** The synthesizer answers only from the retrieved items, replies "not covered" with
+  the admin contact when they do not answer the question, never invents steps, and lists its
+  sources. If the model is unavailable, the most relevant item is shown as written.
+- **When no embedding can be made** both help search and the report store fall back to TF-IDF over
+  the same rows, so retrieval degrades instead of returning nothing.
+- Article and FAQ edits refresh their indexes immediately.
 
 `kb_annotator.py` adds deterministic, rule-based annotations (SHAP drivers, health-band and
 benchmark notes) to the report alongside the retrieved text.

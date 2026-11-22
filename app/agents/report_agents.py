@@ -1109,12 +1109,20 @@ def run_warehouse_agent(db: Session, warehouse_id: str | None = None) -> dict:
     # ── Step 4: LLM call with KB-grounded prompt ───────────────
     llm = _get_llm(temperature=0.25)
 
+    # Ticket titles and descriptions inside the live data are typed by users, so
+    # both blocks go to the model as fenced data behind the shared security
+    # rules. The limit is far above any real report, so nothing is cut.
+    from app.ai.agent.guardrails import PROMPT_GUARD, fence_untrusted
+
     combined_prompt = (
-        f"LIVE DATABASE DATA:\n{context_text}\n\n"
-        f"KNOWLEDGE BASE CONTEXT (ISO 55000 / SMRP Standards):\n{kb_full_context}"
+        "LIVE DATABASE DATA:\n"
+        f"{fence_untrusted('live_database_data', context_text, limit=500_000)}\n\n"
+        "KNOWLEDGE BASE CONTEXT (ISO 55000 / SMRP Standards):\n"
+        f"{fence_untrusted('knowledge_base_context', kb_full_context, limit=500_000)}"
     )
 
     messages = [
+        SystemMessage(content=PROMPT_GUARD),
         SystemMessage(content=WAREHOUSE_SYSTEM_PROMPT),
         HumanMessage(content=f"Generate the full KB-Enhanced warehouse report:\n\n{combined_prompt}"),
     ]

@@ -253,7 +253,7 @@ def run_agent(
 
         elif intent == INTENT_FAQ:
             result = handle_faq(question, ctx)
-            tool_trace.append({"name": "handle_faq", "args": {"question": question}, "result_preview": f"Fetched FAQs from Supabase."})
+            tool_trace.append({"name": "handle_faq", "args": {"question": question}, "result_preview": "Searched FAQs and the knowledge base."})
 
         elif intent == INTENT_KNOWLEDGE:
             result = handle_knowledge(question, ctx)
@@ -283,4 +283,8 @@ def run_agent(
         "action_buttons": result.get("action_buttons", []),
         "tool_trace": tool_trace,
         "iterations": 1,
+        # The record card (RECORD_SUMMARY) the database handler builds for a
+        # single-row result; the chat widget renders it under the answer.
+        "widget_type": result.get("widget_type"),
+        "widget_data": result.get("widget_data"),
     }

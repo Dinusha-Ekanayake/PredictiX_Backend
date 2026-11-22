@@ -117,3 +117,97 @@ def test_attachment_urls_fail_closed_without_storage(monkeypatch):
     monkeypatch.setenv("SUPABASE_URL", "https://proj.supabase.co")
     assert is_project_storage_url("https://proj.supabase.co/storage/v1/object/public/ticket-attachments/a.png")
     assert not is_project_storage_url("https://other.supabase.co/storage/v1/object/public/x/a.png")
+
+
+def test_chatbot_context_never_widens_to_all_warehouses():
+    from app.ai.agent.tools import NO_WAREHOUSE, ToolContext
+
+    homeless = ToolContext(db=None, user=SimpleNamespace(id="u", role="admin", warehouse_id=None))
+    assert homeless.warehouse_id is None
+    assert homeless.scope_warehouse_id == NO_WAREHOUSE
+
+    chosen = ToolContext(db=None, user=SimpleNamespace(id="s", role="super_admin", warehouse_id="home", _active_warehouse_id=WH))
+    assert chosen.warehouse_id == WH and chosen.scope_warehouse_id == WH
+
+
+def test_chatbot_orm_scoping_fails_closed_for_an_admin_without_a_warehouse():
+    from sqlalchemy.dialects import postgresql
+
+    from app.ai.agent.scoping import scope_asset_query
+    from app.ai.agent.tools import ToolContext
+    from app.models import Asset
+    from sqlalchemy.orm import Query
+
+    ctx = ToolContext(db=None, user=SimpleNamespace(id="u", role="admin", warehouse_id=None))
+    sql = str(scope_asset_query(Query(Asset), ctx).statement.compile(dialect=postgresql.dialect()))
+    assert "false" in sql.lower()
+
+
+# ── help answers (RAG) ────────────────────────────────────────────────────────
+
+_HITS = [
+    {"source": "faq", "title": "how to reset my password", "content": "Contact the admins.", "similarity": 0.64},
+    {"source": "article", "title": "Brake Health", "content": "Brakes are safety-critical.", "similarity": 0.4},
+]
+
+
+def _help_ctx():
+    from app.ai.agent.tools import ToolContext
+
+    return ToolContext(db=None, user=SimpleNamespace(id="u", role="user", warehouse_id=WH, full_name="Ann Lee"))
+
+
+def test_help_answer_with_nothing_relevant_says_not_covered():
+    from app.ai.agent.tools import answer_from_help
+
+    out = answer_from_help("anything", _help_ctx(), [])
+    assert "couldn't find" in out["answer"]
+
+
+def test_help_answer_cites_sources_and_fences_content(monkeypatch):
+    import app.ai.agent.guardrails as guardrails
+    from app.ai.agent.tools import answer_from_help
+
+    seen = {}
+
+    def fake(*, messages, **kw):
+        seen["m"] = messages
+        return "Here is how.", ""
+
+    monkeypatch.setattr(guardrails, "call_groq", fake)
+    out = answer_from_help("reset password?", _help_ctx(), _HITS)
+    assert "Sources: FAQ: how to reset my password; Article: Brake Health" in out["answer"]
+    assert "<help_content>" in seen["m"][-1]["content"]
+    assert seen["m"][0]["content"] == guardrails.PROMPT_GUARD
+
+
+def test_help_answer_not_found_from_model_is_reported_honestly(monkeypatch):
+    import app.ai.agent.guardrails as guardrails
+    from app.ai.agent.tools import answer_from_help
+
+    monkeypatch.setattr(guardrails, "call_groq", lambda **kw: ("NOT_FOUND", ""))
+    assert "couldn't find" in answer_from_help("q", _help_ctx(), _HITS)["answer"]
+
+
+def test_help_answer_falls_back_to_the_top_item_when_the_model_is_down(monkeypatch):
+    import app.ai.agent.guardrails as guardrails
+    from app.ai.agent.tools import answer_from_help
+
+    def down(**kw):
+        raise RuntimeError("model unavailable")
+
+    monkeypatch.setattr(guardrails, "call_groq", down)
+    out = answer_from_help("q", _help_ctx(), _HITS)
+    assert "how to reset my password" in out["answer"] and "Contact the admins." in out["answer"]
+
+
+def test_record_widget_reaches_the_api_response(monkeypatch):
+    import app.routers.chatbot as chatbot
+
+    monkeypatch.setattr(chatbot, "run_agent", lambda **kw: {
+        "answer": "card", "action_buttons": [], "tool_trace": [],
+        "widget_type": "RECORD_SUMMARY", "widget_data": {"type": "ticket", "id": "1"},
+    })
+    user = SimpleNamespace(id="u", role="user", warehouse_id=WH)
+    resp = chatbot.chatbot_agent(chatbot.AgentRequest(question="latest ticket"), db=None, current_user=user)
+    assert resp.widget_type == "RECORD_SUMMARY" and resp.widget_data["type"] == "ticket"
