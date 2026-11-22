@@ -145,15 +145,17 @@ def _run_cost_prediction_for_asset(asset_id: str, db: Session, current_user: Pro
     """
     from app.main import breakdown_cost_bundle
 
-    if breakdown_cost_bundle is None:
-        raise HTTPException(status_code=503, detail="Cost model not loaded")
-
+    # Access is checked before model availability, so a caller who cannot see
+    # the asset always gets the same 404, whatever state the server is in.
     asset = db.query(Asset).filter(Asset.id == asset_id).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
     assert_asset_in_scope(asset, current_user)
     if not is_admin_role(current_user) and not user_can_view_asset(asset, current_user):
         raise HTTPException(status_code=404, detail="Asset not found")
+
+    if breakdown_cost_bundle is None:
+        raise HTTPException(status_code=503, detail="Cost model not loaded")
 
     last_event = (
         db.query(MaintenanceEvent)
