@@ -1,0 +1,339 @@
+{
+  "description": "Golden set for chatbot help retrieval (FAQs + knowledge base). 'tuning' items were used to choose the threshold and FAQ representation; 'heldout' items were written afterwards and never used for tuning. 'expected' lists title substrings, any of which counts as correct. 'off_topic' questions share no subject with the help content and must retrieve nothing. 'hard_negative' questions mention PredictiX subjects (places, features) that the help content does not answer: retrieval may return related items, so the answer step must reply that the question is not covered (checked by the live-LLM evaluation).",
+  "answerable": [
+    {
+      "split": "tuning",
+      "q": "I can't remember my password, what now?",
+      "expected": [
+        "forgot my password",
+        "reset my password"
+      ]
+    },
+    {
+      "split": "tuning",
+      "q": "Where do I change the password I log in with?",
+      "expected": [
+        "change my password",
+        "reset my password"
+      ]
+    },
+    {
+      "split": "tuning",
+      "q": "How do I sign out of PredictiX?",
+      "expected": [
+        "log out"
+      ]
+    },
+    {
+      "split": "tuning",
+      "q": "How can I raise a new maintenance request?",
+      "expected": [
+        "open a ticket"
+      ]
+    },
+    {
+      "split": "tuning",
+      "q": "Where can I see the tickets I submitted?",
+      "expected": [
+        "view my tickets"
+      ]
+    },
+    {
+      "split": "tuning",
+      "q": "What do the different ticket priority levels mean?",
+      "expected": [
+        "ticket priorities",
+        "Ticket Priority Thresholds"
+      ]
+    },
+    {
+      "split": "tuning",
+      "q": "What states can a ticket be in?",
+      "expected": [
+        "ticket statuses"
+      ]
+    },
+    {
+      "split": "tuning",
+      "q": "How does the system predict that a vehicle will break down?",
+      "expected": [
+        "failure prediction work",
+        "failure probability"
+      ]
+    },
+    {
+      "split": "tuning",
+      "q": "What does the failure probability number mean?",
+      "expected": [
+        "failure probability score"
+      ]
+    },
+    {
+      "split": "tuning",
+      "q": "What counts as a critical alert?",
+      "expected": [
+        "critical alerts"
+      ]
+    },
+    {
+      "split": "tuning",
+      "q": "How do I find a particular vehicle?",
+      "expected": [
+        "search for an asset",
+        "view assets"
+      ]
+    },
+    {
+      "split": "tuning",
+      "q": "How do I update my phone number or details?",
+      "expected": [
+        "update my profile"
+      ]
+    },
+    {
+      "split": "tuning",
+      "q": "How can I upload a new profile photo?",
+      "expected": [
+        "Change Profile Picture"
+      ]
+    },
+    {
+      "split": "tuning",
+      "q": "How do I talk to the support team?",
+      "expected": [
+        "contact support",
+        "access help"
+      ]
+    },
+    {
+      "split": "tuning",
+      "q": "Is my information kept safe?",
+      "expected": [
+        "data secure"
+      ]
+    },
+    {
+      "split": "tuning",
+      "q": "What is this application for?",
+      "expected": [
+        "what is predictix"
+      ]
+    },
+    {
+      "split": "tuning",
+      "q": "How often should a Toyota forklift get serviced?",
+      "expected": [
+        "Toyota Forklift"
+      ]
+    },
+    {
+      "split": "tuning",
+      "q": "What does ISO 55000 say about fleet risk?",
+      "expected": [
+        "ISO 55000"
+      ]
+    },
+    {
+      "split": "tuning",
+      "q": "Why do brakes matter so much for safety?",
+      "expected": [
+        "Brake Health"
+      ]
+    },
+    {
+      "split": "tuning",
+      "q": "How do engine hours affect failure risk?",
+      "expected": [
+        "Engine Hours"
+      ]
+    },
+    {
+      "split": "heldout",
+      "q": "My password has slipped my mind, can you help?",
+      "expected": [
+        "forgot my password",
+        "reset my password"
+      ]
+    },
+    {
+      "split": "heldout",
+      "q": "How do I log off?",
+      "expected": [
+        "log out"
+      ]
+    },
+    {
+      "split": "heldout",
+      "q": "I want to report a broken forklift",
+      "expected": [
+        "open a ticket",
+        "report a bug"
+      ]
+    },
+    {
+      "split": "heldout",
+      "q": "Where is the list of tickets I created?",
+      "expected": [
+        "view my tickets"
+      ]
+    },
+    {
+      "split": "heldout",
+      "q": "What does high, medium and low priority mean on a ticket?",
+      "expected": [
+        "ticket priorities",
+        "Ticket Priority Thresholds"
+      ]
+    },
+    {
+      "split": "heldout",
+      "q": "What is the meaning of open, in progress and closed?",
+      "expected": [
+        "ticket statuses"
+      ]
+    },
+    {
+      "split": "heldout",
+      "q": "Explain the failure probability percentage",
+      "expected": [
+        "failure probability score",
+        "failure prediction work"
+      ]
+    },
+    {
+      "split": "heldout",
+      "q": "How is a breakdown forecast made?",
+      "expected": [
+        "failure prediction work",
+        "failure probability"
+      ]
+    },
+    {
+      "split": "heldout",
+      "q": "Which alerts are considered critical?",
+      "expected": [
+        "critical alerts"
+      ]
+    },
+    {
+      "split": "heldout",
+      "q": "How do I look up a truck by its code?",
+      "expected": [
+        "search for an asset",
+        "view assets"
+      ]
+    },
+    {
+      "split": "heldout",
+      "q": "Can I edit my contact details?",
+      "expected": [
+        "update my profile"
+      ]
+    },
+    {
+      "split": "heldout",
+      "q": "Change my avatar",
+      "expected": [
+        "Change Profile Picture",
+        "update my profile"
+      ]
+    },
+    {
+      "split": "heldout",
+      "q": "Who can I email for help?",
+      "expected": [
+        "contact support",
+        "access help"
+      ]
+    },
+    {
+      "split": "heldout",
+      "q": "Does PredictiX protect my personal data?",
+      "expected": [
+        "data secure"
+      ]
+    },
+    {
+      "split": "heldout",
+      "q": "What is PredictiX?",
+      "expected": [
+        "what is predictix"
+      ]
+    },
+    {
+      "split": "heldout",
+      "q": "Service interval for Toyota forklifts",
+      "expected": [
+        "Toyota Forklift"
+      ]
+    },
+    {
+      "split": "heldout",
+      "q": "What are the ISO 55000 risk benchmarks for a fleet?",
+      "expected": [
+        "ISO 55000"
+      ]
+    },
+    {
+      "split": "heldout",
+      "q": "How does load affect tire health?",
+      "expected": [
+        "Tire Health"
+      ]
+    },
+    {
+      "split": "heldout",
+      "q": "What does SMRP recommend for preventive maintenance coverage?",
+      "expected": [
+        "SMRP"
+      ]
+    },
+    {
+      "split": "heldout",
+      "q": "How should hydraulic systems be looked after?",
+      "expected": [
+        "Hydraulic Health"
+      ]
+    },
+    {
+      "split": "heldout",
+      "q": "What does my role allow me to do?",
+      "expected": [
+        "what is my role"
+      ]
+    },
+    {
+      "split": "heldout",
+      "q": "How do I use the assistant?",
+      "expected": [
+        "use the chatbot"
+      ]
+    },
+    {
+      "split": "heldout",
+      "q": "How do I get to the dashboard?",
+      "expected": [
+        "navigate to dashboard"
+      ]
+    }
+  ],
+  "off_topic": [
+    "What is the capital of France?",
+    "Give me a chocolate cake recipe",
+    "Who won the football world cup?",
+    "Write me a poem about the sea",
+    "What is the price of bitcoin today?",
+    "Translate hello into Japanese",
+    "Recommend a good movie for tonight",
+    "Explain quantum computing",
+    "What is 2 + 2?",
+    "Tell me a joke"
+  ],
+  "hard_negative": [
+    "What's the weather in Colombo today?",
+    "Who is the president of Sri Lanka?",
+    "What is the phone number of the Colombo warehouse manager?",
+    "Can PredictiX order spare parts for me automatically?",
+    "How do I enable two factor authentication in PredictiX?"
+  ]
+}

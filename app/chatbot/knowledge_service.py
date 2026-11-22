@@ -252,6 +252,23 @@ def search_faqs(db, query: str, match_count: int, query_vector: Optional[list[fl
 _PRODUCT_NAME_RE = re.compile(r"\b(?:(?:in|of|on|for|with|to|into|from|use|using)\s+)?predictix\b", re.IGNORECASE)
 
 
+_FILLER_WORDS = frozenset(
+    "a an the is are was what whats how do does did can could i me my you your we "
+    "it this that to of in on for and or please tell about".split()
+)
+
+
+def _ranking_query(query: str) -> str:
+    """The query with the product name removed, unless that leaves no content.
+
+    "What is PredictiX?" keeps the name, because without it nothing is left to
+    match; "How do I sign out of PredictiX?" drops it.
+    """
+    stripped = _PRODUCT_NAME_RE.sub(" ", query)
+    content = [w for w in re.findall(r"[a-z0-9]+", stripped.lower()) if w not in _FILLER_WORDS]
+    return " ".join(stripped.split()) if content else query
+
+
 def search_help(query: str, match_count: int = 4) -> list[dict]:
     """Help content for `query` from the FAQs and the knowledge base together.
 
@@ -269,7 +286,7 @@ def search_help(query: str, match_count: int = 4) -> list[dict]:
     # meaning for ranking, yet it pulls a query toward any answer that happens
     # to name the product ("sign out of PredictiX" matched the 2FA answer).
     # A query that is only about the product keeps it.
-    ranking_query = _PRODUCT_NAME_RE.sub(" ", query).strip() or query
+    ranking_query = _ranking_query(query)
     try:
         vector = embed_text(ranking_query)
     except Exception as exc:
