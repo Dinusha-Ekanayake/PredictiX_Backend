@@ -80,3 +80,9 @@ app/chatbot/scratch/
 
 # Graphify knowledge graph (local, rebuilt with `graphify update .`)
 graphify-out/
+
+# Coverage outputs (pytest --cov)
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
