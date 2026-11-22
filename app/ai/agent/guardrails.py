@@ -52,8 +52,30 @@ def is_in_app_path(path: Any) -> bool:
 
 
 def guarded_call_groq(*, messages: list[dict], **kwargs: Any):
-    """call_groq with PROMPT_GUARD as the first system message."""
-    return call_groq(messages=[{"role": "system", "content": PROMPT_GUARD}, *messages], **kwargs)
+    """call_groq with PROMPT_GUARD as the first system message.
+
+    Each call is added to the current AI trace (purpose, model, latency,
+    outcome and a preview of the reply).
+    """
+    import time
+
+    from app.ai.agent.tracing import record
+
+    purpose = next(
+        (str(m.get("content", ""))[:120] for m in messages if m.get("role") == "system"),
+        str(messages[-1].get("content", ""))[:120] if messages else "",
+    )
+    started = time.monotonic()
+    try:
+        reply, fallback = call_groq(messages=[{"role": "system", "content": PROMPT_GUARD}, *messages], **kwargs)
+    except Exception as exc:
+        record("llm_call", purpose=purpose, model=kwargs.get("model"), ok=False,
+               latency_ms=int((time.monotonic() - started) * 1000), error=f"{type(exc).__name__}: {exc}")
+        raise
+    record("llm_call", purpose=purpose, model=kwargs.get("model"), ok=True,
+           latency_ms=int((time.monotonic() - started) * 1000),
+           reply_preview=str(reply)[:300], fallback_note=fallback or None)
+    return reply, fallback
 
 
 def clamp(text: Any, limit: int) -> str:

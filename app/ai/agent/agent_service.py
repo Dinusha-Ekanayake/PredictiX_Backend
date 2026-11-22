@@ -29,6 +29,7 @@ from .tools import (
 )
 from .actions.insert_actions import handle_action
 from app.ai.agent.guardrails import guarded_call_groq as call_groq
+from app.ai.agent.tracing import current_trace, record, set_intent
 
 log = logging.getLogger("predictix.agent")
 
@@ -233,10 +234,17 @@ def run_agent(
         question = _rewrite_query_with_history(question, history)
         if question != original_q:
             log.info("Rewrote query: '%s' -> '%s'", original_q, question)
+            record("rewrite", original=original_q, rewritten=question)
 
     tool_trace: list[dict] = []
     intent = _classify_intent(question)
     log.info("Intent classified as: %s for question: %s", intent, question[:80])
+    set_intent(intent)
+    trace = current_trace()
+    decided_by = "llm" if trace and any(
+        st.get("kind") == "llm_call" and "PredictiX Router" in str(st.get("purpose")) for st in trace.steps
+    ) else "keyword rules"
+    record("intent", intent=intent, decided_by=decided_by)
 
     try:
         if intent == INTENT_GREETING:
@@ -273,10 +281,14 @@ def run_agent(
 
     except Exception as e:
         log.exception("Handler crashed for intent %s", intent)
+        record("error", where=f"handler for {intent}", error=f"{type(e).__name__}: {e}")
         result = {
             "answer": "⚠️ Oops! I ran into an unexpected issue while processing your request. Please try again in a moment.",
             "action_buttons": [],
         }
+
+    for step in tool_trace:
+        record("handler", name=step.get("name"), note=step.get("result_preview"))
 
     return {
         "answer": result.get("answer", "I'm sorry, I couldn't generate a response."),

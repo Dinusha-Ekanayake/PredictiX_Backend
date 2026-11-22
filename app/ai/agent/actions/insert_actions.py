@@ -201,6 +201,10 @@ def handle_action(question: str, ctx: ToolContext) -> dict:
         data = _parse_action_rule_based(question)
         action = data.get("action")
         
+    from app.ai.agent.tracing import record
+
+    record("action", action=action or "none", requested=data or {})
+
     if not data or action == "unauthorized":
         return {"answer": "🔒 I am only allowed to create or update maintenance records. I cannot delete existing data.", "action_buttons": []}
 

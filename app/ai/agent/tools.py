@@ -174,6 +174,8 @@ def handle_navigation(question: str, ctx: ToolContext) -> dict:
 
 
 HELP_NOT_FOUND = "NOT_FOUND"
+# How far below the best help match another item may score and still be used.
+HELP_SCORE_MARGIN = 0.12
 _SUPPORT_EMAIL = "neuromindspredictix@gmail.com"
 
 
@@ -207,6 +209,10 @@ def answer_from_help(question: str, ctx: ToolContext, hits: list[dict]) -> dict:
 
     if not hits:
         return _help_not_covered()
+    # Keep only items about as relevant as the best one, so weaker matches
+    # neither distract the model nor get cited as sources it did not use.
+    best = hits[0].get("similarity", 0.0)
+    hits = [h for h in hits if h.get("similarity", 0.0) >= best - HELP_SCORE_MARGIN][:3]
 
     context = fence_untrusted(
         "help_content",

@@ -37,6 +37,8 @@ MAX_EMBED_CHARS = 2000
 MIN_SEMANTIC_SIMILARITY = 0.30
 MIN_LEXICAL_SCORE = 0.10
 _LEXICAL_CACHE_SECONDS = 300
+# FAQ writes refresh the FAQ index directly, so this is only a safety net.
+_FAQ_CACHE_SECONDS = 3600
 
 _DEFAULT_EMBEDDING_URL = (
     f"https://router.huggingface.co/hf-inference/models/{EMBEDDING_MODEL}"
@@ -103,7 +105,7 @@ def embed_text(value: str) -> list[float]:
     value = (value or "")[:MAX_EMBED_CHARS]
     model = _get_local_model()
     if model is not None:
-        return [float(x) for x in model.encode(value, normalize_embeddings=True)]
+        return [float(x) for x in model.encode(value, normalize_embeddings=True, show_progress_bar=False)]
     return _embed_hosted(value)
 
 
@@ -173,7 +175,7 @@ def invalidate_faq_index() -> None:
 def _load_faq_index(db) -> dict:
     global _faq_index
     with _faq_lock:
-        if _faq_index is not None and time.monotonic() - _faq_index["loaded_at"] <= _LEXICAL_CACHE_SECONDS:
+        if _faq_index is not None and time.monotonic() - _faq_index["loaded_at"] <= _FAQ_CACHE_SECONDS:
             return _faq_index
         rows = db.execute(text(
             "SELECT id, question, answer, category, tags FROM faqs WHERE is_active"
@@ -212,6 +214,21 @@ def _as_tags(raw) -> list[str]:
     if isinstance(raw, str) and raw.strip():
         return [t.strip() for t in raw.strip("{}").split(",") if t.strip()]
     return []
+
+
+def warm_up() -> None:
+    """Load the embedding model and build the FAQ index ahead of the first
+    question, so that question does not wait for them. Safe to call from a
+    background thread; failures only mean the first question does the work."""
+    from app.db.session import SessionLocal
+
+    try:
+        embed_text("warm up")
+        with SessionLocal() as db:
+            _load_faq_index(db)
+        log.info("Help search warmed up.")
+    except Exception as exc:
+        log.warning("Help search warm-up skipped: %s", exc)
 
 
 def search_faqs(db, query: str, match_count: int, query_vector: Optional[list[float]]) -> list[dict]:
@@ -306,7 +323,27 @@ def search_help(query: str, match_count: int = 4) -> list[dict]:
         log.error("Help search failed (%s): %s", type(exc).__name__, exc)
         return []
     hits.sort(key=lambda h: h["similarity"], reverse=True)
-    return hits[:match_count]
+    hits = hits[:match_count]
+    _trace_retrieval("faqs+knowledge_base", query, ranking_query, vector is not None, hits)
+    return hits
+
+
+def _trace_retrieval(corpus: str, query: str, ranking_query: str, semantic: bool, hits: list[dict]) -> None:
+    from app.ai.agent.tracing import record
+
+    record(
+        "retrieval",
+        corpus=corpus,
+        method="semantic" if semantic else "keyword (embedding unavailable)",
+        query=query,
+        ranking_query=ranking_query,
+        threshold=MIN_SEMANTIC_SIMILARITY if semantic else MIN_LEXICAL_SCORE,
+        hits=[
+            {"source": h.get("source", "article"), "id": str(h.get("id")), "title": h.get("title"),
+             "score": round(float(h.get("similarity", 0.0)), 4)}
+            for h in hits
+        ],
+    )
 
 
 def _semantic_articles(db, vector: list[float], match_count: int) -> list[dict]:

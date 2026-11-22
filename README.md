@@ -947,6 +947,39 @@ data fences. What data each caller can reach is enforced in code, not by the pro
 `safe_sql.py` (generated SQL), `scoping.py` (chatbot lookups and actions) and `app/deps.py` (the
 REST API) apply the same warehouse and ownership rules.
 
+### Tracing an AI answer back
+
+Every chatbot reply and AI warehouse report gets an audit trace, stored in the
+`ai_traces` table (migration 013) by `app/ai/agent/tracing.py`. The chat widget
+shows a short reference under each answer (`Ref c4d8538b`); click to copy the
+full id.
+
+```
+GET /chatbot/traces/{trace_id}     one trace with every step, in order
+GET /chatbot/traces?user_id=&channel=chatbot|report&limit=50   recent traces, newest first
+```
+
+Users see their own traces, admins those of their active warehouse, super
+admins all; anything else is a 404. A trace records who asked (role,
+warehouse), the question and answer, and each step with its time offset:
+
+| Step | Recorded |
+|---|---|
+| `intent` | the route taken and whether keyword rules or the LLM decided it |
+| `rewrite` | a follow-up rewritten from the chat history |
+| `retrieval` | corpus, method, the query used, every hit with source, id, title and score |
+| `llm_call` | purpose, model, latency, success, a preview of the reply |
+| `sql` | the generated SQL, the caller's scope, and the sandbox outcome (refused and why, database error, or rows returned) |
+| `action` | a create or update the chatbot was asked to perform |
+| `report_context` | for reports, the size of the live data and the standards documents used |
+| `result` | the answer, its buttons and widget |
+
+Recording never changes or delays an answer: outside a trace it is a no-op, and
+a failed save is logged and dropped. Traces hold questions, answers and SQL,
+so they stay in the project database behind the same access rules as the rest
+of the API; set a retention period that suits your policy (for example a
+scheduled `DELETE FROM ai_traces WHERE created_at < now() - interval '180 days'`).
+
 ### Retrieval (RAG)
 
 | Corpus | Table | Used by | Code |

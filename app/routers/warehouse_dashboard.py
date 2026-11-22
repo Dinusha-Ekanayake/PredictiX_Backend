@@ -698,20 +698,34 @@ def generate_warehouse_report(
     returns AI sections + raw context + kb_annotations for PDF export.
     Admin access only.
     """
+    from app.ai.agent.tracing import finish_trace, record, start_trace
+
+    wh_id = active_warehouse_id(current_user)
+    start_trace(channel="report", user=current_user, question="Generate the AI warehouse report", warehouse_id=wh_id)
     try:
         from app.agents.report_agents import run_warehouse_agent
-        wh_id = active_warehouse_id(current_user)
         result = run_warehouse_agent(db, warehouse_id=wh_id)
+        sections = result.get("ai_sections") or {}
+        trace_id = finish_trace(
+            answer=str(sections.get("insight_summary", ""))[:2000],
+            sections=sorted(sections.keys()),
+        )
         return {
             "status":         "success",
             "ai_sections":    result["ai_sections"],
             "context":        result["context"],
-            "kb_annotations": result.get("kb_annotations", {}),  # NEW
+            "kb_annotations": result.get("kb_annotations", {}),
+            "trace_id":       trace_id,
         }
     except RuntimeError as e:
+        record("error", where="run_warehouse_agent", error=str(e))
+        finish_trace(answer="", status="error")
         raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Report generation failed: {str(e)}")
+        record("error", where="run_warehouse_agent", error=f"{type(e).__name__}: {e}")
+        finish_trace(answer="", status="error")
+        log.exception("Report generation failed")
+        raise HTTPException(status_code=500, detail="Report generation failed. Please try again.")
 
 
 @warehouse_dashboard_router.post("/chat-route", dependencies=[Depends(report_rate_limit)])

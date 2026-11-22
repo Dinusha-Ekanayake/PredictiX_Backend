@@ -316,8 +316,27 @@ def run_scoped_query(engine: Engine, sql: str, scope: SqlScope) -> list[dict]:
 
     Raises UnsafeSQLError for rejected SQL and lets database errors propagate
     so the caller can retry with a corrected query. Nothing it does persists.
+    The SQL, the scope it ran under and its outcome go to the current AI trace.
     """
-    query = validate_generated_sql(sql)
+    from app.ai.agent.tracing import record
+
+    scope_note = {"role": "admin" if scope.is_admin else "user", "warehouse_id": scope.warehouse_id}
+    try:
+        query = validate_generated_sql(sql)
+    except UnsafeSQLError as refused:
+        record("sql", sql=sql, outcome="refused by sandbox", reason=str(refused), scope=scope_note)
+        raise
+    try:
+        rows = _execute_scoped(engine, query, scope)
+    except Exception as exc:
+        record("sql", sql=query, outcome="database error", error=f"{type(exc).__name__}: {str(exc).splitlines()[0][:300]}",
+               scope=scope_note)
+        raise
+    record("sql", sql=query, outcome="ok", rows=len(rows), scope=scope_note)
+    return rows
+
+
+def _execute_scoped(engine: Engine, query: str, scope: SqlScope) -> list[dict]:
     with engine.connect() as conn:
         trans = conn.begin()
         try:

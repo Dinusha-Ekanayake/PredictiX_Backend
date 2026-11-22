@@ -1127,8 +1127,26 @@ def run_warehouse_agent(db: Session, warehouse_id: str | None = None) -> dict:
         HumanMessage(content=f"Generate the full KB-Enhanced warehouse report:\n\n{combined_prompt}"),
     ]
 
-    response = llm.invoke(messages)
+    import time as _time
+    from app.ai.agent.tracing import record
+
+    record(
+        "report_context",
+        warehouse_id=warehouse_id,
+        context_chars=len(context_text),
+        kb_chunks=len(relevant_chunks),
+        kb_sources=[c.get("id") for c in relevant_chunks],
+    )
+    started = _time.monotonic()
+    try:
+        response = llm.invoke(messages)
+    except Exception as exc:
+        record("llm_call", purpose="warehouse report", model=getattr(llm, "model_name", None), ok=False,
+               latency_ms=int((_time.monotonic() - started) * 1000), error=f"{type(exc).__name__}: {exc}")
+        raise
     content = response.content.strip()
+    record("llm_call", purpose="warehouse report", model=getattr(llm, "model_name", None), ok=True,
+           latency_ms=int((_time.monotonic() - started) * 1000), reply_preview=content[:300])
 
     # Strip code fences if model added them
     if content.startswith("```"):

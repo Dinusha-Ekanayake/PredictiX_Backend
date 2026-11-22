@@ -374,6 +374,15 @@ async def lifespan(_: FastAPI):
     else:
         log.info("HuggingFace models disabled (DISABLE_HF_MODELS=true). Skipping warmup.")
 
+    # Warm the chatbot's help search in the background, so the first question
+    # does not wait for the embedding model and the FAQ index.
+    if os.getenv("WARM_HELP_SEARCH", "true").lower() == "true":
+        import threading
+
+        from app.chatbot.knowledge_service import warm_up as _warm_help_search
+
+        threading.Thread(target=_warm_help_search, daemon=True, name="help_search_warmup").start()
+
     # Only the deployed API should run the background jobs, since every process
     # that runs them writes predictions and sends reminder mail against the same
     # database. Dev servers and CI set SCHEDULER_ENABLED=false.

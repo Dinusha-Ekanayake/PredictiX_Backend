@@ -176,7 +176,10 @@ def test_help_answer_cites_sources_and_fences_content(monkeypatch):
 
     monkeypatch.setattr(guardrails, "call_groq", fake)
     out = answer_from_help("reset password?", _help_ctx(), _HITS)
-    assert "Sources: FAQ: how to reset my password; Article: Brake Health" in out["answer"]
+    # Brake Health (0.40) is far below the best match (0.64), so it is neither
+    # sent to the model nor cited.
+    assert "Sources: FAQ: how to reset my password*" in out["answer"]
+    assert "Brake Health" not in seen["m"][-1]["content"]
     assert "<help_content>" in seen["m"][-1]["content"]
     assert seen["m"][0]["content"] == guardrails.PROMPT_GUARD
 

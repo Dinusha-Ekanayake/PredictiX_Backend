@@ -84,7 +84,25 @@ class KBVectorStore:
     # ── public API ────────────────────────────────────────────────────────
 
     def retrieve(self, query: str, top_k: int = 4, min_score: float = 0.25) -> list[dict]:
-        """Top `top_k` documents for `query` scoring at least `min_score`."""
+        """Top `top_k` documents for `query` scoring at least `min_score`.
+
+        The query, method and every returned document (id, tags, score) are
+        added to the current AI trace.
+        """
+        hits = self._retrieve(query, top_k, min_score)
+        from app.ai.agent.tracing import record
+
+        record(
+            "retrieval",
+            corpus="kb_documents",
+            method=hits[0]["retrieval"] if hits else "none",
+            query=query,
+            threshold=min_score,
+            hits=[{"id": h["id"], "tags": h.get("tags", [])[:3], "score": round(h["score"], 4)} for h in hits],
+        )
+        return hits
+
+    def _retrieve(self, query: str, top_k: int, min_score: float) -> list[dict]:
         try:
             vector = embed_text(query)
         except Exception as e:
