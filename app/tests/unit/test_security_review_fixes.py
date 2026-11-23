@@ -59,7 +59,7 @@ def test_admin_without_a_warehouse_sees_nothing():
 
 
 def test_image_type_comes_from_the_file_bytes():
-    from app.routers.assets import _image_extension
+    from app.services.image_upload_service import image_extension as _image_extension
 
     assert _image_extension(b"\xff\xd8\xff\xe0rest") == "jpg"
     assert _image_extension(b"\x89PNG\r\n\x1a\nrest") == "png"

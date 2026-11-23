@@ -29,7 +29,7 @@ from app.deps import (
 )
 from app.models import Asset, AssetAssignment, Department, PdmBatchPrediction, Profile, Warehouse
 from app.core.rate_limit import login_rate_limit
-from app.core.security import hash_password, verify_password
+from app.services import account_service, image_upload_service
 from app.schemas.profile import ProfileOut, ProfileUpdate
 from app.schemas.user_profile import UserProfileUpdate
 from app.services.notification_service import NotificationService
@@ -163,13 +163,9 @@ def get_my_profile(
 
 from fastapi import BackgroundTasks
 
-# Login passwords are bcrypt-hashed; 8 characters is the floor NIST SP 800-63B sets.
-MIN_PASSWORD_LENGTH = 8
-
-
 class PasswordChange(BaseModel):
     current_password: str = Field(..., min_length=1, max_length=128)
-    new_password: str = Field(..., min_length=MIN_PASSWORD_LENGTH, max_length=128)
+    new_password: str = Field(..., min_length=account_service.MIN_PASSWORD_LENGTH, max_length=128)
 
 
 @router.put("/me/password", dependencies=[Depends(login_rate_limit)])
@@ -180,36 +176,15 @@ def change_my_password(
 ):
     """Change the caller's own password after confirming the current one.
 
-    A wrong current password is a 400, not a 401: the frontend treats any 401
-    as an expired session and would sign the user out.
+    A refused change is a 400, not a 401: the frontend treats any 401 as an
+    expired session and would sign the user out.
     """
-    profile = db.query(Profile).filter(Profile.id == current_user.id).first()
-    if profile is None:
-        raise HTTPException(status_code=400, detail="This account's password cannot be changed here.")
-
-    meta = dict(profile.meta or {}) if isinstance(profile.meta, dict) else {}
-    stored_hash = meta.get("password_hash") or ""
-    if not stored_hash:
-        raise HTTPException(status_code=400, detail="This account signs in with Google and has no password to change.")
-    if not verify_password(payload.current_password, stored_hash):
-        raise HTTPException(status_code=400, detail="Current password is incorrect.")
-    if payload.new_password == payload.current_password:
-        raise HTTPException(status_code=400, detail="Choose a password different from the current one.")
-    if payload.new_password.strip() != payload.new_password or payload.new_password.isdigit():
-        raise HTTPException(
-            status_code=400,
-            detail="Passwords cannot start or end with spaces or be numbers only.",
-        )
-
-    meta["password_hash"] = hash_password(payload.new_password)
-    profile.meta = meta
     try:
-        db.commit()
+        account_service.change_password(db, current_user.id, payload.current_password, payload.new_password)
+    except account_service.PasswordChangeRejected as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except Exception:
-        db.rollback()
-        log.exception("Password change failed for %s", profile.id)
         raise HTTPException(status_code=500, detail="Password could not be changed. Please try again.")
-    log.info("Password changed for profile %s", str(profile.id)[:8])
     return {"message": "Password changed"}
 
 
@@ -315,12 +290,11 @@ def upload_my_avatar(
 
     # The type is read from the file's bytes, not the browser's header or the
     # file name, because it ends up in the stored object and the data: URL.
-    from app.routers.assets import _IMAGE_CONTENT_TYPES, _image_extension
-
-    ext = _image_extension(contents)
-    if ext is None:
-        raise HTTPException(status_code=400, detail="Upload a JPG, PNG, WebP or GIF image.")
-    content_type = _IMAGE_CONTENT_TYPES[ext]
+    try:
+        ext = image_upload_service.validate_image(contents, 5 * 1024 * 1024)
+    except (image_upload_service.ImageTooLarge, image_upload_service.UnsupportedImage) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    content_type = image_upload_service.CONTENT_TYPES[ext]
 
     user_id = str(current_user.id)
     filename = f"{user_id}/{_uuid.uuid4()}.{ext}"

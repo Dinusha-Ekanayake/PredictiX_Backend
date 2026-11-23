@@ -8,7 +8,6 @@ from app.deps import (
     get_db, get_current_user, is_admin_role, require_admin, require_user, assert_asset_in_scope,
 )
 from app.models import Asset, MaintenanceEvent, Profile
-from app.routers.assets import _assert_asset_in_scope
 from app.schemas.maintenance import (
     MaintenanceEventCreate,
     MaintenanceEventUpdate,
@@ -99,7 +98,7 @@ def log_maintenance(
     asset = db.query(Asset).filter(Asset.id == asset_id).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
-    _assert_asset_in_scope(asset, current_user)
+    assert_asset_in_scope(asset, current_user)
 
     if (
         payload.odometer_reading is not None

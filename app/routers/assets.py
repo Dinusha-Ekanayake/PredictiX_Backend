@@ -1,7 +1,6 @@
 """Assets resource, CRUD, search, assignment, status updates."""
 import logging
 from datetime import datetime
-import uuid as _uuid
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
@@ -41,6 +40,7 @@ from app.models import (
     Ticket,
 )
 from app.schemas.asset import AssetCreate, AssetOut, AssetListOut, AssetUpdate
+from app.services import image_upload_service
 from app.services.service_reminder_service import send_manual_reminder
 
 # Real values of the assets.status Postgres enum.
@@ -648,24 +648,6 @@ def get_asset(
     return obj
 
 
-ASSET_IMAGE_BUCKET = "asset-images"
-MAX_ASSET_IMAGE_BYTES = 10 * 1024 * 1024
-_IMAGE_CONTENT_TYPES = {"jpg": "image/jpeg", "png": "image/png", "gif": "image/gif", "webp": "image/webp"}
-
-
-def _image_extension(content: bytes) -> str | None:
-    """Image type read from the file's own bytes, never from its name or header."""
-    if content.startswith(b"\xff\xd8\xff"):
-        return "jpg"
-    if content.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "png"
-    if content[:6] in (b"GIF87a", b"GIF89a"):
-        return "gif"
-    if content[:4] == b"RIFF" and content[8:12] == b"WEBP":
-        return "webp"
-    return None
-
-
 @router.post("/{asset_id}/image", response_model=AssetOut, dependencies=[Depends(require_admin)])
 def upload_asset_image(
     asset_id: UUID,
@@ -673,45 +655,24 @@ def upload_asset_image(
     db: Session = Depends(get_db),
     current_user: Profile = Depends(get_current_user),
 ):
-    """Store a photo of the asset and append its URL to metadata.images.
-
-    Accepts JPG, PNG, GIF or WebP up to 10 MB. The stored object name is
-    generated here, so nothing from the client's file name reaches storage.
-    """
+    """Store a photo of the asset (JPG, PNG, GIF or WebP up to 10 MB) and add
+    it to the asset's metadata.images."""
     obj = db.query(Asset).filter(Asset.id == asset_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Asset not found")
     _assert_asset_in_scope(obj, current_user)
 
-    contents = file.file.read(MAX_ASSET_IMAGE_BYTES + 1)
-    if len(contents) > MAX_ASSET_IMAGE_BYTES:
-        raise HTTPException(status_code=413, detail="Images must be 10 MB or smaller.")
-    ext = _image_extension(contents)
-    if ext is None:
-        raise HTTPException(status_code=415, detail="Upload a JPG, PNG, WebP or GIF image.")
-
-    from app.core.storage import supabase_storage
-
-    client = supabase_storage.client
-    if client is None:
-        raise HTTPException(status_code=503, detail="Image storage is not configured.")
-    object_path = f"{asset_id}/{_uuid.uuid4().hex}.{ext}"
+    content = file.file.read(image_upload_service.MAX_ASSET_IMAGE_BYTES + 1)
     try:
-        supabase_storage._ensure_bucket_exists(ASSET_IMAGE_BUCKET)
-        bucket = client.storage.from_(ASSET_IMAGE_BUCKET)
-        bucket.upload(path=object_path, file=contents, file_options={"content-type": _IMAGE_CONTENT_TYPES[ext]})
-        image_url = str(bucket.get_public_url(object_path)).rstrip("?")
-    except Exception as exc:
-        log.warning("Asset image upload failed for %s: %s", asset_id, exc)
-        raise HTTPException(status_code=502, detail="The image could not be stored. Please try again.")
-
-    # A new dict, so SQLAlchemy sees the JSONB column as changed.
-    meta = dict(obj.meta or {})
-    meta["images"] = [*(meta.get("images") or []), image_url]
-    obj.meta = meta
-    db.commit()
-    db.refresh(obj)
-    return obj
+        return image_upload_service.add_asset_image(db, obj, content)
+    except image_upload_service.ImageTooLarge as exc:
+        raise HTTPException(status_code=413, detail=str(exc))
+    except image_upload_service.UnsupportedImage as exc:
+        raise HTTPException(status_code=415, detail=str(exc))
+    except image_upload_service.StorageUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except image_upload_service.StorageFailed as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
 
 
 @router.put("/{asset_id}", response_model=AssetOut, dependencies=[Depends(require_admin)])
