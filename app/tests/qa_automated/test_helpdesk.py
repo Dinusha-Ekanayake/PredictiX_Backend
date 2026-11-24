@@ -36,7 +36,9 @@ def test_list_faqs_calls_supabase(client):
     mock_chain.eq.return_value = mock_chain
     mock_chain.order.return_value.execute.return_value = mock_resp
     
-    with patch("app.routers.faqs.supabase.from_", return_value=mock_chain):
+    # Replace the whole client, so the test needs no Supabase credentials.
+    with patch("app.routers.faqs.supabase") as mock_supabase:
+        mock_supabase.from_.return_value = mock_chain
         resp = client.get("/faqs/")
         
     assert resp.status_code == 200

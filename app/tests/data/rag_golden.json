@@ -315,6 +315,13 @@
       "expected": [
         "navigate to dashboard"
       ]
+    },
+    {
+      "split": "heldout",
+      "q": "How do I enable two factor authentication in PredictiX?",
+      "expected": [
+        "two factor authentication"
+      ]
     }
   ],
   "off_topic": [
@@ -334,6 +341,6 @@
     "Who is the president of Sri Lanka?",
     "What is the phone number of the Colombo warehouse manager?",
     "Can PredictiX order spare parts for me automatically?",
-    "How do I enable two factor authentication in PredictiX?"
+    "Does PredictiX create purchase orders in SAP?"
   ]
 }

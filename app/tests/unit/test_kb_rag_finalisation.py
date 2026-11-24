@@ -324,3 +324,9 @@ def test_markdown_headings_become_sections_and_list_items_sentences():
     assert [(b.section, b.text) for b in blocks] == [
         ("Route", "Salt air daily."), ("Checks", "Rinse brake lines. Inspect terminals"),
     ]
+
+
+def test_a_knowledge_answer_citing_no_passage_is_not_covered(kb):
+    kb["hits"], kb["reply"] = [_hit()], "Batteries should be charged carefully."
+    out = _ask("How should forklift batteries be charged?")
+    assert "couldn't find that" in out["answer"] and "Sources" not in out["answer"]

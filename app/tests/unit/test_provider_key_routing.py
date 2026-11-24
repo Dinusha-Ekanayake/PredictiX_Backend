@@ -6,8 +6,10 @@ sends and the model still answers, just billed to another budget and sent from
 another account. These tests are the only thing that notices.
 
 Current routing:
-  chatbot / agent LLM        Groq   WH_GROQ_API_KEY, then CHATBOT_GROQ_API_KEY
-  warehouse report LLM       Groq   WH_GROQ_API_KEY, model from WH_GROQ_MODEL
+  chatbot / agent LLM        Groq        WH_GROQ_API_KEY, then CHATBOT_GROQ_API_KEY
+  warehouse report LLM       OpenRouter  OPENROUTER_API_KEY (a paid, non-reasoning
+                                         model; Groq's free tier cannot carry the
+                                         ~7.8k tokens one report costs)
   warehouse report mail      Brevo  WH_BREVO_API_KEY
   ticket / FAQ / in-app mail Brevo  BREVO_API_KEY
 """
@@ -30,18 +32,23 @@ def test_groq_keys_are_the_chatbot_keys():
     assert "OPENROUTER" not in src
 
 
-def test_warehouse_report_llm_uses_the_warehouse_key():
+def test_warehouse_report_llm_uses_openrouter():
     """Read as text, not imported: this must hold even when the report module's
-    own dependencies are unavailable, which is exactly when it gets edited."""
+    own dependencies are unavailable, which is exactly when it gets edited.
+
+    Reports run on OpenRouter, not Groq. A Groq model here either spends the
+    token budget on reasoning and truncates the five-section JSON, or exceeds
+    the free tier's per-minute limit outright.
+    """
     repo = pathlib.Path(__file__).resolve().parents[3]
     src = (repo / "app" / "agents" / "report_agents.py").read_text(encoding="utf-8")
     body = src[src.index("def _get_llm("):]
     body = body[: body.index("\ndef ", 1)]
 
-    # Report generation is billed to the warehouse budget, not the chatbot's.
-    assert "WH_GROQ_API_KEY" in body
-    assert body.index("WH_GROQ_API_KEY") < body.index("CHATBOT_GROQ_API_KEY")
-    assert "WH_GROQ_MODEL" in body
+    assert "OPENROUTER_API_KEY" in body
+    assert "openrouter.ai" in body
+    # A Groq key here would be accepted and simply fail to authorise.
+    assert "GROQ_API_KEY" not in body
 
 
 def test_only_warehouse_report_mail_uses_the_warehouse_brevo_account():

@@ -1,10 +1,14 @@
 import os
+from typing import Optional
 
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
-    DATABASE_URL: str
-    JWT_SECRET: str
+    # Optional at import so tooling and unit tests can load the package without
+    # secrets. The server still refuses to start without them: main.lifespan
+    # calls require_runtime_settings(), and jwt_secret() fails on use.
+    DATABASE_URL: Optional[str] = None
+    JWT_SECRET: Optional[str] = None
     JWT_ALGORITHM: str = "HS256"
     # Lifetime of an access token. The frontend has no refresh flow, so this is
     # also the longest a session lasts before the user signs in again.
@@ -50,6 +54,11 @@ def scheduler_enabled() -> bool:
     deployed API should. Local dev servers and CI set SCHEDULER_ENABLED=false.
     """
     return _env_flag("SCHEDULER_ENABLED", True)
+
+
+def require_runtime_settings() -> None:
+    """Fail fast at server start when a required secret is missing."""
+    jwt_secret()
 
 
 def jwt_secret() -> str:

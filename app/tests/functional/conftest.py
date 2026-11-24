@@ -103,6 +103,8 @@ def auth(tokens):
 
 @pytest.fixture(scope="session")
 def db():
+    if not os.getenv("DATABASE_URL"):
+        pytest.skip("DATABASE_URL is not set")
     from app.db import SessionLocal
     s = SessionLocal()
     try:
@@ -251,3 +253,10 @@ def pytest_sessionfinish(session, exitstatus):
     dest = Path(session.config.rootpath) / "functional_results.json"
     rows = sorted(_COLLECTED.values(), key=lambda r: r["cid"])
     dest.write_text(json.dumps(rows, indent=1), encoding="utf-8")
+
+
+@pytest.fixture()
+def requires_db():
+    """For cases that query the database without taking the `db` fixture."""
+    if not os.getenv("DATABASE_URL"):
+        pytest.skip("DATABASE_URL is not set")

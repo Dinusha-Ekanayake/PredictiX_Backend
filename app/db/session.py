@@ -81,6 +81,17 @@ logger.info(
     POOL_SIZE + MAX_OVERFLOW,
 )
 
+class DatabaseNotConfigured(RuntimeError):
+    """DATABASE_URL (or DATABASE_PASSWORD and PROJECT_REF) is not set."""
+
+
+def _unconfigured_session(*args, **kwargs):
+    raise DatabaseNotConfigured("Database is not configured; set DATABASE_URL or DATABASE_PASSWORD and PROJECT_REF.")
+
+
+# Without a configured database the app still imports and starts: endpoints
+# return 503 through deps.get_db, and code that needs no database (the unit
+# tests, CI static checks) runs. Only an actual attempt to open a session fails.
 engine = create_engine(
     DATABASE_URL,
     # Guards against handing out a connection the pooler has already dropped.
@@ -92,6 +103,8 @@ engine = create_engine(
     max_overflow=MAX_OVERFLOW,
     pool_timeout=10,
     pool_recycle=1800,
-)
+) if DATABASE_URL else None
 
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+SessionLocal = (
+    sessionmaker(autocommit=False, autoflush=False, bind=engine) if engine is not None else _unconfigured_session
+)

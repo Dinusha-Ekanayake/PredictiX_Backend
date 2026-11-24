@@ -68,7 +68,7 @@ def test_rg_02_warehouse_report_is_scoped(client, auth, ctx, db, requires_llm):
 
 
 @case("RG-03", "Retrieve semantic context from pgvector", "Relevant information is returned")
-def test_rg_03_pgvector_retrieval():
+def test_rg_03_pgvector_retrieval(requires_db):
     from app.chatbot.knowledge_service import search_knowledge
 
     hits = search_knowledge("What does a critical health band mean for an asset?", 3)
@@ -80,7 +80,7 @@ def test_rg_03_pgvector_retrieval():
 
 
 @case("RG-04", "Generate RAG based report", "Retrieved context is included in generation")
-def test_rg_04_report_uses_retrieved_context():
+def test_rg_04_report_uses_retrieved_context(requires_db):
     from app.kb.kb_vector_store import get_kb_store
 
     store = get_kb_store()

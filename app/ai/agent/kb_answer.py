@@ -148,5 +148,9 @@ def answer_from_kb(question: str, user: Any, warehouse_id: Optional[str], db) ->
     if not text_out or NOT_FOUND in text_out:
         return _not_covered(local_law)
     cited = {m for m in re.findall(r"\[([SDW][\w-]*)\]", text_out)}
-    shown = [h for h in used if h.source_id in cited] or used
+    shown = [h for h in used if h.source_id in cited]
+    if not shown:
+        # An answer that cites none of the passages was not built from them.
+        record("guard", rule="uncited_answer", outcome="treated as not covered")
+        return _not_covered(local_law)
     return {"answer": (fallback or "") + text_out + sources_footer(shown), "action_buttons": []}
