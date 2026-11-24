@@ -8,8 +8,9 @@ considered, what was chosen and what follows from it. Format follows
 | ADR | Title | Status |
 |-----|-------|--------|
 | [0001](0001-layered-architecture.md) | Thin routers over a service layer | Accepted |
-| [0002](0002-authentication-and-authorization.md) | Authentication and authorization model | Accepted |
+| [0002](0002-authentication-and-authorization.md) | Authentication and authorization model | Accepted (amended by 0007) |
 | [0003](0003-sandboxed-text-to-sql.md) | Sandboxed text-to-SQL for the chatbot | Accepted |
 | [0004](0004-help-retrieval-rag.md) | Help retrieval (RAG) design | Accepted |
 | [0005](0005-ai-tracing.md) | In-house AI tracing instead of Langfuse or LangSmith | Accepted |
 | [0006](0006-knowledge-base-sources.md) | Knowledge-base source registry and ingestion pipeline | Accepted |
+| [0007](0007-remove-google-sign-in.md) | Remove Google sign-in | Accepted |

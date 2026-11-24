@@ -1,6 +1,6 @@
 # ADR-0002: Authentication and authorization model
 
-- Status: Accepted
+- Status: Accepted; amended by [ADR-0007](0007-remove-google-sign-in.md)
 - Date: 2026-11-23
 
 ## Context
@@ -20,8 +20,10 @@ some cross-warehouse reads by id.
   `sub`; anything else raises `InvalidTokenError` and becomes a 401.
 - Token lifetime is 8 hours (`ACCESS_TOKEN_TTL_MINUTES=480`), chosen to cover a
   working shift without refresh tokens.
-- Google sign-in goes through Supabase OAuth; the backend only accepts it once
-  the Supabase session confirms a Google identity for that email.
+- Email and password is the only sign-in method. Google sign-in (Supabase
+  OAuth) was removed: accounts are provisioned by administrators, so a second
+  identity path added configuration and attack surface without serving a
+  user need. See ADR 0007.
 - Demo accounts exist behind an environment flag (on by default for the
   coursework demo) and can be turned off in production.
 - Login is rate limited per IP and per email (`app/core/rate_limit.py`); AI

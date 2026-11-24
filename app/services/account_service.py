@@ -31,7 +31,7 @@ def change_password(db: Session, user_id: Any, current_password: str, new_passwo
     meta = dict(profile.meta) if isinstance(profile.meta, dict) else {}
     stored_hash = meta.get("password_hash") or ""
     if not stored_hash:
-        raise PasswordChangeRejected("This account signs in with Google and has no password to change.")
+        raise PasswordChangeRejected("This account has no password yet. Ask an administrator to set one.")
     if not verify_password(current_password, stored_hash):
         raise PasswordChangeRejected("Current password is incorrect.")
     if new_password == current_password:

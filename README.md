@@ -521,7 +521,6 @@ Response: { "access_token": "...", "token_type": "bearer", "role": "...", ... }
           super_admin: { "requires_warehouse_selection": true, "selection_token": "...", "warehouses": [...] }
 
 POST /auth/login/select-warehouse   { "selection_token": "...", "warehouse_id": "..." }
-POST /auth/google-login             { "token": "<Supabase session token>" }
 
 Protected routes: Authorization: Bearer <token>
 ```
