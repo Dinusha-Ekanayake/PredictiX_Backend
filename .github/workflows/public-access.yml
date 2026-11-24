@@ -1,0 +1,48 @@
+name: Public access check
+
+# Uses the frontend's public anon key the way an attacker would and fails if
+# it can read or write any table, call any function or list any bucket
+# (ADR-0008). Daily, so a table created with Supabase's default grants is
+# caught within a day; and on demand after a migration.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Anon key reaches nothing
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: ci
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+      JWT_SECRET: ${{ secrets.JWT_SECRET }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Require the secrets
+        run: |
+          for name in DATABASE_URL SUPABASE_URL SUPABASE_ANON_KEY; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Secret $name is missing from the 'ci' environment."
+              exit 1
+            fi
+          done
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-prod.txt
+
+      - name: Install
+        run: pip install --prefer-binary -r requirements-prod.txt
+
+      - name: Probe with the anon key
+        run: python scripts/security/check_public_access.py

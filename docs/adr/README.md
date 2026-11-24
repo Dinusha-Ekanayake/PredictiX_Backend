@@ -14,3 +14,4 @@ considered, what was chosen and what follows from it. Format follows
 | [0005](0005-ai-tracing.md) | In-house AI tracing instead of Langfuse or LangSmith | Accepted |
 | [0006](0006-knowledge-base-sources.md) | Knowledge-base source registry and ingestion pipeline | Accepted |
 | [0007](0007-remove-google-sign-in.md) | Remove Google sign-in | Accepted |
+| [0008](0008-no-browser-database-access.md) | No direct database access from browsers | Accepted |
