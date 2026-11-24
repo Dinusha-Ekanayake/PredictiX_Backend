@@ -42,6 +42,24 @@ jobs:
       github.event.workflow_run.conclusion == 'success'
 
     steps:
+      - name: Check the production environment is configured
+        # Fail with a clear message instead of an SSH error further down.
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_APP_DIR: ${{ secrets.EC2_APP_DIR }}
+          EC2_SERVICE_NAME: ${{ secrets.EC2_SERVICE_NAME }}
+        run: |
+          missing=()
+          for name in EC2_HOST EC2_USER EC2_SSH_KEY EC2_APP_DIR EC2_SERVICE_NAME; do
+            [[ -n "${!name}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} )); then
+            echo "::error::Environment 'production' is missing: ${missing[*]} (see docs/EC2_Deployment.md, section 2)"
+            exit 1
+          fi
+
       - name: Resolve what to deploy
         id: target
         # Deploy the exact commit CI tested. A dispatch deploys the tip of the

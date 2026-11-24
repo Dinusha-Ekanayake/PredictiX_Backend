@@ -65,7 +65,7 @@ bash scripts/deploy/ec2_deploy.sh /home/ubuntu/PredictiX_Backend predictix main
 
 ### GitHub configuration
 
-Environment **`production`** (Settings → Environments). Adding a required reviewer there makes every deploy wait for approval.
+Create the environment **`production`** under Settings → Environments → New environment, using exactly that name. It is separate from the "… / production" environments that the Vercel and Supabase integrations create. Restrict its deployment branches to `main`. Adding a required reviewer makes every deploy wait for approval. The workflow checks these secrets first and names any that are missing.
 
 | Secret | Value |
 |---|---|
