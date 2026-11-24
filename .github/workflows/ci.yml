@@ -28,15 +28,17 @@ jobs:
   # ── 1. Fast checks. Fail here before spending time on tests. ──────────────
   static-checks:
     name: Static checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      # No pip cache here: this job installs nothing, and caching a directory
+      # that never gets created fails setup-python's post step, which failed
+      # this job and skipped every test job after it.
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
 
       - name: Every Python file compiles
         # Two exclusions, both model-training material rather than shipped code:
@@ -88,13 +90,13 @@ jobs:
   # ── 2. Unit tests. No database, no network, runs on every PR. ─────────────
   unit-tests:
     name: Unit tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: static-checks
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -115,11 +117,11 @@ jobs:
         # as tests are added. Integration and functional suites add more.
         run: |
           pytest app/tests/unit app/tests/qa_automated \
-            --cov --cov-report=term --cov-report=xml --cov-fail-under=25
+            --cov --cov-report=term --cov-report=xml --cov-fail-under=30
 
       - name: Upload coverage
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: backend-coverage
           path: coverage.xml
@@ -130,16 +132,16 @@ jobs:
   #      protected branches where the secret is available. ───────────────────
   integration-tests:
     name: Integration tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: unit-tests
     timeout-minutes: 25
     # Skipped on fork PRs, which cannot read repository secrets.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     environment: ci
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -191,15 +193,15 @@ jobs:
   # ── 4. Functional test plan. One case per row of the report's tables. ─────
   functional-tests:
     name: Functional test plan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: unit-tests
     timeout-minutes: 40
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     environment: ci
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -265,7 +267,7 @@ jobs:
 
       - name: Upload functional results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: functional-results
           path: functional_results.json
@@ -275,7 +277,7 @@ jobs:
   # ── 5. One status check for branch protection to require. ─────────────────
   ci-passed:
     name: CI passed
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [static-checks, unit-tests, integration-tests, functional-tests]
     if: always()
     steps:
