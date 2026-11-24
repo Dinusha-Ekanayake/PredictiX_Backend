@@ -1,28 +1,15 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from app.deps import get_db, require_admin, require_user, get_current_user, is_admin_role, assert_in_active_warehouse, scoped_warehouse_id
+from app.deps import get_db, require_admin, require_user, get_current_user, assert_in_active_warehouse
 from app.models import Profile, Ticket, TicketStatusHistory
 from app.schemas.misc import TicketStatusHistoryCreate, TicketStatusHistoryOut
+from app.services.ticket_access import can_view_ticket
 
 router = APIRouter(
     prefix="/ticket-status-history",
     tags=["Ticket Status History"],
     dependencies=[Depends(require_user)],
 )
-
-
-def _can_view_ticket(ticket: Ticket, current_user: Profile) -> bool:
-    """Same rule as tickets.py's get_ticket/list scoping, see there for
-    the full rationale."""
-    if is_admin_role(current_user):
-        # Admins see every ticket in their active warehouse, and only those.
-        wh_id = scoped_warehouse_id(current_user)
-        return bool(wh_id) and str(ticket.warehouse_id) == wh_id
-    uid = str(getattr(current_user, "id", ""))
-    user_wh_id = getattr(current_user, "warehouse_id", None)
-    if user_wh_id is not None and str(ticket.warehouse_id) == str(user_wh_id):
-        return True
-    return str(ticket.created_by) == uid or str(ticket.assigned_to) == uid
 
 
 # Status history is an audit trail. This endpoint took no caller identity, so
@@ -61,7 +48,7 @@ def list_ticket_status_history(
         raise HTTPException(status_code=400, detail="ticket_id is required")
 
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
-    if not ticket or not _can_view_ticket(ticket, current_user):
+    if not ticket or not can_view_ticket(ticket, current_user):
         raise HTTPException(status_code=404, detail="Ticket not found")
 
     return (

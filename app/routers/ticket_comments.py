@@ -3,29 +3,13 @@ from sqlalchemy.orm import Session
 from app.deps import get_db, require_user, get_current_user, is_admin_role, assert_in_active_warehouse, scoped_warehouse_id
 from app.models import Profile, Ticket, TicketComment
 from app.schemas.misc import TicketCommentCreate, TicketCommentOut
+from app.services.ticket_access import can_view_ticket
 
 router = APIRouter(
     prefix="/ticket-comments",
     tags=["Ticket Comments"],
     dependencies=[Depends(require_user)],
 )
-
-
-def _can_view_ticket(ticket: Ticket, current_user: Profile) -> bool:
-    """Same rule as tickets.py's get_ticket/list scoping: everyone can
-    view (and comment on) any ticket in their own warehouse; users also
-    keep visibility into tickets they created or are assigned to outside
-    their warehouse. Comment/edit rights on the comment itself stay
-    narrower, see delete_ticket_comment."""
-    if is_admin_role(current_user):
-        # Admins see every ticket in their active warehouse, and only those.
-        wh_id = scoped_warehouse_id(current_user)
-        return bool(wh_id) and str(ticket.warehouse_id) == wh_id
-    uid = str(getattr(current_user, "id", ""))
-    user_wh_id = getattr(current_user, "warehouse_id", None)
-    if user_wh_id is not None and str(ticket.warehouse_id) == str(user_wh_id):
-        return True
-    return str(ticket.created_by) == uid or str(ticket.assigned_to) == uid
 
 
 @router.post("/", response_model=TicketCommentOut)
@@ -37,7 +21,7 @@ def create_ticket_comment(
     ticket = db.query(Ticket).filter(Ticket.id == payload.ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    if not _can_view_ticket(ticket, current_user):
+    if not can_view_ticket(ticket, current_user):
         raise HTTPException(status_code=404, detail="Ticket not found")
 
     # user_id is always the authenticated caller, never trust a
@@ -65,7 +49,7 @@ def list_ticket_comments(
 ):
     if ticket_id:
         ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
-        if not ticket or not _can_view_ticket(ticket, current_user):
+        if not ticket or not can_view_ticket(ticket, current_user):
             raise HTTPException(status_code=404, detail="Ticket not found")
         q = db.query(TicketComment).filter(TicketComment.ticket_id == ticket_id)
     elif is_admin_role(current_user):

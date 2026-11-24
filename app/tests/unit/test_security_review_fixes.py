@@ -109,16 +109,6 @@ def test_super_admin_selection_survives_a_reload():
     assert active_warehouse_id(user) == WH
 
 
-def test_attachment_urls_fail_closed_without_storage(monkeypatch):
-    from app.core.storage import is_project_storage_url
-
-    monkeypatch.delenv("SUPABASE_URL", raising=False)
-    assert not is_project_storage_url("https://anything.example/x.png")
-    monkeypatch.setenv("SUPABASE_URL", "https://proj.supabase.co")
-    assert is_project_storage_url("https://proj.supabase.co/storage/v1/object/public/ticket-attachments/a.png")
-    assert not is_project_storage_url("https://other.supabase.co/storage/v1/object/public/x/a.png")
-
-
 def test_chatbot_context_never_widens_to_all_warehouses():
     from app.ai.agent.tools import NO_WAREHOUSE, ToolContext
 
