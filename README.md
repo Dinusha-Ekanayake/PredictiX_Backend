@@ -357,7 +357,6 @@ PredictiX_backend/
 | GET/POST | `/asset-documents` | Document management |
 | GET/POST | `/asset-summaries/generate` | AI-generated asset descriptions |
 | POST | `/asset-reports/{asset_id}` | Generate full PDF report to Supabase Storage |
-| GET | `/asset-reports/dummy/pdf` | Dummy PDF for styling test |
 
 ### Maintenance & Sensors
 
