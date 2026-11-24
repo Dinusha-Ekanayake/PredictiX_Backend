@@ -26,6 +26,7 @@ from app.schemas.survival import (
     AssetSurvivalResponse,
     ComponentSurvivalResponse,
 )
+from app.core.errors import internal_error
 
 
 router = APIRouter(
@@ -63,9 +64,9 @@ def get_component_survival(
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except FileNotFoundError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise internal_error("The survival model is not available.", e, status_code=503) from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Survival prediction failed: {e}")
+        raise internal_error("Survival prediction failed.", e) from e
 
 
 @router.get("/{asset_id}", response_model=AssetSurvivalResponse)
@@ -94,6 +95,6 @@ def get_asset_survival(
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except FileNotFoundError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise internal_error("The survival model is not available.", e, status_code=503) from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Survival prediction failed: {e}")
+        raise internal_error("Survival prediction failed.", e) from e

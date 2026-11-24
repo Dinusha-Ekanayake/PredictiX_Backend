@@ -18,6 +18,7 @@ from app.deps import get_db, get_current_user, is_admin_role, require_user, asse
 from app.ai.services.asset_component_rul_service import compute_asset_component_rul
 from app.models import Asset
 from app.schemas.asset_component_rul import AssetComponentRulResponse, ComponentRulOut
+from app.core.errors import internal_error
 
 router = APIRouter(
     prefix="/assets",
@@ -66,7 +67,7 @@ def get_asset_component_rul(
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Component RUL estimation failed: {e}")
+        raise internal_error("Component RUL estimation failed.", e) from e
 
     return AssetComponentRulResponse(
         asset_id=str(asset_id),

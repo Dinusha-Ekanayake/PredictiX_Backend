@@ -679,11 +679,9 @@ PROD_ALLOWED_ORIGINS=https://your-frontend.vercel.app
 DEV_ALLOWED_ORIGINS=http://localhost:3000,http://localhost:5173
 ALLOWED_ORIGINS=http://localhost:3000,https://your-frontend.vercel.app
 
-# Misc
-# Initial password for users an admin creates without one. Set your own value;
-# the built-in fallback is public. It is stored hashed and never accepted
-# as a login password on its own.
-DEFAULT_PASSWORD=<initial-password>
+# API docs (/docs, /redoc, /openapi.json): on by default, off when ENV=production.
+# ENABLE_API_DOCS=true|false overrides either way.
+# ENABLE_API_DOCS=
 ```
 
 Never commit `.env`. On EC2, systemd loads the same values through the service `EnvironmentFile`.

@@ -46,6 +46,7 @@ from app.deps import get_db, require_user, require_admin, get_current_user, is_a
 from app.models import Asset, Profile, Report, Ticket, Warehouse
 from app.schemas.report import ReportCreate, ReportUpdate, ReportOut
 from app.core.config import allowed_frontend_origins
+from app.core.errors import internal_error
 
 log = logging.getLogger("predictix.reports")
 
@@ -103,7 +104,7 @@ def generate_asset_report_endpoint(
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Failed to generate report: {str(e)}")
+        raise internal_error("The report could not be generated.", e) from e
 
 
 @router.get(
@@ -193,7 +194,7 @@ def generate_dummy_pdf(background_tasks: BackgroundTasks):
         )
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error("The report could not be generated.", e) from e
 
 
 # ════════════════════════════════════════════════════════════════════

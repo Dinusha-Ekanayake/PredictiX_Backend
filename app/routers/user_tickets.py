@@ -34,6 +34,7 @@ from app.schemas.user_tickets import (
 )
 from app.services import user_ticket_service as svc
 from app.services.notification_service import NotificationService
+from app.core.errors import internal_error
 from app.core.storage import is_project_storage_url
 
 router = APIRouter(prefix="/user/tickets", tags=["User - Tickets"])
@@ -179,9 +180,12 @@ def create_my_ticket(
             preset_predicted_category=payload.predicted_category,
             preset_ticket_summary=payload.ticket_summary,
         )
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Could not create ticket: {exc}") from exc
     except Exception as exc:
         db.rollback()
-        raise HTTPException(status_code=400, detail=f"Could not create ticket: {exc}")
+        raise internal_error("The ticket could not be created. Please try again.", exc) from exc
 
     background_tasks.add_task(NotificationService.notify_on_new_ticket, db, str(ticket.id))
 

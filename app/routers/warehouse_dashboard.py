@@ -13,6 +13,7 @@ log = logging.getLogger("predictix")
 from ..models import Asset, Ticket, PdmBatchPrediction, PdmPredictionHistory, MaintenanceEvent, Profile
 from fastapi import BackgroundTasks
 from ..services.dashboard_cache import DashboardCache
+from app.core.errors import internal_error
 
 warehouse_dashboard_router = APIRouter(
     prefix="/warehouse-dashboard",
@@ -65,7 +66,7 @@ def get_warehouse_summary(
     except Exception as e:
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Warehouse summary failed: {e}")
+        raise internal_error("The warehouse summary could not be loaded. Please try again.", e) from e
 
 
 def _build_warehouse_summary(db: Session, warehouse_id: str | None = None):
@@ -639,7 +640,7 @@ def get_survival_analysis(
     except Exception as e:
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Survival analysis failed: {str(e)}")
+        raise internal_error("Survival analysis failed.", e) from e
 
 
 def _build_survival_data(db: Session, warehouse_id: str | None = None):
@@ -720,7 +721,7 @@ def generate_warehouse_report(
     except RuntimeError as e:
         record("error", where="run_warehouse_agent", error=str(e))
         finish_trace(answer="", status="error")
-        raise HTTPException(status_code=503, detail=str(e))
+        raise internal_error("The report assistant is unavailable right now.", e, status_code=503) from e
     except Exception as e:
         record("error", where="run_warehouse_agent", error=f"{type(e).__name__}: {e}")
         finish_trace(answer="", status="error")
@@ -775,9 +776,9 @@ def chat_route(
                             "Please ask me to generate a report for more details.",
             }
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise internal_error("The report assistant is unavailable right now.", e, status_code=503) from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Chat routing failed: {str(e)}")
+        raise internal_error("The report assistant could not answer. Please try again.", e) from e
 from app.services.report_notification_service import ReportNotificationService
 
 @warehouse_dashboard_router.post("/notify-print", dependencies=[Depends(require_admin)])

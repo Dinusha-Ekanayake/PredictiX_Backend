@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import InterfaceError, OperationalError
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.core.config import allowed_frontend_origins, scheduler_enabled
+from app.core.config import allowed_frontend_origins, api_docs_enabled, is_production, scheduler_enabled
 
 # Application loggers write through the root logger. uvicorn configures only its
 # own loggers, so without this every INFO line from the app is dropped. Applied
@@ -457,7 +457,38 @@ async def lifespan(_: FastAPI):
     log.info("Shutting down PredictiX API.")
 
 
-app = FastAPI(title="PredictiX API", version="1.0", lifespan=lifespan)
+_docs = api_docs_enabled()
+app = FastAPI(
+    title="PredictiX API",
+    version="1.0",
+    lifespan=lifespan,
+    docs_url="/docs" if _docs else None,
+    redoc_url="/redoc" if _docs else None,
+    openapi_url="/openapi.json" if _docs else None,
+)
+
+
+# ── Security headers ──────────────────────────────────────────────────────────
+# Responses are JSON or files meant for this app only: no MIME sniffing, no
+# framing, no referrer leakage, and no caching of per-user data by browsers or
+# shared proxies. HSTS is sent only in production, where TLS terminates in
+# front of the API.
+_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-store",
+}
+
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    response = await call_next(request)
+    for name, value in _SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
+    if is_production():
+        response.headers.setdefault("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
+    return response
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
 # allowed_frontend_origins() is the single source of truth for "which

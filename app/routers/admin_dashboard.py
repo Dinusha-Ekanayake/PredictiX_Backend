@@ -38,6 +38,7 @@ from ..services.health_bands import (
     band_count_sql,
 )
 from ..services.maintenance_classification import planned_value, unplanned_value
+from app.core.errors import internal_error
 
 admin_dashboard_router = APIRouter(
     prefix="/admin-dashboard",
@@ -85,7 +86,7 @@ def get_admin_summary(
         )
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Admin dashboard failed: {e}")
+        raise internal_error("The admin dashboard could not be loaded. Please try again.", e) from e
 
 
 def _build_admin_summary(db: Session, warehouse_id: str | None = None):

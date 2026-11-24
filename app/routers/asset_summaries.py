@@ -19,6 +19,7 @@ from app.deps import (
     user_can_view_asset,
 )
 from app.models import Asset, AssetFailurePrediction, Profile
+from app.core.errors import internal_error
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +131,7 @@ async def get_summary_by_asset(
         )
     except Exception as e:
         logger.error(f"[AssetSummary] ✗ Failed for asset {asset_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Summary generation failed: {str(e)}")
+        raise internal_error("Summary generation failed.", e) from e
 
 
 @router.post("/generate", response_model=AssetSummaryResponse, dependencies=[Depends(require_admin)])

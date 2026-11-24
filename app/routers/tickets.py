@@ -37,6 +37,7 @@ from app.schemas.tickets import (
 from app.ai.services.ticket_categorization_service import categorize_ticket_text
 from app.ai.services.ticket_priority_service import predict_ticket_priority
 from app.services.notification_service import NotificationService
+from app.core.errors import internal_error
 
 router = APIRouter(prefix="/tickets", tags=["Tickets"])
 log = logging.getLogger(__name__)
@@ -780,7 +781,7 @@ def categorize_ticket_endpoint(payload: TicketCategorizationRequest):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to categorize ticket: {exc}") from exc
+        raise internal_error("The ticket could not be categorised.", exc) from exc
 
 
 @router.post(
@@ -800,4 +801,4 @@ def prioritize_ticket_endpoint(payload: TicketPriorityRequest):
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to classify ticket priority: {exc}") from exc
+        raise internal_error("The ticket priority could not be predicted.", exc) from exc

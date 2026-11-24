@@ -37,6 +37,7 @@ from app.ai.services.prediction_service import (
     run_full_prediction,
 )
 from app.ai.models.cost_estimation_model.breakdown_cost_model import predict_breakdown_cost
+from app.core.errors import internal_error
 
 router = APIRouter(
     prefix="/predictions",
@@ -167,7 +168,7 @@ def _run_cost_prediction_for_asset(asset_id: str, db: Session, current_user: Pro
     try:
         result = predict_breakdown_cost(raw, breakdown_cost_bundle, top_k=5)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Cost prediction failed: {exc}")
+        raise internal_error("Cost prediction failed.", exc) from exc
 
     return {
         **result,

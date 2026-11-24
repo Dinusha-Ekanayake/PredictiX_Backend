@@ -100,6 +100,25 @@ def _origins_from_env(var_name: str, default: list[str]) -> list[str]:
     return parsed or default
 
 
+def is_production() -> bool:
+    """True when ENV=production."""
+    return os.getenv("ENV", "").strip().lower() == "production"
+
+
+def api_docs_enabled() -> bool:
+    """Whether /docs, /redoc and /openapi.json are served.
+
+    Off in production by default so the full endpoint map is not public;
+    ENABLE_API_DOCS=true/false overrides either way.
+    """
+    raw = os.getenv("ENABLE_API_DOCS", "").strip().lower()
+    if raw in {"true", "1", "yes"}:
+        return True
+    if raw in {"false", "0", "no"}:
+        return False
+    return not is_production()
+
+
 def allowed_frontend_origins() -> list[str]:
     """The frontend origins this API trusts, single source of truth.
 
@@ -117,11 +136,10 @@ def allowed_frontend_origins() -> list[str]:
       - ALLOWED_ORIGINS: comma-separated, always appended on top of the above.
       - ENV=production excludes dev origins entirely.
     """
-    is_production = os.getenv("ENV", "").strip().lower() == "production"
     prod_origins = _origins_from_env("PROD_ALLOWED_ORIGINS", _DEFAULT_PROD_FRONTEND_ORIGINS)
     extra = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
     origins = list(set(prod_origins + extra))
-    if not is_production:
+    if not is_production():
         dev_origins = _origins_from_env("DEV_ALLOWED_ORIGINS", _DEFAULT_DEV_FRONTEND_ORIGINS)
         origins = list(set(origins + dev_origins))
     return origins

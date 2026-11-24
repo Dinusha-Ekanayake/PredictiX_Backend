@@ -18,6 +18,7 @@ from app.ai.services.ticket_summary_service import (
     generate_ticket_summary,
     get_ticket_summary_repo,
 )
+from app.core.errors import internal_error
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/ticket-summaries", tags=["Ticket Summaries"])
@@ -56,7 +57,7 @@ async def generate_summary(payload: TicketSummaryRequest):
         raise HTTPException(status_code=400, detail=f"Invalid input: {e}")
     except Exception as e:  # noqa: BLE001
         logger.error("[TicketSummary] generate failed: %s", e)
-        raise HTTPException(status_code=500, detail=f"Summary generation failed: {e}")
+        raise internal_error("Summary generation failed.", e) from e
 
 
 @router.get("/by-ticket/{ticket_id}", response_model=TicketSummaryResponse)
@@ -103,7 +104,7 @@ async def get_summary_by_ticket(
         return TicketSummaryResponse(summary=summary, generated_at=datetime.utcnow().isoformat())
     except Exception as e:  # noqa: BLE001
         logger.error("[TicketSummary] by-ticket %s failed: %s", ticket_id, e)
-        raise HTTPException(status_code=500, detail=f"Summary generation failed: {e}")
+        raise internal_error("Summary generation failed.", e) from e
 
 
 @router.get("/health")
