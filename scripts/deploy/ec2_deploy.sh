@@ -105,6 +105,11 @@ install_commit() {
   # Fail on a syntax error before touching the running service.
   "$PY" -m compileall -q app || return 1
 
+  # Query embedding model for the knowledge base (ONNX, no torch). A no-op
+  # once cached; not fatal, but without it knowledge answers fall back to
+  # the help articles.
+  HF_HUB_OFFLINE=0 "$PY" -m app.chatbot.onnx_embedder >/dev/null 2>&1     || log "warning: could not fetch the ONNX embedding model; knowledge-base answers are degraded"
+
   # Browser for the PDF export. A no-op when already installed; not fatal,
   # because without it the frontend falls back to the print dialog.
   if "$PY" -c 'import playwright' 2>/dev/null; then

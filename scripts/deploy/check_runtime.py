@@ -3,11 +3,14 @@
     python scripts/deploy/check_runtime.py            # CI (no database, no .env)
     venv/bin/python scripts/deploy/check_runtime.py   # on the EC2 instance
 
-Starts the application in-process with no database and no network calls, and
-fails unless:
+Starts the application in-process with no database, and fails unless the
+checks below pass. The only network access fetches the embedding model when
+it is not cached yet.
   * the app imports and its startup completes,
   * the PdM classifier/regressor and the breakdown-cost model are loaded,
   * the survival bundle passes its checksum and unpickles,
+  * chatbot queries can be embedded locally (sentence-transformers or ONNX),
+    so the knowledge base answers without the hosted endpoint,
   * no torch / local-model package is installed when --server is given (the
     EC2 instance cannot hold them).
 
@@ -37,12 +40,26 @@ def _isolate_from_real_services() -> None:
     dotenv.load_dotenv = lambda *args, **kwargs: False  # keep the operator's .env out of it
 
 
+def _fetch_onnx_model() -> None:
+    """Populate the model cache first: huggingface_hub reads HF_HUB_OFFLINE
+    when it is imported, and the app defaults it to offline."""
+    os.environ["HF_HUB_OFFLINE"] = "0"
+    sys.path.insert(0, str(ROOT))
+    from app.chatbot import onnx_embedder
+
+    onnx_embedder.fetch_model_files()
+
+
 def check(server: bool) -> list[str]:
     problems: list[str] = []
     if server:
         heavy = [name for name in HEAVY_PACKAGES if importlib.util.find_spec(name)]
         if heavy:
             problems.append(f"server install must not include {', '.join(heavy)}")
+    try:
+        _fetch_onnx_model()
+    except Exception as exc:  # noqa: BLE001 - reported below as a failed embedding
+        problems.append(f"ONNX embedding model could not be fetched: {exc}")
 
     _isolate_from_real_services()
     sys.path.insert(0, str(ROOT))
@@ -61,7 +78,21 @@ def check(server: bool) -> list[str]:
         _load_bundle()
     except Exception as exc:  # noqa: BLE001 - reported, not swallowed
         problems.append(f"survival bundle did not load: {exc}")
+
+    import app.chatbot.knowledge_service as knowledge
+
+    knowledge._embed_hosted = _hosted_not_allowed  # must work locally
+    try:
+        vector = knowledge.embed_text("forklift brake inspection interval")
+        if len(vector) != knowledge.EMBEDDING_DIM:
+            problems.append(f"query embedding has {len(vector)} dimensions")
+    except Exception as exc:  # noqa: BLE001
+        problems.append(f"chatbot queries cannot be embedded locally: {exc}")
     return problems
+
+
+def _hosted_not_allowed(value: str) -> list[float]:
+    raise RuntimeError("fell through to the hosted endpoint")
 
 
 def main() -> int:
@@ -73,7 +104,7 @@ def main() -> int:
     for problem in problems:
         print(f"FAIL  {problem}")
     if not problems:
-        print("OK    the API starts and every shipped model loads")
+        print("OK    the API starts, every shipped model loads and queries embed locally")
     return 1 if problems else 0
 
 

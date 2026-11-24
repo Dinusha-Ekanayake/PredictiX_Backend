@@ -29,7 +29,7 @@ The instance installs **`requirements-prod.txt`**, the server runtime. It exclud
 |---|---|
 | PdM, cost and survival models | Loaded locally from the files tracked in git (`app/ai/models/`), with checksums verified |
 | Ticket categorisation, priority and summaries | Private Hugging Face Spaces (`HF_AI_SPACE_URL`, `TICKET_SUMMARY_SPACE`, `ASSET_SUMMARY_SPACE`) |
-| Chatbot knowledge search | Queries are embedded through the hosted Hugging Face endpoint and searched in pgvector |
+| Chatbot knowledge search | Queries are embedded on the instance by ONNX Runtime with the official ONNX export of all-MiniLM-L6-v2. It produces the same vectors as the ingestion model (cosine ≥ 0.9999, `test_onnx_embedder.py`) at about 5 ms per query, and the deploy script caches it. The hosted Hugging Face endpoint is only a last resort |
 | Nightly knowledge-base refresh | Not scheduled, because it needs the local model; run it from a workstation (section 6) |
 | PDF export (`/reports/render-pdf`) | Headless Chromium through Playwright; without it the route answers 503 and the frontend falls back to the print dialog |
 
@@ -128,6 +128,7 @@ python3 -m venv venv
 ./venv/bin/pip install --upgrade pip
 ./venv/bin/pip install --prefer-binary -r requirements-prod.txt
 ./venv/bin/python -m playwright install chromium
+HF_HUB_OFFLINE=0 ./venv/bin/python -m app.chatbot.onnx_embedder   # query embedding model
 sudo ./venv/bin/python -m playwright install-deps chromium   # shared libraries Chromium needs
 ```
 
@@ -199,6 +200,7 @@ curl -s https://13.232.200.154.sslip.io/                      # same, through ng
 |---|---|
 | Deploy fails with "JWT_SECRET is missing from .env" | Add it to `.env`; the API cannot start without it |
 | Deploy fails with "only N MB free" | Clear the pip and Playwright caches: `rm -rf ~/.cache/pip`, then `df -h` |
+| Knowledge answers fall back to help articles | Run `check_runtime.py --server`. If the embedding model is missing, run `HF_HUB_OFFLINE=0 ./venv/bin/python -m app.chatbot.onnx_embedder` |
 | `models_loaded: false` | Read `journalctl -u predictix`. The cause is usually a checksum mismatch (`app/ai/models/model_checksums.json`) or a model file missing from the checkout |
 | Notifications never arrive | nginx is not forwarding `Upgrade`; use `deploy/nginx/predictix.conf` |
 | Browser CORS error | The frontend origin is missing; add it to `ALLOWED_ORIGINS` and restart |

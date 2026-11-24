@@ -68,4 +68,10 @@ gradio_client==2.5.0
 # browser's print dialog.
 playwright==1.62.0
 pgvector==0.5.0
+
+# Chatbot query embeddings without torch: the official ONNX export of
+# all-MiniLM-L6-v2, run by ONNX Runtime (app/chatbot/onnx_embedder.py).
+# tokenizers stays within the range transformers accepts (<=0.23.0).
+onnxruntime==1.32.0
+tokenizers==0.22.2
 pypdf==6.21.4
