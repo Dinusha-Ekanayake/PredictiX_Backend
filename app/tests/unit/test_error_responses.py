@@ -62,3 +62,21 @@ def test_api_docs_are_off_in_production_unless_enabled(monkeypatch, env, flag, e
     monkeypatch.setenv("ENV", env)
     monkeypatch.setenv("ENABLE_API_DOCS", flag)
     assert api_docs_enabled() is expected
+
+
+def test_server_refuses_to_start_without_a_jwt_secret(monkeypatch):
+    import app.core.config as config
+
+    monkeypatch.delenv("JWT_SECRET", raising=False)
+    monkeypatch.setattr(config.settings, "JWT_SECRET", None)
+    with pytest.raises(RuntimeError, match="JWT_SECRET is not configured"):
+        config.require_runtime_settings()
+
+
+def test_no_database_means_a_clear_error_only_when_a_session_is_opened(monkeypatch):
+    import app.db.session as session
+
+    if session.engine is not None:
+        pytest.skip("a database is configured in this environment")
+    with pytest.raises(session.DatabaseNotConfigured):
+        session.SessionLocal()

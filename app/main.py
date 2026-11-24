@@ -367,6 +367,12 @@ async def lifespan(_: FastAPI):
     """Load PdM models on startup; start batch scheduler; optionally warm HF models."""
     global scheduler
 
+    # Refuse to serve without a signing secret; unsigned or guessable tokens
+    # would let anyone forge an admin session.
+    from app.core.config import require_runtime_settings
+
+    require_runtime_settings()
+
     _load_pdm_models()
 
     # ─── Breakdown cost estimation model (v5, CatBoost) ─────────────────────
