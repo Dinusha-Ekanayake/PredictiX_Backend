@@ -89,7 +89,7 @@ def generate_asset_report_endpoint(
     elif str(asset.assigned_to) != str(getattr(current_user, "id", "")):
         raise HTTPException(status_code=404, detail=f"Asset {asset_id} not found")
 
-    service = ReportService()
+    service = ReportService(db)
     try:
         url, pdf_path = service.generate_asset_report(asset_id, user_id=current_user.id)
         background_tasks.add_task(os.remove, pdf_path)

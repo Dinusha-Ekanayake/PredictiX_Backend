@@ -1,42 +1,45 @@
 """Generated asset reports are recorded in the reports table.
 
-The table's reports_target_check constraint requires an asset_report row to
-carry both asset_id and warehouse_id. Without warehouse_id every insert was
-rejected and the error swallowed, so no asset report was ever recorded.
+The row used to be inserted through Supabase REST, but the reports table
+grants nothing to the REST roles, so every insert was rejected and the error
+swallowed: no asset report was ever recorded. It is now written through the
+API's own SQLAlchemy session.
 """
 from __future__ import annotations
 
 import logging
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
 import app.services.report_service as report_service
+from app.models import Report
 
 ASSET_ID, WAREHOUSE_ID, USER_ID = uuid4(), str(uuid4()), uuid4()
 
 
-class _Table:
-    def __init__(self, inserted, fail):
-        self.inserted, self.fail = inserted, fail
+class FakeSession:
+    def __init__(self, fail: bool = False):
+        self.added, self.commits, self.rollbacks, self.fail = [], 0, 0, fail
 
-    def insert(self, row):
+    def add(self, obj):
+        self.added.append(obj)
+
+    def commit(self):
         if self.fail:
-            raise RuntimeError("new row violates check constraint")
-        self.inserted.append(row)
-        return SimpleNamespace(execute=lambda: None)
+            raise RuntimeError("permission denied for table reports")
+        self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
 
 
-@pytest.fixture()
-def service(monkeypatch, tmp_path):
-    inserted: list[dict] = []
-    state = {"fail": False}
+def _service(monkeypatch, tmp_path, db):
     pdf = tmp_path / "report.pdf"
     pdf.write_bytes(b"%PDF-1.4")
-
     svc = report_service.ReportService.__new__(report_service.ReportService)
-    svc.supabase = SimpleNamespace(table=lambda name: _Table(inserted, state["fail"]))
+    svc.db = db
     svc.context_builder = SimpleNamespace(build_context=lambda asset_id: {
         "warehouse_id": WAREHOUSE_ID, "asset": {"asset_name": "Forklift 7"}, "metrics": {},
     })
@@ -44,23 +47,26 @@ def service(monkeypatch, tmp_path):
     svc.pdf_render = SimpleNamespace(generate_pdf=lambda ctx, insights, report_id: str(pdf))
     monkeypatch.setattr(report_service.supabase_storage, "upload_file",
                         lambda **kw: "https://storage.example/reports/r.pdf")
-    return svc, inserted, state
+    return svc
 
 
-def test_the_row_satisfies_the_target_check(service):
-    svc, inserted, _ = service
-    url, _ = svc.generate_asset_report(ASSET_ID, user_id=USER_ID)
-    assert url.endswith("r.pdf")
-    (row,) = inserted
-    assert row["report_type"] == "asset_report"
-    assert row["asset_id"] == str(ASSET_ID) and row["warehouse_id"] == WAREHOUSE_ID
-    assert row["status"] == "generated" and row["generated_by"] == str(USER_ID)
+def test_the_report_row_is_committed_through_the_session(monkeypatch, tmp_path):
+    db = FakeSession()
+    url, _ = _service(monkeypatch, tmp_path, db).generate_asset_report(ASSET_ID, user_id=USER_ID)
+
+    assert url.endswith("r.pdf") and db.commits == 1
+    (row,) = db.added
+    assert isinstance(row, Report)
+    assert row.report_type == "asset_report" and row.status == "generated"
+    # reports_target_check: an asset report carries both its asset and warehouse.
+    assert row.asset_id == ASSET_ID and row.warehouse_id == UUID(WAREHOUSE_ID)
+    assert row.generated_by == USER_ID and row.file_path == url
 
 
-def test_a_rejected_row_is_logged_as_an_error_but_the_pdf_is_still_returned(service, caplog):
-    svc, _, state = service
-    state["fail"] = True
+def test_a_failed_insert_is_rolled_back_logged_and_the_pdf_still_returned(monkeypatch, tmp_path, caplog):
+    db = FakeSession(fail=True)
     with caplog.at_level(logging.ERROR, logger=report_service.log.name):
-        url, _ = svc.generate_asset_report(ASSET_ID, user_id=USER_ID)
-    assert url.endswith("r.pdf")
+        url, _ = _service(monkeypatch, tmp_path, db).generate_asset_report(ASSET_ID, user_id=USER_ID)
+
+    assert url.endswith("r.pdf") and db.rollbacks == 1
     assert any("was not recorded" in r.message and r.levelno == logging.ERROR for r in caplog.records)

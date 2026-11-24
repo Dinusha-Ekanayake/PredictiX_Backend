@@ -13,8 +13,6 @@ import os
 from uuid import UUID
 from datetime import datetime, timezone
 
-from fastapi import HTTPException
-from supabase import Client
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
@@ -27,21 +25,33 @@ from app.core.storage import supabase_storage
 log = logging.getLogger(__name__)
 
 
-def _get_supabase() -> Client:
-    # The shared client resolves SUPABASE_KEY or SUPABASE_SERVICE_ROLE_KEY,
-    # so reports work whichever one the host is configured with.
-    from app.db.supabase_client import supabase
-
-    return supabase
-
-
 class ReportService:
     def __init__(self, db=None):
-        # db param kept for backwards compatibility — not used
-        self.supabase        = _get_supabase()
+        # The report row is written through the API's own database session.
+        # Supabase REST cannot write it: the reports table grants nothing to
+        # the REST roles, so those inserts were always rejected.
+        self.db              = db
         self.context_builder = AssetContextBuilder(db)
         self.ai_insight      = AIInsightService()
         self.pdf_render      = PDFRenderService()
+
+    def _record(self, row: dict) -> None:
+        """Insert the reports row, in the caller's session or a short-lived one."""
+        from app.models import Report
+
+        if self.db is not None:
+            try:
+                self.db.add(Report(**row))
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
+            return
+        from app.db.session import SessionLocal
+
+        with SessionLocal() as db:
+            db.add(Report(**row))
+            db.commit()
 
     def generate_asset_report(self, asset_id: UUID, user_id: UUID = None) -> str:
         """
@@ -85,17 +95,19 @@ class ReportService:
                 destination_path=file_name,
             )
 
-            # ── 5. Record in reports table via Supabase REST ──
+            # ── 5. Record in the reports table ─────────────
             asset_name = context["asset"].get("asset_name", "Asset")
+            warehouse_id = context.get("warehouse_id")
             report_row = {
-                "id":                       str(report_id),
+                "id":                       report_id,
                 "report_type":              "asset_report",
                 "status":                   "generated",
-                "asset_id":                 str(asset_id),
-                # reports_target_check rejects an asset_report without its warehouse.
-                "warehouse_id":             context.get("warehouse_id"),
+                "asset_id":                 UUID(str(asset_id)),
+                # Set explicitly; the sync_report_warehouse trigger would also
+                # derive it from the asset (reports_target_check requires it).
+                "warehouse_id":             UUID(str(warehouse_id)) if warehouse_id else None,
                 "title":                    f"Asset Performance Report — {asset_name}",
-                "generated_by":             str(user_id) if user_id else None,
+                "generated_by":             UUID(str(user_id)) if user_id else None,
                 "file_path":                public_url,
                 "report_json":              {
                     "metrics":  context["metrics"],
@@ -104,11 +116,11 @@ class ReportService:
                         if k in ("executive_summary", "recommendations", "conclusion")
                     },
                 },
-                "generation_completed_at":  datetime.now(timezone.utc).isoformat(),
+                "generation_completed_at":  datetime.now(timezone.utc),
             }
 
             try:
-                self.supabase.table("reports").insert(report_row).execute()
+                self._record(report_row)
             except Exception as db_err:
                 # The caller still gets the PDF, which was generated and uploaded;
                 # the missing history row is an error for operators to see.
