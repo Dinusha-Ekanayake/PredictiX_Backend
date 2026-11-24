@@ -91,7 +91,7 @@ ssh-keyscan -t ed25519 13.232.200.154 2>/dev/null | ssh-keygen -lf - | awk '{pri
 
 ### 3.1 AWS
 
-Launch Ubuntu 26.04 on t3.micro with an 8 GB or larger gp3 volume.
+Launch Ubuntu 26.04 on t3.micro with a gp3 volume. 8 GB works: the server install is held under 1.9 GB by a CI budget. 16 GB costs about USD 0.65 more per month and leaves room for log growth and upgrades.
 
 Security group inbound rules:
 
@@ -109,8 +109,9 @@ Do **not** open 8000. The API listens on loopback only, and a public 8000 would 
 sudo apt update && sudo apt upgrade -y
 sudo apt install -y python3 python3-venv python3-pip git nginx certbot python3-certbot-nginx
 
-# 2 GB swap: headroom for pip installs and PDF rendering on 1 GB of RAM.
-sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
+# 1 GB swap: headroom for pip installs and PDF rendering on 1 GB of RAM
+# (use 2G on a 16 GB volume).
+sudo fallocate -l 1G /swapfile && sudo chmod 600 /swapfile
 sudo mkswap /swapfile && sudo swapon /swapfile
 echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 ```
