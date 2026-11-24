@@ -10,6 +10,7 @@ Architecture:
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -173,6 +174,10 @@ def handle_navigation(question: str, ctx: ToolContext) -> dict:
     }
 
 
+#: A ticket in one of these states is finished; every other ticket is still open work.
+DONE_TICKET_STATUSES = ("resolved", "closed", "cancelled")
+
+
 HELP_NOT_FOUND = "NOT_FOUND"
 # How far below the best help match another item may score and still be used.
 HELP_SCORE_MARGIN = 0.12
@@ -214,11 +219,15 @@ def answer_from_help(question: str, ctx: ToolContext, hits: list[dict]) -> dict:
     best = hits[0].get("similarity", 0.0)
     hits = [h for h in hits if h.get("similarity", 0.0) >= best - HELP_SCORE_MARGIN][:3]
 
+    # Items are numbered so the model can say which ones it used. Only cited
+    # items are listed as sources, and an answer citing none is treated as
+    # "not covered": a decline in the model's own words, or an answer from
+    # general knowledge, never reaches the user dressed up with sources.
     context = fence_untrusted(
         "help_content",
         "\n\n".join(
-            f"[{'FAQ' if h.get('source') == 'faq' else 'Article'}] {h.get('title', '')}\n{h.get('content', '')}"
-            for h in hits
+            f"[{i}] ({'FAQ' if h.get('source') == 'faq' else 'Article'}) {h.get('title', '')}\n{h.get('content', '')}"
+            for i, h in enumerate(hits, start=1)
         ),
         limit=8000,
     )
@@ -231,7 +240,10 @@ def answer_from_help(question: str, ctx: ToolContext, hits: list[dict]) -> dict:
                     "content": (
                         "You are PredictiX Assistant. Answer the user's question using ONLY the help content provided. "
                         "Use the item that directly answers the question and ignore unrelated ones. "
-                        f"If the help content does not answer the question, reply with exactly {HELP_NOT_FOUND} and nothing else. "
+                        "Mark which items you used with their numbers in square brackets, e.g. [1], at the end of the "
+                        "sentences that rely on them. "
+                        f"If the help content does not answer the question, reply with exactly {HELP_NOT_FOUND} and nothing else; "
+                        "do not apologise or answer from general knowledge instead. "
                         "Never invent steps, settings or features that the help content does not describe. "
                         "Use simple, friendly language with short steps or bullet points where useful. "
                         "Do not mention 'the context', 'the FAQ' or 'the database'. "
@@ -244,9 +256,11 @@ def answer_from_help(question: str, ctx: ToolContext, hits: list[dict]) -> dict:
             temperature=0.1,
         )
         text_out = str(summary or "").strip()
-        if not text_out or HELP_NOT_FOUND in text_out:
+        cited = sorted({int(n) for n in re.findall(r"\[(\d)\]", text_out) if 1 <= int(n) <= len(hits)})
+        if not text_out or HELP_NOT_FOUND in text_out or not cited:
             return _help_not_covered()
-        return {"answer": (fallback_msg or "") + text_out + _sources_line(hits), "action_buttons": []}
+        used = [hits[n - 1] for n in cited]
+        return {"answer": (fallback_msg or "") + text_out + _sources_line(used), "action_buttons": []}
     except Exception as e:
         log.error("Help answer synthesis failed: %s", e)
 
@@ -361,7 +375,7 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                                 "Do NOT mention 'frontend context', 'cached data', 'database errors', or 'SQL'. Just answer the question naturally. "
                                 "Do NOT include general fleet statistics, counts of critical assets, or predicted failures from the cached state (e.g. '205 assets at critical risk', '125 predicted to fail') unless the user's question explicitly asks for numbers, counts, or statistics. "
                                 "Use professional emojis strategically to format your response (e.g., 📊 for stats, 🎫 for tickets, ⚙️ for assets, 👥 for users, 💡 for suggestions, ⚠️ for alerts). "
-                                "If you cannot answer the question using the provided state, say: 'The database is temporarily busy, but you can find this information on the main dashboard page.'"
+                                "If you cannot answer the question using the provided state, say: 'I could not find that in the system data, but the dashboard and the asset and ticket pages show the full records.'"
                             )
                         },
                         {"role": "user", "content": question}
@@ -375,7 +389,7 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                 log.error("Failed to generate contextual fallback: %s", e)
 
         return {
-            "answer": "⚠️ The database is temporarily busy. You can find this information on the dashboard or relevant asset/ticket pages using the navigation buttons below.",
+            "answer": "⚠️ I couldn't answer that from the system data just now. The dashboard and the asset and ticket pages, linked below, show the full records.",
             "action_buttons": [
                 {"label": "Go to Dashboard", "path": "/admin/dashboard"},
                 {"label": "View Assets", "path": "/admin/assets"},
@@ -482,7 +496,7 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                 # Fetch active assigned tickets
                 assigned_tickets = ctx.db.query(Ticket).filter(
                     Ticket.assigned_to == target_user.id,
-                    Ticket.status.notin_(('closed', 'cancelled'))
+                    Ticket.status.notin_(DONE_TICKET_STATUSES)
                 ).all()
                 if assigned_tickets:
                     ticket_lines = "\n".join([f"• **{t.ticket_number}:** {t.title} [Priority: `{str(t.priority).upper()}`, Status: `{str(t.status).upper()}`]" for t in assigned_tickets[:5]])
@@ -559,7 +573,7 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                 # Open tickets for this asset
                 open_tickets = ctx.db.query(Ticket).filter(
                     Ticket.asset_id == target_asset.id,
-                    Ticket.status.notin_(('closed', 'cancelled'))
+                    Ticket.status.notin_(DONE_TICKET_STATUSES)
                 ).all()
                 if open_tickets:
                     ticket_summary = "\n".join([f"• **{t.ticket_number}:** {t.title} [Priority: `{str(t.priority).upper()}`, Status: `{str(t.status).upper()}`]" for t in open_tickets])
@@ -711,8 +725,13 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                 prio_items = ", ".join([f"{str(p).title()}: {c}" for p, c in t_prio if p])
                 cat_items = ", ".join([f"{str(cat).title()}: {c}" for cat, c in t_cat if cat])
 
-                open_count = sum(c for s, c in t_status if s and str(s).lower() in ("open", "in_progress", "pending"))
-                header_title = f"🎫 **Open Tickets: {open_count:,} (Total: {total_t:,})**" if "open" in q_lower else f"🎫 **Tickets Breakdown (Total: {total_t:,})**"
+                open_count = sum(c for s, c in t_status if s and str(s).lower() == "open")
+                active_count = sum(c for s, c in t_status if s and str(s).lower() in ("open", "in_progress", "pending"))
+                header_title = (
+                    f"🎫 **Open Tickets: {open_count:,}** (still being worked on, including in progress: "
+                    f"{active_count:,}; total: {total_t:,})"
+                    if "open" in q_lower else f"🎫 **Tickets Breakdown (Total: {total_t:,})**"
+                )
 
                 output_sections.append(
                     f"{header_title}\n\n"
@@ -832,8 +851,8 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                 ticket_q = ticket_q.filter(Ticket.warehouse_id == ctx.scope_warehouse_id)
                 
                 ticket_rows = ticket_q.with_entities(
-                    func.count(Ticket.id).filter(Ticket.status.notin_(('closed', 'cancelled'))),
-                    func.count(Ticket.id).filter((Ticket.priority == 'high') & Ticket.status.notin_(('closed', 'cancelled'))),
+                    func.count(Ticket.id).filter(Ticket.status.notin_(DONE_TICKET_STATUSES)),
+                    func.count(Ticket.id).filter((Ticket.priority == 'high') & Ticket.status.notin_(DONE_TICKET_STATUSES)),
                     func.count(Ticket.id).filter(Ticket.status.in_(('resolved', 'closed'))),
                     func.avg(
                         case(
@@ -994,7 +1013,13 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             }
 
         if sql.startswith("ERROR:"):
-            return _get_contextual_fallback(sql)
+            # The question is not about records (often a maintenance or standards
+            # question the router sent here): answer it from the knowledge base.
+            from app.ai.agent.tracing import record
+
+            record("handler", name="handle_database", note="not answerable from data; using the knowledge base",
+                   reason=sql[:200])
+            return handle_knowledge(question, ctx)
 
         # ── Step 3: Execute (with self-healing retry on DB error) ────────────────
         if ctx.db is None:

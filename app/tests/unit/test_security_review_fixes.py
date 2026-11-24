@@ -172,7 +172,7 @@ def test_help_answer_cites_sources_and_fences_content(monkeypatch):
 
     def fake(*, messages, **kw):
         seen["m"] = messages
-        return "Here is how.", ""
+        return "Here is how [1].", ""
 
     monkeypatch.setattr(guardrails, "call_groq", fake)
     out = answer_from_help("reset password?", _help_ctx(), _HITS)
