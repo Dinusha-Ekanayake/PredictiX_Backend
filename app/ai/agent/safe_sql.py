@@ -228,7 +228,13 @@ def _row_filters(scope: SqlScope) -> dict[str, str]:
         in_wh = _eq("warehouse_id", wh)
         assets = f"({in_wh} OR {_eq('assigned_to', uid)})"
         tickets = f"({in_wh} OR {_eq('created_by', uid)} OR {_eq('assigned_to', uid)})"
-        profiles = departments = in_wh
+        # A user sees themselves and their own department's colleagues, as on
+        # GET /profiles/me/colleagues; never the whole warehouse's staff list.
+        profiles = (
+            f"({_eq('id', uid)} OR ({in_wh} AND department_id IS NOT NULL AND department_id = "
+            f"(SELECT department_id FROM public.profiles WHERE {_eq('id', uid)})))"
+        )
+        departments = in_wh
         reports = _eq("generated_by", uid)
         comments_extra = "is_internal IS NOT TRUE"
 

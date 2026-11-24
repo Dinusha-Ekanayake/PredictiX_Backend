@@ -240,3 +240,41 @@ def test_there_is_no_shared_default_password():
     import app.routers.users as users
 
     assert not hasattr(users, "_default_password")
+
+
+def test_chatbot_users_see_only_their_department_colleagues():
+    """The SQL sandbox must not show a user more staff than /profiles/me/colleagues does."""
+    from app.ai.agent.safe_sql import _row_filters
+
+    uid = "22222222-2222-2222-2222-222222222222"
+    user = _row_filters(SqlScope.build(user_id=uid, is_admin=False, warehouse_id=WH))["profiles"]
+    assert f"id::text = '{uid}'" in user
+    assert "department_id = (SELECT department_id FROM public.profiles" in user
+    assert "department_id IS NOT NULL" in user
+    admin = _row_filters(SqlScope.build(user_id=uid, is_admin=True, warehouse_id=WH))["profiles"]
+    assert admin == f"warehouse_id::text = '{WH}'"
+
+
+def test_help_answer_lists_only_the_items_the_model_cited(monkeypatch):
+    import app.ai.agent.guardrails as guardrails
+    from app.ai.agent.tools import answer_from_help
+
+    close = [_HITS[0], {**_HITS[0], "title": "how to change my password", "similarity": 0.6}]
+    monkeypatch.setattr(guardrails, "call_groq", lambda **kw: ("Change it in Settings [2].", ""))
+    out = answer_from_help("change password?", _help_ctx(), close)["answer"]
+    assert "FAQ: how to change my password" in out
+    assert "how to reset my password" not in out
+
+
+@pytest.mark.parametrize("reply", [
+    "I don't have the phone number for that manager.",   # a decline in the model's own words
+    "The capital is Colombo.",                           # an answer from general knowledge
+    "See item [9].",                                     # a citation of an item that was not given
+])
+def test_help_answer_citing_nothing_is_not_covered(monkeypatch, reply):
+    import app.ai.agent.guardrails as guardrails
+    from app.ai.agent.tools import answer_from_help
+
+    monkeypatch.setattr(guardrails, "call_groq", lambda **kw: (reply, ""))
+    out = answer_from_help("anything", _help_ctx(), _HITS)["answer"]
+    assert "couldn't find" in out and "Sources" not in out
