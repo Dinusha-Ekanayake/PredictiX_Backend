@@ -42,7 +42,7 @@ def scripted_llm(monkeypatch):
             return next((g for b, g in FIX.items() if b in joined), "SELECT 1"), ""
         if "<help_content>" in joined:
             calls.append("help_synthesizer")
-            return "Here is how, from the help content.", ""
+            return "Here is how, from the help content [1].", ""
         calls.append("summarizer")
         return "Summary of the rows.", ""
 
