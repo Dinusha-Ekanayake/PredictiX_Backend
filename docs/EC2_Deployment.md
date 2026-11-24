@@ -144,8 +144,7 @@ Create `.env` from `.env.example`, then make it readable only by its owner (`chm
 | `DATABASE_URL` | yes | Supabase Postgres connection string |
 | `JWT_SECRET` | yes | Long random value. The API refuses to start without it, and changing it signs everyone out |
 | `SUPABASE_URL` | yes | |
-| `SUPABASE_KEY` | yes | Server key; `SUPABASE_SERVICE_ROLE_KEY` is also read where uploads need it |
-| `SUPABASE_SERVICE_ROLE_KEY` | yes | Storage uploads and admin user management |
+| `SUPABASE_SERVICE_ROLE_KEY` | yes | The server's only Supabase key. Production refuses to start without it. A public anon or publishable key is never used, even if set; remove any old `SUPABASE_KEY` that holds the anon key |
 | `ENV` | yes | `production`. Hides the API docs and drops the localhost CORS origins |
 | `ALLOWED_ORIGINS` | if needed | Extra frontend origins, comma-separated (the Vercel production domains are built in) |
 | `GROQ_API_KEY`, `CHATBOT_GROQ_API_KEY`, `WH_GROQ_API_KEY` | yes | LLM features |

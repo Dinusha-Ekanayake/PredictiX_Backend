@@ -54,9 +54,11 @@ def _datetime(val) -> str:
 
 def _get_supabase() -> Client:
     url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
+    from app.db.supabase_client import supabase_key
+
+    key = supabase_key()
     if not url or not key:
-        raise RuntimeError("SUPABASE_URL or SUPABASE_KEY not set in .env")
+        raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set.")
     return create_client(url, key)
 
 

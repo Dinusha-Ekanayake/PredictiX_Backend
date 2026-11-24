@@ -24,7 +24,7 @@ pytestmark = pytest.mark.skipif(
     reason="runs the deploy script under bash with POSIX tools (Linux CI)",
 )
 
-GOOD_ENV = "DATABASE_URL=postgresql://x\nJWT_SECRET=s\nSUPABASE_URL=https://x\nSUPABASE_KEY=k\n"
+GOOD_ENV = "DATABASE_URL=postgresql://x\nJWT_SECRET=s\nSUPABASE_URL=https://x\nSUPABASE_SERVICE_ROLE_KEY=k\n"
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -124,7 +124,7 @@ def test_an_unhealthy_release_is_rolled_back(host):
 def test_nothing_changes_when_a_required_setting_is_missing(host):
     before = host["head"]()
     target = host["commit"]("release 2")
-    (host["app"] / ".env").write_text("DATABASE_URL=x\nSUPABASE_URL=x\nSUPABASE_KEY=x\n", encoding="utf-8")
+    (host["app"] / ".env").write_text("DATABASE_URL=x\nSUPABASE_URL=x\nSUPABASE_SERVICE_ROLE_KEY=x\n", encoding="utf-8")
     result = host["run"]("main", target)
     assert result.returncode == 1 and "JWT_SECRET is missing" in result.stderr
     assert host["head"]() == before and host["restarts"]() == 0
