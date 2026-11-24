@@ -5,10 +5,11 @@ exist. Markers in `pytest.ini` select the layers.
 
 | Layer | Where | Marker | Needs | What it proves |
 |---|---|---|---|---|
-| Unit | `app/tests/unit`, `app/tests/qa_automated` | (none) | nothing | Logic in isolation: auth helpers, permission rules, SQL validator, guardrails, RAG ranking with fake vectors, tracing, health bands, decision layer |
+| Unit | `app/tests/unit`, `app/tests/qa_automated` | (none) | nothing | Logic in isolation: auth helpers, permission rules, SQL validator, guardrails, RAG ranking with fake vectors, knowledge-base pipeline stages, retrieval scoping, privacy redaction, error responses, WebSocket auth, tracing, health bands, decision layer |
 | Red-team | `app/tests/unit/test_adversarial_suite.py` + `app/tests/data/adversarial.json` | (none) | nothing | Every known SQL-sandbox bypass, data-fence breakout and unsafe link is refused; realistic queries are still accepted |
 | Integration | `app/tests/integration` | `integration` | `DATABASE_URL`, `JWT_SECRET` | Against the real database: the authorization matrix, the SQL sandbox, the chatbot agent graph with a scripted model, and audit traces |
 | RAG evaluation | `app/tests/eval/test_rag_retrieval_eval.py` + `app/tests/data/rag_golden.json` | `eval` | database + embedding model | Retrieval quality gates on a golden set |
+| Knowledge-base evaluation | `app/tests/eval/test_kb_registry_eval.py` + `app/tests/data/kb_golden.json` | `eval` | database + embedding model + loaded knowledge base | hit@3 on golden questions (gate 0.85), no source reaches a role or warehouse outside its scope, ticket patterns stay in their warehouse, off-topic questions retrieve nothing |
 | Live LLM evaluation | `app/tests/eval/test_llm_answers.py` | `llm` | a valid Groq key, `RUN_LLM_TESTS=1` | Answers are grounded and cited; hard negatives get "not covered" |
 | Functional test plan | `app/tests/functional` | `functional` | live API, seeded demo accounts, `TEST_*_PASSWORD` | One case per requirement in the test plan |
 

@@ -5,7 +5,7 @@
 ![PostgreSQL](https://img.shields.io/badge/Supabase-PostgreSQL-3ECF8E?logo=supabase&logoColor=white)
 ![LightGBM](https://img.shields.io/badge/LightGBM-v7-9ACD32)
 ![CatBoost](https://img.shields.io/badge/CatBoost-v5-FFCC00)
-![Tests](https://img.shields.io/badge/tests-195%20backend-brightgreen)
+![Tests](https://img.shields.io/badge/unit%20tests-371%20passing-brightgreen)
 
 PredictiX is a predictive maintenance platform for fleet and warehouse operations. It ingests
 vehicle telemetry, predicts whether an asset will need maintenance within a 30-day horizon,
@@ -33,8 +33,8 @@ and Groq LLM agents sit behind the API, backed by Supabase PostgreSQL.
 > variable so the instance can be rebuilt or moved without a code change. See
 > [`docs/CICD.md`](docs/CICD.md).
 
-Interactive API documentation is served by the running instance at `/docs` (Swagger UI)
-and `/redoc`.
+Interactive API documentation is served at `/docs` (Swagger UI) and `/redoc` outside
+production. With `ENV=production` they are off unless `ENABLE_API_DOCS=true`.
 
 ---
 
@@ -253,7 +253,7 @@ PredictiX_backend/
 │   │   │   └── survival_analysis/
 │   │   ├── services/                # AI orchestration, HF/Gradio clients, batch PDM
 │   │   └── agent/                   # Tool-calling Groq agent loop + tools
-│   ├── kb/                          # Knowledge base & vector store (WIP)
+│   ├── kb/                          # Knowledge-base ingestion pipeline and scoped retrieval
 │   └── tests/                       # Unit tests
 ├── seed_data/                       # SQL fixtures and demo data scripts
 ├── alembic/                         # Database migration scripts
@@ -426,7 +426,7 @@ PredictiX_backend/
 |---|---|---|
 | POST | `/chatbot/ask` | Legacy RAG Q&A (no auth) |
 | POST | `/chatbot/agent` | Tool-calling Groq agent (JWT required) |
-| WS | `/ws` | Real-time WebSocket connection |
+| WS | `/ws/notifications/{user_id}` | Real-time notifications. The client sends `{"type": "auth", "token": "<JWT>"}` as its first message; the token must belong to `user_id`. Unauthenticated sockets are closed with 1008 |
 
 ### Warmup
 
@@ -984,7 +984,8 @@ scheduled `DELETE FROM ai_traces WHERE created_at < now() - interval '180 days'`
 |---|---|---|---|
 | FAQs, edited by admins | `faqs` | Chatbot help answers | `app/chatbot/knowledge_service.py` (`search_help`) |
 | Help and reference articles, edited at `/admin/knowledge-base` | `knowledge_base` | Chatbot help answers | same |
-| Maintenance standards (statutory, OEM, ISO 55000, SMRP, FMEA, climate) | `kb_documents` | AI warehouse report | `app/kb/kb_vector_store.py` |
+| Registered maintenance knowledge base: published standards and PredictiX-derived ticket patterns, listed in `kb/sources.yaml` | `kb_sources`, `kb_chunks` | AI warehouse report, chatbot knowledge answers | `app/kb/retrieval.py`, `app/ai/agent/kb_answer.py` |
+| Team-written maintenance articles (legacy corpus; its unaudited PDFs are not served) | `kb_documents` | AI warehouse report | `app/kb/kb_vector_store.py` |
 
 - **Embedding.** `sentence-transformers/all-MiniLM-L6-v2` (384 dimensions, normalised), the model
   the stored vectors were made with. Queries use the local model when it is cached, otherwise the
@@ -1004,6 +1005,14 @@ scheduled `DELETE FROM ai_traces WHERE created_at < now() - interval '180 days'`
 - **When no embedding can be made** both help search and the report store fall back to TF-IDF over
   the same rows, so retrieval degrades instead of returning nothing.
 - Article and FAQ edits refresh their indexes immediately.
+
+The registered knowledge base is loaded by an auditable pipeline
+(`python -m app.kb.pipeline`): licence-checked sources, archived originals,
+token-aware chunking, hybrid vector and full-text search, and retrieval scoped
+to the caller's role and warehouse. Legal questions are answered only from Sri
+Lankan sources. See [`kb/README.md`](kb/README.md) and
+[ADR-0006](docs/adr/0006-knowledge-base-sources.md); references are in
+[`kb/REFERENCES.md`](kb/REFERENCES.md).
 
 `kb_annotator.py` adds deterministic, rule-based annotations (SHAP drivers, health-band and
 benchmark notes) to the report alongside the retrieved text.
