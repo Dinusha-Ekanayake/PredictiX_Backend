@@ -81,6 +81,8 @@ def auth(tokens):
 
 @pytest.fixture(scope="session")
 def db():
+    if not os.getenv("DATABASE_URL"):
+        pytest.skip("DATABASE_URL is not set")
     from app.db import SessionLocal
     session = SessionLocal()
     try:
