@@ -214,3 +214,29 @@ def test_record_widget_reaches_the_api_response(monkeypatch):
     user = SimpleNamespace(id="u", role="user", warehouse_id=WH)
     resp = chatbot.chatbot_agent(chatbot.AgentRequest(question="latest ticket"), db=None, current_user=user)
     assert resp.widget_type == "RECORD_SUMMARY" and resp.widget_data["type"] == "ticket"
+
+
+# ── account creation ─────────────────────────────────────────────────────────
+
+_NEW_USER = dict(
+    id="U0001E", firstName="Ann", lastName="Lee", name="Ann Lee", email="ann@example.com",
+    address="", contactNumber="", warehouse="Colombo", role="user", department="Logistics", status="active",
+)
+
+
+@pytest.mark.parametrize("password", [None, "", "short"])
+def test_new_accounts_need_an_admin_set_password(password):
+    from pydantic import ValidationError
+
+    from app.schemas.user_profile import UserCreate
+
+    fields = dict(_NEW_USER) if password is None else {**_NEW_USER, "password": password}
+    with pytest.raises(ValidationError):
+        UserCreate(**fields)
+    assert UserCreate(**{**_NEW_USER, "password": "long-enough-1"}).password == "long-enough-1"
+
+
+def test_there_is_no_shared_default_password():
+    import app.routers.users as users
+
+    assert not hasattr(users, "_default_password")

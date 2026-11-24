@@ -67,13 +67,6 @@ def _department_by_name(db: Session, name: Optional[str], warehouse_id) -> Optio
     return query.first() if warehouse_id is None else None
 
 
-def _default_password() -> str:
-    """Read DEFAULT_PASSWORD from env, stripping surrounding spaces/quotes."""
-    raw = os.getenv("DEFAULT_PASSWORD", "Predictix@123")
-    cleaned = raw.strip().strip('"').strip("'").strip()
-    return cleaned or "Predictix@123"
-
-
 def _supabase_admin_client():
     """Build a Supabase Admin client using the service-role key.
 
@@ -292,9 +285,9 @@ def create_user(
     validate_account_fields(db, None, role=data.role, status=getattr(data, "status", None), email=data.email)
     dept = _department_by_name(db, data.department, wh.id if wh else None)
 
-    # Hash the supplied password, or fall back to the configured default
-    # so users created by the frontend (which sends no password yet) can log in.
-    raw_password = (data.password or "").strip() or _default_password()
+    raw_password = data.password
+    if raw_password != raw_password.strip():
+        raise HTTPException(status_code=400, detail="Passwords cannot start or end with spaces.")
 
     # profiles.id has an FK to Supabase auth.users.id (profiles_id_fkey), so the
     # auth user must be created FIRST and its id reused as the profile id.
