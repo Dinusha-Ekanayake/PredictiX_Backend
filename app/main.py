@@ -310,6 +310,24 @@ def _run_service_reminder_job() -> None:
         db.close()
 
 
+def kb_refresh_enabled() -> bool:
+    """Whether this host should run the nightly knowledge-base refresh.
+
+    Bulk ingestion embeds with the local model only (see
+    app/kb/pipeline/embedding.py), so a host without sentence-transformers,
+    such as the EC2 instance, cannot refresh and would only log a failure
+    every night. KB_REFRESH_ENABLED=true|false overrides the detection.
+    """
+    flag = os.getenv("KB_REFRESH_ENABLED", "auto").strip().lower()
+    if flag in ("true", "1", "yes"):
+        return True
+    if flag in ("false", "0", "no"):
+        return False
+    import importlib.util
+
+    return importlib.util.find_spec("sentence_transformers") is not None
+
+
 def _refresh_derived_kb() -> None:
     """Scheduled job: reload knowledge-base sources built from PredictiX data
     (D01 ticket patterns). Incremental: a source whose snapshot has not
@@ -461,13 +479,20 @@ async def lifespan(_: FastAPI):
     )
 
     # ── Nightly refresh of knowledge-base sources derived from PredictiX data ──
-    scheduler.add_job(
-        _refresh_derived_kb,
-        trigger=CronTrigger(hour=int(os.getenv("KB_REFRESH_HOUR", "2")), minute=30, timezone=reminder_tz),
-        id="kb_derived_refresh",
-        name="Nightly knowledge-base refresh (ticket patterns)",
-        replace_existing=True,
-    )
+    if kb_refresh_enabled():
+        scheduler.add_job(
+            _refresh_derived_kb,
+            trigger=CronTrigger(hour=int(os.getenv("KB_REFRESH_HOUR", "2")), minute=30, timezone=reminder_tz),
+            id="kb_derived_refresh",
+            name="Nightly knowledge-base refresh (ticket patterns)",
+            replace_existing=True,
+        )
+    else:
+        log.info(
+            "Nightly knowledge-base refresh not scheduled: the local embedding model "
+            "is not installed here. Run `python -m app.kb.pipeline ingest` from a host "
+            "that has it (see docs/EC2_Deployment.md)."
+        )
 
     if os.getenv("SERVICE_REMINDER_RUN_ON_STARTUP", "false").lower() == "true":
         import threading

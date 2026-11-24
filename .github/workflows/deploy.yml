@@ -30,7 +30,7 @@ jobs:
   deploy:
     name: Deploy
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     # Attach to a GitHub Environment so production secrets and any required
     # reviewers are enforced by the platform rather than by convention.
     environment:
@@ -42,64 +42,55 @@ jobs:
       github.event.workflow_run.conclusion == 'success'
 
     steps:
-      - name: Report what is being deployed
+      - name: Resolve what to deploy
+        id: target
+        # Deploy the exact commit CI tested. A dispatch deploys the tip of the
+        # chosen branch. Values reach the remote shell as environment
+        # variables, never spliced into the script text.
+        env:
+          EVENT: ${{ github.event_name }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          INPUT_REF: ${{ github.event.inputs.ref }}
         run: |
-          echo "trigger: ${{ github.event_name }}"
-          echo "commit:  ${{ github.event.workflow_run.head_sha || github.sha }}"
+          if [[ "$EVENT" == "workflow_run" ]]; then
+            branch="$RUN_BRANCH"; commit="$RUN_SHA"
+          else
+            branch="${INPUT_REF:-main}"; commit=""
+          fi
+          [[ "$branch" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "::error::unsafe ref: $branch"; exit 1; }
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "deploying ${commit:-tip of $branch} from $branch"
 
       - name: Deploy over SSH
-        uses: appleboy/ssh-action@v1.0.3
+        # Pinned to the v1.2.5 commit. The host key is checked when
+        # EC2_HOST_FINGERPRINT is set (ssh-keyscan the host, then
+        # `ssh-keygen -lf`), which is strongly recommended.
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          APP_DIR: ${{ secrets.EC2_APP_DIR }}
+          SERVICE: ${{ secrets.EC2_SERVICE_NAME }}
+          BRANCH: ${{ steps.target.outputs.branch }}
+          COMMIT: ${{ steps.target.outputs.commit }}
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           port: ${{ secrets.EC2_PORT || 22 }}
-          command_timeout: 15m
-          script_stop: true
+          fingerprint: ${{ secrets.EC2_HOST_FINGERPRINT }}
+          command_timeout: 20m
+          envs: APP_DIR,SERVICE,BRANCH,COMMIT
           script: |
             set -euo pipefail
-            APP_DIR="${{ secrets.EC2_APP_DIR }}"
-            SERVICE="${{ secrets.EC2_SERVICE_NAME }}"
-            BRANCH="${{ github.event.inputs.ref || 'main' }}"
-
             cd "$APP_DIR"
-
-            # Remember where we were, so a failed rollout can be undone.
-            PREVIOUS_SHA="$(git rev-parse HEAD)"
-            echo "current commit: $PREVIOUS_SHA"
-
-            git fetch --prune origin
-            git checkout "$BRANCH"
-            git reset --hard "origin/$BRANCH"
-            echo "deploying commit: $(git rev-parse HEAD)"
-
-            # Install into the same venv systemd runs from.
-            ./venv/bin/pip install --upgrade pip
-            ./venv/bin/pip install -r requirements.txt
-
-            # Fail fast on a syntax error before touching the running service.
-            ./venv/bin/python -m compileall -q app
-
-            sudo systemctl restart "$SERVICE"
-
-            # Give it a moment to bind, then require a healthy response.
-            # Rolling back here matters: this host runs the nightly batch, so
-            # leaving broken code installed would corrupt data overnight.
-            sleep 8
-            for attempt in 1 2 3 4 5 6; do
-              if curl -fsS --max-time 10 http://127.0.0.1:8000/ >/dev/null; then
-                echo "health check passed on attempt $attempt"
-                exit 0
-              fi
-              echo "health check attempt $attempt failed; retrying"
-              sleep 5
-            done
-
-            echo "::error::Health check failed. Rolling back to $PREVIOUS_SHA"
-            git reset --hard "$PREVIOUS_SHA"
-            ./venv/bin/pip install -r requirements.txt
-            sudo systemctl restart "$SERVICE"
-            exit 1
+            git fetch --quiet --prune origin "$BRANCH"
+            # Run the deploy script from the commit being deployed, so the
+            # procedure always matches the code it installs.
+            script="$(mktemp)"
+            trap 'rm -f "$script"' EXIT
+            git show "${COMMIT:-origin/$BRANCH}:scripts/deploy/ec2_deploy.sh" > "$script"
+            bash "$script" "$APP_DIR" "$SERVICE" "$BRANCH" "$COMMIT"
 
       - name: Verify the public endpoint responds
         # The in-host check above proves the process is up; this proves the
@@ -111,7 +102,7 @@ jobs:
             exit 0
           fi
           for attempt in 1 2 3 4 5; do
-            if curl -fsS --max-time 15 "$URL" >/dev/null; then
+            if curl -fsS --max-time 15 "$URL" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("models_loaded") is True else 1)'; then
               echo "public endpoint healthy"
               exit 0
             fi
@@ -129,6 +120,7 @@ jobs:
             echo ""
             echo "| field | value |"
             echo "| --- | --- |"
-            echo "| commit | \`${{ github.event.workflow_run.head_sha || github.sha }}\` |"
+            echo "| branch | ${{ steps.target.outputs.branch }} |"
+            echo "| commit | \`${{ steps.target.outputs.commit || 'branch tip' }}\` |"
             echo "| result | ${{ job.status }} |"
           } >> "$GITHUB_STEP_SUMMARY"

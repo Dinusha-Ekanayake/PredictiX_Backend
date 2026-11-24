@@ -14,7 +14,7 @@ from uuid import UUID
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
-from supabase import create_client, Client
+from supabase import Client
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
@@ -28,7 +28,11 @@ log = logging.getLogger(__name__)
 
 
 def _get_supabase() -> Client:
-    return create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
+    # The shared client resolves SUPABASE_KEY or SUPABASE_SERVICE_ROLE_KEY,
+    # so reports work whichever one the host is configured with.
+    from app.db.supabase_client import supabase
+
+    return supabase
 
 
 class ReportService:
