@@ -705,7 +705,7 @@ def generate_warehouse_report(
     start_trace(channel="report", user=current_user, question="Generate the AI warehouse report", warehouse_id=wh_id)
     try:
         from app.agents.report_agents import run_warehouse_agent
-        result = run_warehouse_agent(db, warehouse_id=wh_id)
+        result = run_warehouse_agent(db, warehouse_id=wh_id, viewer=current_user)
         sections = result.get("ai_sections") or {}
         trace_id = finish_trace(
             answer=str(sections.get("insight_summary", ""))[:2000],
@@ -755,7 +755,7 @@ def chat_route(
         intent = route_request(request.message)
 
         if intent == "warehouse_report":
-            result = run_warehouse_agent(db, warehouse_id=wh_id)
+            result = run_warehouse_agent(db, warehouse_id=wh_id, viewer=current_user)
             return {
                 "intent": intent,
                 "response": result["ai_sections"].get("insight_summary", ""),

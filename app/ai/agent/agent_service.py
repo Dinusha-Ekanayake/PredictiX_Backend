@@ -54,7 +54,9 @@ ROUTER_SYSTEM = (
     "3. NAVIGATION: 'take me to settings', 'go to dashboard', 'open tickets'\n"
     "4. FAQ: 'how to reset password', 'how to add an asset', general help questions\n"
     "5. PREDICTION: 'how to use failure prediction', 'cost estimation', 'run prediction'\n"
-    "6. KNOWLEDGE: 'how does the HVAC system work', 'what is predictive maintenance', definition questions\n"
+    "6. KNOWLEDGE: maintenance, safety and standards questions, e.g. 'how often should brakes be inspected', "
+    "'what do wear metals in engine oil mean', 'how should forklift batteries be charged', "
+    "'what is predictive maintenance', 'is this a recurring issue at our warehouse'\n"
     "7. DATABASE: ANY question about actual data, tickets, users, assets, or status counts (e.g. 'how many tickets', 'show my assets')\n"
     "8. ACTION: ANY command to create, insert, or add data (e.g. 'create a ticket', 'add a new user', 'insert an asset'). Do NOT include updates or deletes.\n\n"
     "Rules:\n"
@@ -265,7 +267,7 @@ def run_agent(
 
         elif intent == INTENT_KNOWLEDGE:
             result = handle_knowledge(question, ctx)
-            tool_trace.append({"name": "handle_knowledge", "args": {"question": question}, "result_preview": "Knowledge base searched."})
+            tool_trace.append({"name": "handle_knowledge", "args": {"question": question}, "result_preview": "Help content and the maintenance knowledge base searched."})
 
         elif intent == INTENT_PREDICTION:
             result = handle_prediction_info(question, ctx)

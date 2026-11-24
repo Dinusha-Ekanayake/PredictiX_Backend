@@ -268,11 +268,42 @@ def handle_faq(question: str, ctx: ToolContext) -> dict:
     return answer_from_help(question, ctx, search_help(question, match_count=4))
 
 
+#: A help item this similar is about using PredictiX itself and answers first.
+STRONG_HELP_MATCH = 0.55
+
+
 def handle_knowledge(question: str, ctx: ToolContext) -> dict:
-    """Concept and reference questions: the same merged help search as handle_faq."""
+    """Concept and reference questions.
+
+    A question about using PredictiX is answered from the help content. A
+    maintenance, safety or standards question is answered from the
+    maintenance knowledge base, scoped to the caller's role and warehouse,
+    with citations (app.ai.agent.kb_answer). If neither covers it, the help
+    path's "not covered" reply is given.
+    """
+    from app.ai.agent.kb_answer import answer_from_kb, asks_about_local_law
     from app.chatbot.knowledge_service import search_help
 
-    return answer_from_help(question, ctx, search_help(question, match_count=4))
+    help_hits = search_help(question, match_count=4)
+    # Only an app FAQ answers first. Team articles cover maintenance topics too,
+    # and a legal question must always pass the jurisdiction guard.
+    top = help_hits[0] if help_hits else {}
+    if (top.get("source") == "faq" and top.get("similarity", 0.0) >= STRONG_HELP_MATCH
+            and not asks_about_local_law(question)):
+        return answer_from_help(question, ctx, help_hits)
+
+    try:
+        if ctx.db is not None:
+            kb = answer_from_kb(question, ctx.user, ctx.warehouse_id, ctx.db)
+        else:
+            from app.db.session import SessionLocal
+
+            with SessionLocal() as db:
+                kb = answer_from_kb(question, ctx.user, ctx.warehouse_id, db)
+    except Exception as exc:
+        log.error("Knowledge base answer failed: %s", exc)
+        kb = None
+    return kb if kb is not None else answer_from_help(question, ctx, help_hits)
 
 
 def handle_database(question: str, ctx: ToolContext) -> dict:

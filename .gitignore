@@ -86,3 +86,8 @@ graphify-out/
 .coverage.*
 coverage.xml
 htmlcov/
+
+# Knowledge-base pipeline: local download cache and per-run reports.
+# Originals are archived in the private kb-sources storage bucket.
+kb/.cache/
+kb/reports/

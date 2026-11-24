@@ -1,0 +1,146 @@
+{
+  "description": "Golden questions for the registered knowledge base (kb_chunks). Each 'retrieval' case names the source that must appear in the top 3 for the given role. 'audience' cases must return nothing from the listed sources for that role. 'off_topic' cases must return no registered passage.",
+  "retrieval": [
+    {
+      "q": "How often must each commercial vehicle get a periodic inspection?",
+      "role": "user",
+      "expect": "S01"
+    },
+    {
+      "q": "What maintenance records must be kept for every vehicle in the fleet?",
+      "role": "admin",
+      "expect": "S01"
+    },
+    {
+      "q": "What should a driver check and report at the end of the day's driving?",
+      "role": "user",
+      "expect": "S01"
+    },
+    {
+      "q": "Hydraulic brake system inspection: brake pedal reserve and fluid leaks",
+      "role": "user",
+      "expect": "S02"
+    },
+    {
+      "q": "Steering and suspension inspection criteria for vehicles in use",
+      "role": "admin",
+      "expect": "S02"
+    },
+    {
+      "q": "How do I check tyre pressure and tread wear?",
+      "role": "user",
+      "expect": "S03"
+    },
+    {
+      "q": "What do wear metals found in used engine oil tell you about the engine?",
+      "role": "admin",
+      "expect": "S04"
+    },
+    {
+      "q": "How should an oil sample be taken from an engine for analysis?",
+      "role": "user",
+      "expect": "S04"
+    },
+    {
+      "q": "How should a fleet organise driver inspections and preventive servicing?",
+      "role": "admin",
+      "expect": "S05"
+    },
+    {
+      "q": "Where and how should forklift batteries be charged safely?",
+      "role": "user",
+      "expect": "S07"
+    },
+    {
+      "q": "When must a forklift be taken out of service for repair?",
+      "role": "admin",
+      "expect": "S07"
+    },
+    {
+      "q": "What training does a lift truck operator need before driving?",
+      "role": "user",
+      "expect": "S08"
+    },
+    {
+      "q": "Thorough examination of lift trucks and their lifting equipment",
+      "role": "admin",
+      "expect": "S08"
+    },
+    {
+      "q": "What should a forklift driver do if the truck starts to tip over?",
+      "role": "user",
+      "expect": "S09"
+    },
+    {
+      "q": "What is censored data in reliability analysis?",
+      "role": "admin",
+      "expect": "S10"
+    },
+    {
+      "q": "What does the Weibull shape parameter say about the failure rate?",
+      "role": "super_admin",
+      "expect": "S10"
+    },
+    {
+      "q": "Which machine learning methods are used for vehicle predictive maintenance?",
+      "role": "admin",
+      "expect": "S11"
+    },
+    {
+      "q": "Must the safe working load be marked on every lifting machine?",
+      "role": "admin",
+      "expect": "S13"
+    },
+    {
+      "q": "forklift battery charging 1910.178(g)",
+      "role": "user",
+      "expect": "S07"
+    }
+  ],
+  "audience": [
+    {
+      "q": "What is censored data in reliability analysis?",
+      "role": "user",
+      "forbid": [
+        "S10",
+        "S11"
+      ]
+    },
+    {
+      "q": "Which machine learning methods are used for vehicle predictive maintenance?",
+      "role": "user",
+      "forbid": [
+        "S10",
+        "S11"
+      ]
+    },
+    {
+      "q": "Must the safe working load be marked on every lifting machine?",
+      "role": "user",
+      "forbid": [
+        "S13"
+      ]
+    },
+    {
+      "q": "How should a fleet organise driver inspections and preventive servicing?",
+      "role": "user",
+      "forbid": [
+        "S05"
+      ]
+    }
+  ],
+  "off_topic": [
+    {
+      "q": "How do I reset my PredictiX password?",
+      "role": "user"
+    },
+    {
+      "q": "What is the capital of France?",
+      "role": "admin"
+    },
+    {
+      "q": "Write me a poem about the sea",
+      "role": "user"
+    }
+  ]
+}

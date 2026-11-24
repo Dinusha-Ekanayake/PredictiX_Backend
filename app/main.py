@@ -310,6 +310,29 @@ def _run_service_reminder_job() -> None:
         db.close()
 
 
+def _refresh_derived_kb() -> None:
+    """Scheduled job: reload knowledge-base sources built from PredictiX data
+    (D01 ticket patterns). Incremental: a source whose snapshot has not
+    changed is skipped by its fingerprint, so a quiet day costs one query."""
+    from app.db.session import SessionLocal
+    from app.kb.pipeline.archive import SupabaseArchive
+    from app.kb.pipeline.embedding import Embedder
+    from app.kb.pipeline.ingest import ingest_source
+    from app.kb.pipeline.registry import load_registry
+
+    try:
+        derived = [s for s in load_registry().active if any(f.internal for f in s.fetch)]
+        if not derived:
+            return
+        embedder, archive = Embedder(), SupabaseArchive()
+        for source in derived:
+            report = ingest_source(source, embedder=embedder, db_factory=SessionLocal,
+                                   archive=archive, dry_run=False)
+            log.info("Knowledge-base refresh %s: %s (%d passages)", source.id, report.outcome, report.chunks)
+    except Exception:
+        log.exception("Knowledge-base refresh failed; the previous version stays in place")
+
+
 def _run_startup_batch() -> None:
     """Startup-only wrapper: waits 10s for Uvicorn to fully bind before running."""
     import time
@@ -429,6 +452,15 @@ async def lifespan(_: FastAPI):
     log.info(
         "Service reminder scheduler registered — daily at %d:00 %s",
         reminder_hour, reminder_tz,
+    )
+
+    # ── Nightly refresh of knowledge-base sources derived from PredictiX data ──
+    scheduler.add_job(
+        _refresh_derived_kb,
+        trigger=CronTrigger(hour=int(os.getenv("KB_REFRESH_HOUR", "2")), minute=30, timezone=reminder_tz),
+        id="kb_derived_refresh",
+        name="Nightly knowledge-base refresh (ticket patterns)",
+        replace_existing=True,
     )
 
     if os.getenv("SERVICE_REMINDER_RUN_ON_STARTUP", "false").lower() == "true":

@@ -1038,7 +1038,27 @@ def _guard_narrative(ai_sections: dict, ctx: dict) -> dict:
     return ai_sections
 
 
-def run_warehouse_agent(db: Session, warehouse_id: str | None = None) -> dict:
+def _kb_context_lines(chunks: list[dict]) -> list[str]:
+    """Retrieved passages as prompt text, each with its citation and how far it applies."""
+    lines = [
+        "=" * 64,
+        "PREDICTIX KNOWLEDGE BASE - RETRIEVED MAINTENANCE STANDARDS",
+        "Cite passages by their [ID]. Follow each passage's 'Applies' note: foreign",
+        "rules are reference practice, never Sri Lankan law.",
+        "=" * 64,
+    ]
+    for chunk in chunks:
+        if chunk.get("corpus") == "registry":
+            lines.append(f"\n[{chunk['citation']}] {chunk['title']} ({chunk['publisher']}, {chunk['jurisdiction']})")
+            lines.append(f"Applies: {chunk['applicability']}")
+        else:
+            tags = chunk.get("tags") or []
+            lines.append(f"\n[Legacy KB: {tags[1] if len(tags) > 1 else chunk['id']}]")
+        lines.append(chunk["text"])
+    return lines
+
+
+def run_warehouse_agent(db: Session, warehouse_id: str | None = None, viewer=None) -> dict:
     """
     KB-Enhanced Warehouse Report Agent:
     1. Queries ALL PostgreSQL tables → builds context (build_warehouse_context)
@@ -1065,20 +1085,13 @@ def run_warehouse_agent(db: Session, warehouse_id: str | None = None) -> dict:
     shap_names = [s[0] for s in top_shap]
     query_str = "warehouse maintenance safety standards " + " ".join(shap_names)
     
-    # Retrieve top 12 most relevant chunks from the pgvector database
-    relevant_chunks = kb_store.retrieve(query_str, top_k=12)
-    
-    lines = [
-        "=" * 64,
-        "PREDICTIX KNOWLEDGE BASE - RETRIEVED MAINTENANCE STANDARDS",
-        "=" * 64,
-    ]
-    for chunk in relevant_chunks:
-        source = chunk['tags'][1] if chunk.get('tags') and len(chunk['tags']) > 1 else chunk['id']
-        lines.append(f"\n[Source: {source}]")
-        lines.append(chunk['text'])
-        
-    kb_full_context = "\n".join(lines)
+    # Top passages the caller may see: registered sources are filtered by the
+    # caller's role and this warehouse (no viewer, no registered passages).
+    from app.kb.retrieval import KBScope
+
+    scope = KBScope.for_viewer(viewer, warehouse_id)
+    relevant_chunks = kb_store.retrieve(query_str, top_k=12, scope=scope)
+    kb_full_context = "\n".join(_kb_context_lines(relevant_chunks))
 
     # ── Step 3: KB Annotations (deterministic — no LLM) ───────
     shap_enriched     = annotate_shap_features(ctx.get("top_shap_features", []))

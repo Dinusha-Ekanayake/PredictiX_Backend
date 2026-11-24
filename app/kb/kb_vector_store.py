@@ -1,20 +1,26 @@
 """
 PredictiX KB Vector Store
 ===========================
-Retrieval over the maintenance-standards corpus in the kb_documents table,
-used by the warehouse report agent.
+Retrieval for the warehouse report agent over two corpora:
 
-The query is embedded with the same all-MiniLM-L6-v2 model the stored vectors
-were made with (app.chatbot.knowledge_service.embed_text: local model first,
-hosted endpoint second), and ranked by cosine similarity in Postgres. When no
-embedding can be made, the same kb_documents rows are ranked by TF-IDF
-instead, so both paths search one corpus and only their scoring differs.
+* the registered knowledge base (kb_sources / kb_chunks), loaded by the
+  ingestion pipeline in app.kb.pipeline from kb/sources.yaml. Searched by
+  app.kb.retrieval: hybrid (vector + full text) and filtered by the caller's
+  role and warehouse. Without a scope it returns nothing.
+* the legacy corpus (kb_documents), PDFs loaded before the registry existed,
+  pending an audit of their licences. Ranked by cosine similarity, with a
+  TF-IDF fallback when no query embedding can be made.
+
+The query is embedded once with the same all-MiniLM-L6-v2 model both corpora
+were embedded with, and the two ranked lists are merged by reciprocal rank
+fusion.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
+from typing import Optional
 
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -23,8 +29,42 @@ from sqlalchemy import text
 
 from app.chatbot.knowledge_service import embed_text, embedding_literal
 from app.db.session import SessionLocal
+from app.kb.retrieval import KBScope
+from app.kb.retrieval import search as kb_search
 
 log = logging.getLogger("predictix.kb_vector_store")
+
+_RRF_K = 60
+
+
+def _legacy_filter() -> str:
+    """SQL condition limiting the legacy corpus to what may be served.
+
+    The kb_* rows are the team's own knowledge-base articles. The pdf_* rows
+    come from ten PDFs loaded before the source registry, with no recorded
+    publisher or licence; they are excluded until audited (kb/LEGACY_AUDIT.md),
+    unless KB_LEGACY_PDFS_ENABLED=true. The condition is a constant, never
+    built from input.
+    """
+    import os
+
+    if os.getenv("KB_LEGACY_PDFS_ENABLED", "false").strip().lower() == "true":
+        return "TRUE"
+    return r"id NOT LIKE 'pdf\_%'"
+
+
+def _fuse(ranked_lists: list[list[dict]], top_k: int) -> list[dict]:
+    """Merge ranked lists by reciprocal rank fusion; ties keep list order."""
+    scored: dict[str, tuple[float, int, dict]] = {}
+    order = 0
+    for hits in ranked_lists:
+        for rank, hit in enumerate(hits, start=1):
+            prev = scored.get(hit["id"])
+            score = (prev[0] if prev else 0.0) + 1.0 / (_RRF_K + rank)
+            scored[hit["id"]] = (score, prev[1] if prev else order, hit)
+            order += 1
+    ranked = sorted(scored.values(), key=lambda t: (-t[0], t[1]))
+    return [hit for _, _, hit in ranked[:top_k]]
 
 
 class KBVectorStore:
@@ -47,7 +87,9 @@ class KBVectorStore:
                 return
             try:
                 with SessionLocal() as db:
-                    rows = db.execute(text("SELECT id, text, tags FROM kb_documents")).mappings().all()
+                    rows = db.execute(text(
+                        f"SELECT id, text, tags FROM kb_documents WHERE {_legacy_filter()}"
+                    )).mappings().all()
                 docs = [
                     {"id": r["id"], "section": r["id"], "text": r["text"], "tags": list(r["tags"] or [])}
                     for r in rows
@@ -83,37 +125,92 @@ class KBVectorStore:
 
     # ── public API ────────────────────────────────────────────────────────
 
-    def retrieve(self, query: str, top_k: int = 4, min_score: float = 0.25) -> list[dict]:
-        """Top `top_k` documents for `query` scoring at least `min_score`.
+    def retrieve(
+        self,
+        query: str,
+        top_k: int = 4,
+        min_score: float = 0.25,
+        *,
+        scope: Optional[KBScope] = None,
+    ) -> list[dict]:
+        """Top `top_k` passages for `query`, best first.
 
-        The query, method and every returned document (id, tags, score) are
-        added to the current AI trace.
+        Two corpora are searched: the registered sources (kb_chunks, hybrid
+        search, filtered by `scope`; nothing is returned from it without a
+        scope) and the legacy kb_documents corpus. The two ranked lists are
+        merged by reciprocal rank fusion. The query and every returned
+        passage (corpus, source, citation, score) go into the current AI trace.
         """
-        hits = self._retrieve(query, top_k, min_score)
-        from app.ai.agent.tracing import record
-
-        record(
-            "retrieval",
-            corpus="kb_documents",
-            method=hits[0]["retrieval"] if hits else "none",
-            query=query,
-            threshold=min_score,
-            hits=[{"id": h["id"], "tags": h.get("tags", [])[:3], "score": round(h["score"], 4)} for h in hits],
-        )
-        return hits
-
-    def _retrieve(self, query: str, top_k: int, min_score: float) -> list[dict]:
         try:
             vector = embed_text(query)
         except Exception as e:
             log.warning("Query embedding failed (%s); using keyword search over kb_documents.", e)
-            return self._lexical(query, top_k, min_score=0.05)
+            vector = None
+
+        registered = self._registered(query, vector, scope, top_k) if vector is not None else []
+        legacy = self._retrieve(query, top_k, min_score, vector)
+        hits = _fuse([registered, legacy], top_k)
+
+        from app.ai.agent.tracing import record
+
+        record(
+            "retrieval",
+            corpus="kb_chunks+kb_documents",
+            method="hybrid+semantic" if vector is not None else "lexical",
+            query=query,
+            threshold=min_score,
+            scope={"role": scope.role, "warehouse_id": scope.warehouse_id, "network_view": scope.network_view}
+            if scope else None,
+            hits=[
+                {"id": h["id"], "corpus": h["corpus"], "source": h.get("source_id"),
+                 "citation": h.get("citation"), "score": round(h["score"], 4)}
+                for h in hits
+            ],
+        )
+        return hits
+
+    def _registered(self, query: str, vector: list[float], scope: Optional[KBScope], top_k: int) -> list[dict]:
+        if scope is None:
+            return []
+        try:
+            with SessionLocal() as db:
+                found = kb_search(db, query, vector, scope, top_k=top_k)
+        except Exception as e:
+            log.warning("Registered knowledge base search failed (%s); using the legacy corpus only.", e)
+            return []
+        return [
+            {
+                "id": h.chunk_id,
+                "section": h.citation(),
+                "citation": h.citation(),
+                "text": h.content,
+                "tags": [h.source_id],
+                "score": h.cosine,
+                "retrieval": "hybrid",
+                "corpus": "registry",
+                "source_id": h.source_id,
+                "title": h.title,
+                "publisher": h.publisher,
+                "url": h.url,
+                "jurisdiction": h.jurisdiction,
+                "doc_type": h.doc_type,
+                "applicability": h.applicability,
+            }
+            for h in found
+        ]
+
+    def _retrieve(self, query: str, top_k: int, min_score: float, vector: Optional[list[float]] = None) -> list[dict]:
+        if vector is None:
+            return [{**h, "corpus": "legacy"} for h in self._lexical(query, top_k, min_score=0.05)]
+        return [{**h, "corpus": "legacy"} for h in self._semantic(vector, query, top_k, min_score)]
+
+    def _semantic(self, vector: list[float], query: str, top_k: int, min_score: float) -> list[dict]:
 
         try:
             with SessionLocal() as db:
                 rows = db.execute(text(
                     "SELECT id, text, tags, 1 - (embedding <=> CAST(:v AS vector)) AS score "
-                    "FROM kb_documents WHERE embedding IS NOT NULL "
+                    f"FROM kb_documents WHERE embedding IS NOT NULL AND {_legacy_filter()} "
                     "ORDER BY embedding <=> CAST(:v AS vector) LIMIT :k"
                 ), {"v": embedding_literal(vector), "k": int(top_k)}).mappings().all()
         except Exception as e:
