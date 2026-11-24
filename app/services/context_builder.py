@@ -182,6 +182,8 @@ class AssetContextBuilder:
         return {
             "generated_date": datetime.now().strftime("%B %d, %Y"),
             "report_id":      asset_id_str[:8].upper(),
+            # Raw id, not for display: the reports row needs it (reports_target_check).
+            "warehouse_id":   asset.get("warehouse_id"),
 
             # ── Asset core info ──────────────────────────
             "asset": {

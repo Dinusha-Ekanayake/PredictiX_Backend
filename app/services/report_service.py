@@ -92,6 +92,8 @@ class ReportService:
                 "report_type":              "asset_report",
                 "status":                   "generated",
                 "asset_id":                 str(asset_id),
+                # reports_target_check rejects an asset_report without its warehouse.
+                "warehouse_id":             context.get("warehouse_id"),
                 "title":                    f"Asset Performance Report — {asset_name}",
                 "generated_by":             str(user_id) if user_id else None,
                 "file_path":                public_url,
@@ -108,8 +110,9 @@ class ReportService:
             try:
                 self.supabase.table("reports").insert(report_row).execute()
             except Exception as db_err:
-                # Log but don't fail — PDF was generated and uploaded successfully
-                log.warning(f"[report_service] WARNING: Could not save report row to DB: {db_err}")
+                # The caller still gets the PDF, which was generated and uploaded;
+                # the missing history row is an error for operators to see.
+                log.error("Report %s was not recorded in the reports table: %s", report_id, db_err)
 
             return public_url, pdf_path
 
