@@ -140,7 +140,8 @@ def test_as_08_maintenance_history(client, auth, ctx, db):
         assert rows, f"asset has {expected} maintenance events but the API returned none"
 
 
-@case("AS-09", "Request asset summary", "AI generated summary is returned")
+@case("AS-09", "Request asset summary",
+      "The model is reached and a summary grounded in the asset data is returned")
 def test_as_09_asset_summary(client, auth, ctx, requires_hf):
     r = client.get(f"/asset-summaries/by-asset/{ctx['asset_in']}", headers=auth("admin"))
     assert r.status_code == 200, f"summary request failed ({r.status_code}): {r.text[:200]}"
@@ -149,13 +150,19 @@ def test_as_09_asset_summary(client, auth, ctx, requires_hf):
     text_out = (body.get("summary") or "").strip()
     assert text_out, "an empty summary was returned"
 
-    # The response now says which path produced the text. The expectation is a
-    # model-generated summary, so a template means the Space did not answer, 
-    # reported rather than smoothed over, because model_version is stamped
-    # either way and would otherwise imply a model wrote this.
-    assert body.get("source") == "model", (
-        f"summary came from the {body.get('source')!r} path, not the model; "
-        f"the Hugging Face Space did not return usable output")
+    # The Space must answer: "unavailable" means the model was never reached,
+    # which is what this case exists to catch.
+    reason = body.get("fallback_reason")
+    assert reason != "unavailable", "the Hugging Face Space did not answer"
+
+    # A model answer is published only when it is grounded in the asset data;
+    # otherwise the template is used and the rule it broke is reported. Either
+    # outcome is correct behaviour, but source and reason must agree.
+    if body.get("source") == "model":
+        assert reason is None, f"a published model summary carries a fallback reason: {reason!r}"
+    else:
+        assert str(reason).startswith("rejected: "), (
+            f"the template was used without a valid reason: {reason!r}")
 
 
 @case("AS-10", "Access asset outside authorized warehouse", "Access is denied")

@@ -13,14 +13,13 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, status, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Path, Query, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.deps import get_current_user, get_db
 from app.models import Profile, Ticket
 from app.schemas.user_tickets import (
     UserTicketAttachmentOut,
-    UserTicketAttachmentCreate,
     UserTicketCommentCreate,
     UserTicketCommentOut,
     UserTicketCreate,
@@ -34,6 +33,8 @@ from app.schemas.user_tickets import (
 )
 from app.services import user_ticket_service as svc
 from app.services.notification_service import NotificationService
+from app.core.errors import internal_error, upload_error
+from app.services import attachment_service, image_upload_service
 
 router = APIRouter(prefix="/user/tickets", tags=["User - Tickets"])
 
@@ -178,9 +179,12 @@ def create_my_ticket(
             preset_predicted_category=payload.predicted_category,
             preset_ticket_summary=payload.ticket_summary,
         )
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Could not create ticket: {exc}") from exc
     except Exception as exc:
         db.rollback()
-        raise HTTPException(status_code=400, detail=f"Could not create ticket: {exc}")
+        raise internal_error("The ticket could not be created. Please try again.", exc) from exc
 
     background_tasks.add_task(NotificationService.notify_on_new_ticket, db, str(ticket.id))
 
@@ -299,17 +303,18 @@ def add_my_ticket_comment(
 
 
 @router.post(
-    "/{ticket_id}/attachments",
+    "/{ticket_id}/attachments/upload",
     response_model=UserTicketAttachmentOut,
     status_code=status.HTTP_201_CREATED,
 )
-def add_my_ticket_attachment(
-    payload: UserTicketAttachmentCreate,
+def upload_my_ticket_attachment(
     ticket_id: UUID = Path(...),
+    file: UploadFile = File(...),
     current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Add an attachment to a ticket the user is allowed to view."""
+    """Attach an image (JPG, PNG, WebP or GIF, up to 10 MB) to a ticket the
+    user is allowed to view."""
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
@@ -318,12 +323,13 @@ def add_my_ticket_attachment(
             status_code=403, detail="Not allowed to add attachments to this ticket"
         )
 
-    obj = svc.add_user_attachment(
-        db,
-        ticket_id=ticket_id,
-        user_id=current_user.id,
-        file_path=payload.file_path,
-        mime_type=payload.mime_type,
-        original_filename=payload.original_filename,
-    )
+    content = file.file.read(attachment_service.MAX_ATTACHMENT_BYTES + 1)
+    try:
+        obj = attachment_service.store_ticket_attachment(
+            db, ticket=ticket, uploaded_by=current_user.id, content=content,
+            original_filename=file.filename,
+        )
+    except (image_upload_service.ImageTooLarge, image_upload_service.UnsupportedImage,
+            image_upload_service.StorageUnavailable, image_upload_service.StorageFailed) as exc:
+        raise upload_error(exc) from exc
     return UserTicketAttachmentOut.model_validate(obj)

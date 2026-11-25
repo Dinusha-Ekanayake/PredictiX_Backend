@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.deps import get_current_user, is_admin_role, get_db
 from app.db.supabase_client import supabase
-from app.chatbot.knowledge_service import embed_text
+from app.chatbot.knowledge_service import embed_text, invalidate_lexical_index
 
 log = logging.getLogger("predictix.knowledge_base")
 
@@ -158,6 +158,7 @@ def create_article(
 
     if not response.data:
         raise HTTPException(status_code=500, detail="Failed to create article")
+    invalidate_lexical_index()
     return response.data
 
 
@@ -195,6 +196,7 @@ def update_article(
 
     if not response.data:
         raise HTTPException(status_code=404, detail="Article not found")
+    invalidate_lexical_index()
     return response.data
 
 
@@ -221,6 +223,7 @@ def toggle_article(
 
     if not response.data:
         raise HTTPException(status_code=500, detail="Failed to toggle article")
+    invalidate_lexical_index()
     return response.data
 
 
@@ -234,4 +237,5 @@ def delete_article(
         raise HTTPException(status_code=403, detail="Only admins can delete KB articles")
 
     supabase.from_("knowledge_base").delete().eq("id", article_id).execute()
+    invalidate_lexical_index()
     return {"message": "Article deleted"}

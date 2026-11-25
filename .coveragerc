@@ -1,0 +1,14 @@
+# Coverage of shipped code only: tests, scratch scripts and model-training
+# notebooks/scripts are excluded so the figure reflects the running API.
+[run]
+source = app
+omit =
+    app/tests/*
+    app/ai/agent/tests/*
+    app/test_v1/*
+    app/chatbot/scratch/*
+    app/ai/models/*
+
+[report]
+skip_covered = True
+show_missing = True

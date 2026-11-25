@@ -10,7 +10,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.deps import get_db, get_current_user, is_admin_role, require_user
+from app.deps import get_db, get_current_user, is_admin_role, require_user, scoped_warehouse_id
 from app.models import Asset, Profile, Ticket
 from app.schemas.ticket_summary import TicketSummaryRequest, TicketSummaryResponse
 from app.ai.services.ticket_summary_service import (
@@ -18,6 +18,7 @@ from app.ai.services.ticket_summary_service import (
     generate_ticket_summary,
     get_ticket_summary_repo,
 )
+from app.core.errors import internal_error
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/ticket-summaries", tags=["Ticket Summaries"])
@@ -56,7 +57,7 @@ async def generate_summary(payload: TicketSummaryRequest):
         raise HTTPException(status_code=400, detail=f"Invalid input: {e}")
     except Exception as e:  # noqa: BLE001
         logger.error("[TicketSummary] generate failed: %s", e)
-        raise HTTPException(status_code=500, detail=f"Summary generation failed: {e}")
+        raise internal_error("Summary generation failed.", e) from e
 
 
 @router.get("/by-ticket/{ticket_id}", response_model=TicketSummaryResponse)
@@ -75,6 +76,10 @@ async def get_summary_by_ticket(
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
 
+    if is_admin_role(current_user):
+        wh_id = scoped_warehouse_id(current_user)
+        if not wh_id or str(ticket.warehouse_id) != wh_id:
+            raise HTTPException(status_code=404, detail="Ticket not found")
     if not is_admin_role(current_user) and str(current_user.id) not in (
         str(ticket.created_by), str(ticket.assigned_to)
     ):
@@ -99,7 +104,7 @@ async def get_summary_by_ticket(
         return TicketSummaryResponse(summary=summary, generated_at=datetime.utcnow().isoformat())
     except Exception as e:  # noqa: BLE001
         logger.error("[TicketSummary] by-ticket %s failed: %s", ticket_id, e)
-        raise HTTPException(status_code=500, detail=f"Summary generation failed: {e}")
+        raise internal_error("Summary generation failed.", e) from e
 
 
 @router.get("/health")

@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from app.deps import get_db, require_admin, require_user
+from app.deps import get_db, require_admin, require_super_admin, require_user
 from app.models import Warehouse
 from app.schemas.warehouse import WarehouseCreate, WarehouseOut
 from app.services.reference_data_cache import invalidate_warehouse_names
@@ -11,7 +11,8 @@ router = APIRouter(
     dependencies=[Depends(require_user)],
 )
 
-@router.post("/", response_model=WarehouseOut, dependencies=[Depends(require_admin)])
+# Creating a site is an organisation-level change, so it is a super admin's call.
+@router.post("/", response_model=WarehouseOut, dependencies=[Depends(require_super_admin)])
 def create_warehouse(payload: WarehouseCreate, db: Session = Depends(get_db)):
     obj = Warehouse(**payload.model_dump())
     db.add(obj)

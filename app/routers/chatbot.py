@@ -3,36 +3,56 @@ from __future__ import annotations
 
 from typing import Any, Optional, Dict
 
-from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
 from app.ai.agent.agent_service import run_agent
 from app.ai.agent.tools import ToolContext
-from app.chatbot.knowledge_service import search_knowledge
-from app.ai.services.llm_service import ask_llm
+from app.ai.agent.guardrails import (
+    MAX_HISTORY_CHARS,
+    MAX_HISTORY_TURNS,
+    MAX_QUESTION_CHARS,
+    bounded_frontend_context,
+    clamp,
+    sanitize_action_buttons,
+)
+from app.core.rate_limit import ai_rate_limit
 from app.deps import get_current_user, get_db, require_user
+from app.services import ai_trace_service
+from app.ai.agent.tools import answer_from_help
+from app.ai.agent.tracing import finish_trace, record, start_trace
+from app.chatbot.knowledge_service import search_help
 
 # Every endpoint here spends Groq quota on the caller's behalf, so a valid
-# token is required at the router level rather than per route. Without it an
-# anonymous POST to the public URL returns a real model answer, and with no
-# rate limiting anywhere in the application that is an open tap on a paid API.
+# token is required at the router level, and each user is limited to
+# AI_RATE_LIMIT calls per minute (see app/core/rate_limit.py).
 router = APIRouter(
     prefix="/chatbot",
     tags=["Chatbot"],
-    dependencies=[Depends(require_user)],
+    dependencies=[Depends(require_user), Depends(ai_rate_limit)],
 )
 
 
 # ─── Models ───────────────────────────────────────────────────────────────────
 
+def _bounded_question(value: str) -> str:
+    return clamp((value or "").strip(), MAX_QUESTION_CHARS)
+
+
 class ChatRequest(BaseModel):
     question: str
+
+    @field_validator("question")
+    @classmethod
+    def _bound_question(cls, value: str) -> str:
+        return _bounded_question(value)
 
 
 class ChatResponse(BaseModel):
     answer: str
     sources: list[Any] = []
+    trace_id: Optional[str] = None
 
 
 class ChatHistoryTurn(BaseModel):
@@ -52,9 +72,35 @@ class ToolTraceItem(BaseModel):
 
 
 class AgentRequest(BaseModel):
+    """Chat input, bounded so one request cannot carry an unbounded prompt.
+
+    Over-long input is trimmed rather than rejected, so a long paste still
+    gets an answer.
+    """
+
     question: str
     history: Optional[list[ChatHistoryTurn]] = None
     frontend_context: Optional[dict] = None
+
+    @field_validator("question")
+    @classmethod
+    def _bound_question(cls, value: str) -> str:
+        return _bounded_question(value)
+
+    @field_validator("history")
+    @classmethod
+    def _bound_history(cls, value):
+        if not value:
+            return value
+        recent = value[-MAX_HISTORY_TURNS:]
+        for turn in recent:
+            turn.content = clamp(turn.content, MAX_HISTORY_CHARS)
+        return recent
+
+    @field_validator("frontend_context")
+    @classmethod
+    def _bound_context(cls, value):
+        return bounded_frontend_context(value)
 
 
 class AgentResponse(BaseModel):
@@ -64,12 +110,14 @@ class AgentResponse(BaseModel):
     iterations: int = 1
     widget_type: Optional[str] = None
     widget_data: Optional[Dict[str, Any]] = None
+    # Id of the audit trace for this answer (GET /chatbot/traces/{trace_id}).
+    trace_id: Optional[str] = None
 
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
 
 @router.post("/ask", response_model=ChatResponse, deprecated=True)
-def ask_question(request: ChatRequest):
+def ask_question(request: ChatRequest, current_user: object = Depends(get_current_user)):
     """Legacy RAG endpoint, kept for backwards compatibility only.
     The main chatbot should use /chatbot/agent instead.
 
@@ -78,15 +126,15 @@ def ask_question(request: ChatRequest):
     and it sends no Authorization header, so it would now fail. Every chat
     surface in the product goes through /chatbot/agent.
     """
-    results = search_knowledge(request.question)
-    context = (
-        "\n".join(f"- {r['title']}: {r['content']}" for r in results)
-        if results
-        else "No relevant knowledge found in the system."
-    )
-    answer = ask_llm(context, request.question)
-    sources = [{"title": r["title"], "category": r.get("category", "")} for r in results]
-    return ChatResponse(answer=answer, sources=sources)
+    # Same guarded, cited help pipeline as the agent's FAQ/knowledge path.
+    start_trace(channel="chatbot", user=current_user, question=request.question)
+    record("handler", name="legacy /chatbot/ask")
+    hits = search_help(request.question, 4)
+    ctx = ToolContext(db=None, user=current_user)
+    answer = answer_from_help(request.question, ctx, hits)["answer"]
+    sources = [{"title": h["title"], "category": h.get("category") or "", "source": h.get("source")} for h in hits]
+    trace_id = finish_trace(answer=answer)
+    return ChatResponse(answer=answer, sources=sources, trace_id=trace_id)
 
 
 @router.post("/agent", response_model=AgentResponse)
@@ -114,7 +162,14 @@ def chatbot_agent(
     ctx = ToolContext(db=db, user=current_user, frontend_context=request.frontend_context)
     history = [t.model_dump() for t in (request.history or [])]
 
-    result = run_agent(question=request.question, history=history, ctx=ctx)
+    start_trace(channel="chatbot", user=current_user, question=request.question)
+    record("request", history_turns=len(history), has_page_context=request.frontend_context is not None)
+    try:
+        result = run_agent(question=request.question, history=history, ctx=ctx)
+    except Exception as exc:
+        record("error", where="run_agent", error=f"{type(exc).__name__}: {exc}")
+        finish_trace(answer="", status="error")
+        raise
 
     # Normalize tool_trace: ensure args is always a dict
     clean_trace = []
@@ -127,14 +182,50 @@ def chatbot_agent(
             )
         )
 
-    # Normalize action_buttons
-    clean_buttons = []
-    for btn in result.get("action_buttons", []):
-        clean_buttons.append(ActionButton(label=btn.get("label", "Go"), path=btn.get("path", "/")))
+    # Only in-app paths and copy actions reach the browser.
+    clean_buttons = [ActionButton(**btn) for btn in sanitize_action_buttons(result.get("action_buttons"))]
 
+    widget_type = result.get("widget_type")
+    trace_id = finish_trace(
+        answer=result.get("answer", ""),
+        buttons=[b.path for b in clean_buttons],
+        widget_type=widget_type,
+    )
     return AgentResponse(
         answer=result.get("answer", "I'm sorry, I couldn't generate a response."),
         action_buttons=clean_buttons,
         tool_trace=clean_trace,
         iterations=result.get("iterations", 1),
+        widget_type=widget_type if widget_type == "RECORD_SUMMARY" else None,
+        widget_data=result.get("widget_data") if widget_type == "RECORD_SUMMARY" else None,
+        trace_id=trace_id,
     )
+
+
+# ─── Audit traces ─────────────────────────────────────────────────────────────
+
+@router.get("/traces/{trace_id}")
+def get_trace(trace_id: str, db: Session = Depends(get_db), current_user: object = Depends(get_current_user)):
+    """How one answer was produced: every routing, retrieval, model, SQL and
+    action step, in order. 404 for an unknown id or one outside the caller's
+    scope (own traces for users, active warehouse for admins, all for super
+    admins)."""
+    trace = ai_trace_service.get_trace(db, trace_id, current_user)
+    if trace is None:
+        raise HTTPException(status_code=404, detail="Trace not found")
+    return trace
+
+
+@router.get("/traces")
+def list_traces(
+    user_id: Optional[str] = Query(default=None),
+    channel: Optional[str] = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: object = Depends(get_current_user),
+):
+    """Recent traces the caller may see, newest first, without their steps."""
+    try:
+        return ai_trace_service.list_traces(db, current_user, user_id=user_id, channel=channel, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))

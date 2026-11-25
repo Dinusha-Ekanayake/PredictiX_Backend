@@ -8,7 +8,10 @@ makes support able to fix a colleague's settings.
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from app.deps import get_db, get_current_user, is_admin_role, require_user
+from app.deps import (
+    get_db, get_current_user, is_admin_role, require_user,
+    assert_can_manage_user, is_super_admin, scoped_warehouse_id,
+)
 from app.models import Profile, UserNotificationPreference
 from app.schemas.misc import (
     UserNotificationPreferenceCreate,
@@ -36,6 +39,8 @@ def create_user_notification_preference(
     user = db.query(Profile).filter(Profile.id == payload.user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    if str(user.id) != str(current_user.id):
+        assert_can_manage_user(current_user, user)
 
     obj = UserNotificationPreference(**payload.model_dump())
     db.add(obj)
@@ -54,9 +59,20 @@ def list_user_notification_preferences(
 ):
     q = db.query(UserNotificationPreference)
     if is_admin_role(current_user):
-        # Admins may inspect a specific person, or everyone when unfiltered.
+        # Admins may inspect a specific person they manage, or everyone they
+        # manage when unfiltered. A super admin manages every account.
         if user_id:
+            target = db.query(Profile).filter(Profile.id == user_id).first()
+            if target is None:
+                return []
+            if str(target.id) != str(current_user.id):
+                assert_can_manage_user(current_user, target)
             q = q.filter(UserNotificationPreference.user_id == user_id)
+        elif not is_super_admin(current_user):
+            q = q.join(Profile, Profile.id == UserNotificationPreference.user_id).filter(
+                Profile.warehouse_id == scoped_warehouse_id(current_user),
+                Profile.role != "super_admin",
+            )
     else:
         # A non-admin always reads their own, whatever the query string says.
         q = q.filter(UserNotificationPreference.user_id == current_user.id)
@@ -74,10 +90,17 @@ def delete_user_notification_preference(
     ).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Notification preference not found")
-    if not is_admin_role(current_user) and str(obj.user_id) != str(current_user.id):
+    if str(obj.user_id) != str(current_user.id):
         # 404 rather than 403: whether someone else's preference exists is not
         # something a caller who cannot touch it needs to learn.
-        raise HTTPException(status_code=404, detail="Notification preference not found")
+        if not is_admin_role(current_user):
+            raise HTTPException(status_code=404, detail="Notification preference not found")
+        owner = db.query(Profile).filter(Profile.id == obj.user_id).first()
+        try:
+            if owner is not None:
+                assert_can_manage_user(current_user, owner)
+        except HTTPException:
+            raise HTTPException(status_code=404, detail="Notification preference not found")
     db.delete(obj)
     db.commit()
     return {"message": "Notification preference deleted"}

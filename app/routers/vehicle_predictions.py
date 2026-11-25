@@ -13,6 +13,7 @@ from app.deps import (
 )
 from app.models import Asset, Profile
 from app.ai.services.vehicle_prediction_service import run_vehicle_prediction_and_store
+from app.core.errors import internal_error
 
 router = APIRouter(
     prefix="/vehicle-predictions",
@@ -59,4 +60,4 @@ def predict_vehicle(
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Vehicle prediction failed: {str(e)}")
+        raise internal_error("Vehicle prediction failed.", e) from e

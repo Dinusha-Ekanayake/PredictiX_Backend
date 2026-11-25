@@ -1,44 +1,48 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+"""Ticket attachments for the staff ticket views.
+
+Files are uploaded through POST /ticket-attachments/upload, never straight to
+storage from the browser (see app/services/attachment_service.py).
+"""
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlalchemy.orm import Session
-from app.deps import get_db, get_current_user, is_admin_role
+
+from app.core.errors import upload_error
+from app.deps import get_db, get_current_user, is_admin_role, assert_in_active_warehouse, scoped_warehouse_id
 from app.models import Ticket, TicketAttachment, Profile
-from app.schemas.misc import TicketAttachmentCreate, TicketAttachmentOut
+from app.schemas.misc import TicketAttachmentOut
+from app.services import attachment_service, image_upload_service
+from app.services.ticket_access import can_view_ticket
 
 router = APIRouter(prefix="/ticket-attachments", tags=["Ticket Attachments"])
 
 
-def _can_view_ticket(ticket: Ticket, current_user: Profile) -> bool:
-    """Same rule as tickets.py's get_ticket/list scoping: everyone can
-    view (and attach files to) any ticket in their own warehouse; users
-    also keep visibility into tickets they created or are assigned to
-    outside their warehouse. Deletion of an attachment stays narrower, see delete_ticket_attachment."""
-    if is_admin_role(current_user):
-        return True
-    uid = str(getattr(current_user, "id", ""))
-    user_wh_id = getattr(current_user, "warehouse_id", None)
-    if user_wh_id is not None and str(ticket.warehouse_id) == str(user_wh_id):
-        return True
-    return str(ticket.created_by) == uid or str(ticket.assigned_to) == uid
-
-
-@router.post("/", response_model=TicketAttachmentOut)
-def create_ticket_attachment(payload: TicketAttachmentCreate, db: Session = Depends(get_db), current_user: Profile = Depends(get_current_user)):
-    ticket = db.query(Ticket).filter(Ticket.id == payload.ticket_id).first()
-    if not ticket:
-        raise HTTPException(status_code=404, detail="Ticket not found")
-    if not _can_view_ticket(ticket, current_user):
+@router.post("/upload", response_model=TicketAttachmentOut, status_code=201)
+def upload_ticket_attachment(
+    ticket_id: UUID = Form(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
+    """Attach an image (JPG, PNG, WebP or GIF, up to 10 MB) to a ticket the
+    caller can see. 404 for a ticket outside the caller's scope, so its
+    existence is not revealed."""
+    ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    if not ticket or not can_view_ticket(ticket, current_user):
         raise HTTPException(status_code=404, detail="Ticket not found")
 
-    # uploaded_by is always the authenticated caller, never trust a
-    # client-supplied value.
-    data = payload.model_dump()
-    data["uploaded_by"] = current_user.id
-
-    obj = TicketAttachment(**data)
-    db.add(obj)
-    db.commit()
-    db.refresh(obj)
-    return obj
+    # Read one byte past the limit so an oversized file is rejected without
+    # holding more of it in memory.
+    content = file.file.read(attachment_service.MAX_ATTACHMENT_BYTES + 1)
+    try:
+        return attachment_service.store_ticket_attachment(
+            db, ticket=ticket, uploaded_by=current_user.id, content=content,
+            original_filename=file.filename,
+        )
+    except (image_upload_service.ImageTooLarge, image_upload_service.UnsupportedImage,
+            image_upload_service.StorageUnavailable, image_upload_service.StorageFailed) as exc:
+        raise upload_error(exc) from exc
 
 
 @router.get("/", response_model=list[TicketAttachmentOut])
@@ -49,11 +53,13 @@ def list_ticket_attachments(
 ):
     if ticket_id:
         ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
-        if not ticket or not _can_view_ticket(ticket, current_user):
+        if not ticket or not can_view_ticket(ticket, current_user):
             raise HTTPException(status_code=404, detail="Ticket not found")
         q = db.query(TicketAttachment).filter(TicketAttachment.ticket_id == ticket_id)
     elif is_admin_role(current_user):
-        q = db.query(TicketAttachment)
+        q = db.query(TicketAttachment).join(Ticket, Ticket.id == TicketAttachment.ticket_id).filter(
+            Ticket.warehouse_id == scoped_warehouse_id(current_user)
+        )
     else:
         uid = str(getattr(current_user, "id", ""))
         user_wh_id = getattr(current_user, "warehouse_id", None)
@@ -74,6 +80,9 @@ def delete_ticket_attachment(attachment_id: str, db: Session = Depends(get_db), 
     obj = db.query(TicketAttachment).filter(TicketAttachment.id == attachment_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Ticket attachment not found")
+    if is_admin_role(current_user):
+        parent = db.query(Ticket).filter(Ticket.id == obj.ticket_id).first()
+        assert_in_active_warehouse(current_user, parent.warehouse_id if parent else None, "Ticket attachment")
     if not is_admin_role(current_user) and str(obj.uploaded_by) != str(getattr(current_user, "id", "")):
         raise HTTPException(status_code=403, detail="You can only delete your own attachments.")
     db.delete(obj)

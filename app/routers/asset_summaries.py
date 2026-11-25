@@ -6,7 +6,7 @@ import logging
 
 from app.schemas.asset_summary import AssetSummaryRequest, AssetSummaryResponse
 from app.ai.services.asset_summary_service import (
-    generate_asset_summary_with_source,
+    summarize_asset,
     get_asset_summary_repo,
 )
 from app.deps import (
@@ -19,6 +19,7 @@ from app.deps import (
     user_can_view_asset,
 )
 from app.models import Asset, AssetFailurePrediction, Profile
+from app.core.errors import internal_error
 
 logger = logging.getLogger(__name__)
 
@@ -120,17 +121,18 @@ async def get_summary_by_asset(
     input_text = _build_asset_input_text(asset, _latest_prediction(db, asset.id))
     try:
         logger.info(f"[AssetSummary] Generating summary for asset {asset_id}: {input_text[:80]}...")
-        summary, source = generate_asset_summary_with_source(input_text)
+        result = summarize_asset(input_text)
         logger.info(f"[AssetSummary] ✓ Summary generated for asset {asset_id}")
         return AssetSummaryResponse(
-            summary=summary,
+            summary=result.summary,
             generated_at=datetime.utcnow().isoformat(),
             model_version="1.0",
-            source=source,
+            source=result.source,
+            fallback_reason=result.fallback_reason,
         )
     except Exception as e:
         logger.error(f"[AssetSummary] ✗ Failed for asset {asset_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Summary generation failed: {str(e)}")
+        raise internal_error("Summary generation failed.", e) from e
 
 
 @router.post("/generate", response_model=AssetSummaryResponse, dependencies=[Depends(require_admin)])
@@ -151,14 +153,15 @@ async def generate_summary(payload: AssetSummaryRequest):
     """
     try:
         logger.info(f"[AssetSummary] Generating summary for input: {payload.input_text[:80]}...")
-        summary, source = generate_asset_summary_with_source(payload.input_text)
+        result = summarize_asset(payload.input_text)
         logger.info(f"[AssetSummary] ✓ Summary generated successfully")
         
         return AssetSummaryResponse(
-            summary=summary,
+            summary=result.summary,
             generated_at=datetime.utcnow().isoformat(),
             model_version="1.0",
-            source=source,
+            source=result.source,
+            fallback_reason=result.fallback_reason,
         )
     except ValueError as e:
         error_msg = f"Invalid input: {str(e)}"

@@ -5,14 +5,24 @@ sparse matrix has no single truth value, so `if not self._matrix` raises
 ValueError instead of answering the question, and every call fails once
 documents are loaded.
 
-retrieve() tries pgvector first and falls back to TF-IDF. The guard lives in
-that fallback, so these pin the store to it and fit a real TF-IDF index over a
-small in-memory corpus, needing no database and no network.
+retrieve() embeds the query and ranks kb_documents in pgvector, and falls back
+to TF-IDF over the same documents when no embedding can be made. These make
+the embedder fail so retrieve() takes that fallback, and fit a real TF-IDF
+index over a small in-memory corpus, needing no database and no network.
 """
 import pytest
 from sklearn.feature_extraction.text import TfidfVectorizer
 
+import app.kb.kb_vector_store as kb_vector_store
 from app.kb.kb_vector_store import KBVectorStore
+
+
+@pytest.fixture(autouse=True)
+def _no_embeddings(monkeypatch):
+    def unavailable(_text):
+        raise RuntimeError("embedding unavailable in unit tests")
+
+    monkeypatch.setattr(kb_vector_store, "embed_text", unavailable)
 
 CORPUS = [
     {"id": "a", "section": "Ops: PM coverage", "text":
@@ -30,16 +40,12 @@ CORPUS = [
 def _loaded_store() -> KBVectorStore:
     """A store with its index already fitted, bypassing the Supabase load."""
     store = KBVectorStore()
-    store.use_pgvector = False       # exercise the TF-IDF fallback
     store._docs = CORPUS
-    store._ids = [d["id"] for d in CORPUS]
-    store._texts = [d["text"] for d in CORPUS]
-    store._tags = [d["tags"] for d in CORPUS]
     store._vectorizer = TfidfVectorizer(
         strip_accents="unicode", lowercase=True, stop_words="english",
         ngram_range=(1, 2), max_features=2000, sublinear_tf=True,
     )
-    store._matrix = store._vectorizer.fit_transform(store._texts)
+    store._matrix = store._vectorizer.fit_transform(d["text"] for d in CORPUS)
     return store
 
 
@@ -67,9 +73,7 @@ def test_retrieve_returns_empty_when_nothing_is_indexed():
     """An empty corpus leaves _matrix as None, which must read as "no index"
     rather than raising or being mistaken for a fitted one."""
     store = KBVectorStore()
-    store.use_pgvector = False       # exercise the TF-IDF fallback
     store._docs = []
-    store._texts = []
     store._vectorizer = None
     store._matrix = None
     assert store.retrieve("anything") == []

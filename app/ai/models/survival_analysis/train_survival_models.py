@@ -157,6 +157,8 @@ def main() -> None:
         print(f"  {m['component']:<10s} {m['test_concordance']:>9.4f} {ev:>16s} {m['AIC']:>12.0f}")
     print(f"\nWrote unified bundle : {C.MODELS_DIR / 'survival_bundle.pkl'}")
     print(f"Wrote training report: {C.MODELS_DIR / 'training_report.json'}")
+    print("The API only loads a bundle whose checksum is recorded. Once the new "
+          "bundle is checked, run: python scripts/update_model_checksums.py")
 
 
 if __name__ == "__main__":

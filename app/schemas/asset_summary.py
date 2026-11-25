@@ -24,6 +24,11 @@ class AssetSummaryResponse(BaseModel):
     # to a caller, because model_version is stamped either way — which reads as
     # a claim that a model wrote a sentence the fallback wrote.
     source: Literal["model", "template"] = "template"
+    # Why the template was used: "unavailable" when the Space did not answer,
+    # "rejected: <rule>" when its answer stated something the asset data does
+    # not (an invented figure, a hallucinated phrase, or "requires no
+    # maintenance" for an asset its data marks as urgent). None for "model".
+    fallback_reason: Optional[str] = None
 
     class Config:
         json_schema_extra = {

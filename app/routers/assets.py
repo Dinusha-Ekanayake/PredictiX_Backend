@@ -3,7 +3,7 @@ import logging
 from datetime import datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import String, cast, or_, func, case
 from sqlalchemy.exc import IntegrityError
@@ -40,6 +40,7 @@ from app.models import (
     Ticket,
 )
 from app.schemas.asset import AssetCreate, AssetOut, AssetListOut, AssetUpdate
+from app.services import image_upload_service
 from app.services.service_reminder_service import send_manual_reminder
 
 # Real values of the assets.status Postgres enum.
@@ -645,6 +646,33 @@ def get_asset(
         # reveal that an asset outside the caller's warehouse exists.
         raise HTTPException(status_code=404, detail="Asset not found")
     return obj
+
+
+@router.post("/{asset_id}/image", response_model=AssetOut, dependencies=[Depends(require_admin)])
+def upload_asset_image(
+    asset_id: UUID,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
+    """Store a photo of the asset (JPG, PNG, GIF or WebP up to 10 MB) and add
+    it to the asset's metadata.images."""
+    obj = db.query(Asset).filter(Asset.id == asset_id).first()
+    if not obj:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    _assert_asset_in_scope(obj, current_user)
+
+    content = file.file.read(image_upload_service.MAX_ASSET_IMAGE_BYTES + 1)
+    try:
+        return image_upload_service.add_asset_image(db, obj, content)
+    except image_upload_service.ImageTooLarge as exc:
+        raise HTTPException(status_code=413, detail=str(exc))
+    except image_upload_service.UnsupportedImage as exc:
+        raise HTTPException(status_code=415, detail=str(exc))
+    except image_upload_service.StorageUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except image_upload_service.StorageFailed as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
 
 
 @router.put("/{asset_id}", response_model=AssetOut, dependencies=[Depends(require_admin)])

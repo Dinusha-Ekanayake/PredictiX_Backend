@@ -9,11 +9,12 @@ Keeps the router thin by centralising:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Iterable, Optional
+import logging
+from datetime import datetime
+from typing import Optional
 from uuid import UUID
 
-from sqlalchemy import and_, or_, func
+from sqlalchemy import or_, func
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -23,6 +24,8 @@ from app.models import (
     TicketComment,
     TicketStatusHistory,
 )
+
+log = logging.getLogger(__name__)
 
 # AI services, imported lazily inside helpers so a missing HF token doesn't
 # prevent the rest of the user-ticket section from importing.
@@ -68,30 +71,12 @@ def _normalize_category(value: Optional[str]) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# Ticket number generation
+# Ticket numbers
 # ---------------------------------------------------------------------------
-
-TICKET_NUMBER_PREFIX = "TKT"
-
-
-def generate_ticket_number(db: Session, *, now: Optional[datetime] = None) -> str:
-    """Generate the next ticket number in the form ``TKT-YYYY-NNNN``.
-
-    NNNN is the per-year sequence: count of tickets already opened this year
-    plus one, zero-padded to four digits. Collisions are rare in practice; if
-    the DB has a unique constraint on ``ticket_number`` the caller can retry.
-    """
-    now = now or datetime.now(timezone.utc)
-    year = now.year
-    year_prefix = f"{TICKET_NUMBER_PREFIX}-{year}-"
-
-    count_this_year = (
-        db.query(Ticket)
-        .filter(Ticket.ticket_number.like(f"{year_prefix}%"))
-        .count()
-    )
-    next_seq = count_this_year + 1
-    return f"{year_prefix}{next_seq:04d}"
+# Assigned by the database on insert: trigger trg_generate_ticket_number takes
+# the next value of ticket_number_seq ("TCK-000936"). A sequence is atomic and
+# never reuses a number; the count-based generators it replaces collided
+# after any ticket was deleted, and under concurrent creation.
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +282,7 @@ def fetch_ticket_history(db: Session, ticket_id: UUID) -> list[TicketStatusHisto
 
 
 def _safe_log(prefix: str, exc: Exception) -> None:
-    print(f"[USER-TICKETS][{prefix}] {type(exc).__name__}: {exc}", flush=True)
+    log.warning(f"[USER-TICKETS][{prefix}] {type(exc).__name__}: {exc}")
 
 
 def predict_priority_safely(title: str, description: str) -> Optional[object]:
@@ -476,7 +461,7 @@ def create_user_ticket(
         ticket_summary = preset_ticket_summary
 
     ticket = Ticket(
-        ticket_number=generate_ticket_number(db),
+        # Assigned by the database from ticket_number_seq; see create_ticket.
         title=title,
         description=description,
         status="open",
@@ -540,17 +525,3 @@ def add_user_comment(
     return obj
 
 
-def add_user_attachment(
-    db: Session, *, ticket_id: UUID, user_id: UUID, file_path: str, mime_type: Optional[str] = None, original_filename: Optional[str] = None
-) -> TicketAttachment:
-    obj = TicketAttachment(
-        ticket_id=ticket_id,
-        file_path=file_path,
-        mime_type=mime_type,
-        original_filename=original_filename,
-        uploaded_by=user_id,
-    )
-    db.add(obj)
-    db.commit()
-    db.refresh(obj)
-    return obj

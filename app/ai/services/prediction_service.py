@@ -6,6 +6,7 @@ from fastapi import HTTPException
 
 from app.ai.services.pdm_decision_service import classifier_only_tier
 from app.services.health_bands import band_for
+from app.core.errors import internal_error
 
 _TIER_TO_RISK_LABEL = {"urgent": "High", "watch": "Medium", "healthy": "Low"}
 _RISK_LABEL_TO_ACTION = {
@@ -90,7 +91,7 @@ def run_classification(data: dict, clf_model, clf_features: list[str], clf_thres
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Classification failed: {str(e)}")
+        raise internal_error("Classification failed.", e) from e
 
 
 def run_regression(data: dict, reg_model, reg_features: list[str]) -> dict:
@@ -116,7 +117,7 @@ def run_regression(data: dict, reg_model, reg_features: list[str]) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Regression failed: {str(e)}")
+        raise internal_error("Regression failed.", e) from e
 
 
 def run_health_score(data: dict) -> dict:
@@ -234,7 +235,7 @@ def run_health_score(data: dict) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Health score calculation failed: {str(e)}")
+        raise internal_error("Health score calculation failed.", e) from e
 
 
 def run_full_prediction(

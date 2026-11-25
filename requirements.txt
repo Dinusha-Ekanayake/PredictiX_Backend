@@ -1,63 +1,11 @@
-# Pinned to the versions currently installed and verified working, so builds
-# are reproducible. Update deliberately (bump a pin, test, commit).
+# Full install for development, CI and knowledge-base ingestion:
+#   pip install -r requirements.txt
+#
+# The server runtime is pinned in requirements-prod.txt (what EC2 installs).
+# This file adds the local embedding model, which pulls in torch. The server
+# works without it: chatbot queries are embedded through the hosted Hugging
+# Face endpoint instead, and the nightly knowledge-base refresh is skipped
+# (bulk ingestion only runs where the local model is installed).
+-r requirements-prod.txt
 
-# ── Core web / DB ──────────────────────────────────────────────────────────────
-fastapi==0.128.1
-uvicorn==0.40.0
-sqlalchemy==2.0.46
-alembic==1.18.3
-apscheduler==3.11.2
-psycopg[binary]==3.3.2
-psycopg2-binary==2.9.11
-pydantic-settings==2.12.0
-python-multipart==0.0.22
-python-dotenv==1.2.1
-requests==2.33.0
-email-validator==2.3.0
-
-# ── Auth ───────────────────────────────────────────────────────────────────────
-python-jose==3.5.0
-passlib==1.7.4
-# Pinned to 4.0.x: passlib 1.7.4 (unmaintained) probes bcrypt.__about__.__version__,
-# which was removed in bcrypt>=4.1 — that raises a trapped AttributeError logged on
-# every hash/verify call. 4.0.1 is the last release that still has __about__.
-bcrypt==4.0.1
-
-# ── ML / data ──────────────────────────────────────────────────────────────────
-pandas==2.3.3
-numpy==2.4.3
-scikit-learn==1.6.1
-catboost==1.2.10
-shap==0.51.0
-xgboost==3.2.0
-lightgbm==4.6.0
-lifelines==0.30.3
-joblib==1.5.3
-
-# ── NLP / LLM / inference ──────────────────────────────────────────────────────
-openai==3.3.0
-huggingface_hub==1.8.0
-safetensors==0.7.0
-nltk==3.9.4
-groq==0.37.1
-langchain-groq==1.1.2
-langchain-core==1.5.6
-# Warehouse report generation builds its LLM with ChatOpenAI pointed at
-# OpenRouter (app/agents/report_agents._get_llm), so this is required for the
-# report feature to import at all.
-langchain-openai==1.5.2
-
-# ── Other ──────────────────────────────────────────────────────────────────────
-supabase==2.28.3
-reportlab==4.5.1
-gradio_client
-
-# playwright renders /reports/render-pdf's HTML→PDF export via headless
-# Chromium. `pip install -r requirements.txt` alone is not enough — the
-# browser binary is separate and must be fetched once per host with:
-#   playwright install chromium
-playwright==1.62.0
-pgvector==0.5.0
-sentence-transformers==3.0.1
-
-pypdf==6.16.1
+sentence-transformers==5.7.0

@@ -1,12 +1,13 @@
 import logging
 from datetime import datetime, timezone
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy import String, cast, func
 
-from app.deps import get_db, get_current_user, require_admin, require_user, is_admin_role, active_warehouse_id
+from app.deps import get_db, get_current_user, require_admin, require_user, is_admin_role, active_warehouse_id, scoped_warehouse_id, user_can_view_asset
 from app.models import (
     Asset,
     Notification,
@@ -33,10 +34,14 @@ from app.schemas.tickets import (
     TicketPriorityResponse,
     TicketPreviewRequest,
     TicketPreviewResponse,
+    TicketDetailsOut,
 )
+from app.services.ticket_access import can_view_ticket
+from app.services.ticket_detail_service import ticket_details
 from app.ai.services.ticket_categorization_service import categorize_ticket_text
 from app.ai.services.ticket_priority_service import predict_ticket_priority
 from app.services.notification_service import NotificationService
+from app.core.errors import internal_error
 
 router = APIRouter(prefix="/tickets", tags=["Tickets"])
 log = logging.getLogger(__name__)
@@ -76,11 +81,6 @@ def _normalize_category(v: str | None) -> str | None:
     return normalized
 
 
-def _generate_ticket_number(db: Session) -> str:
-    count = db.query(func.count(Ticket.id)).scalar() or 0
-    return f"T-{count + 1:04d}"
-
-
 @router.post("/", response_model=TicketOut)
 def create_ticket(
     payload: TicketCreate,
@@ -89,7 +89,9 @@ def create_ticket(
     current_user: Profile = Depends(get_current_user),
 ):
     data = payload.model_dump()
-    data["ticket_number"] = _generate_ticket_number(db)
+    # ticket_number is left unset: the database assigns it from ticket_number_seq
+    # (trigger trg_generate_ticket_number), which is atomic and never reuses a
+    # number. Counting rows here collided as soon as any ticket was deleted.
     if data.get("priority"):
         data["priority"] = _normalize_priority(data["priority"])
     if data.get("predicted_priority"):
@@ -97,16 +99,25 @@ def create_ticket(
     if data.get("predicted_category"):
         data["predicted_category"] = _normalize_category(data["predicted_category"])
 
-    # Tag the ticket with a warehouse so it shows up in warehouse-scoped
-    # ticket lists, prefer the linked asset's warehouse (authoritative),
-    # falling back to the creating admin's active warehouse. Without this,
-    # tickets silently had a NULL warehouse_id and were invisible to the
-    # scoped list/status-count endpoints.
-    if not data.get("warehouse_id"):
-        if data.get("asset_id"):
-            data["warehouse_id"] = db.query(Asset.warehouse_id).filter(Asset.id == data["asset_id"]).scalar()
-        if not data.get("warehouse_id") and is_admin_role(current_user):
-            data["warehouse_id"] = active_warehouse_id(current_user)
+    # The ticket is always raised in the caller's name, against an asset they
+    # can see, and in the warehouse that asset belongs to (or the caller's own
+    # warehouse when no asset is linked). None of these is taken from the
+    # request body, so a ticket cannot be attributed to someone else or
+    # planted in another warehouse.
+    data["created_by"] = current_user.id
+    if data.get("asset_id"):
+        asset = db.query(Asset).filter(Asset.id == data["asset_id"]).first()
+        if asset is None:
+            raise HTTPException(status_code=404, detail="Asset not found")
+        if is_admin_role(current_user):
+            wh_id = scoped_warehouse_id(current_user)
+            if not wh_id or str(asset.warehouse_id) != wh_id:
+                raise HTTPException(status_code=404, detail="Asset not found")
+        elif not user_can_view_asset(asset, current_user):
+            raise HTTPException(status_code=404, detail="Asset not found")
+        data["warehouse_id"] = asset.warehouse_id
+    else:
+        data["warehouse_id"] = scoped_warehouse_id(current_user)
 
     obj = Ticket(**data)
     db.add(obj)
@@ -451,7 +462,11 @@ def update_my_ticket(
     obj = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    if not _is_admin(current_user) and str(obj.created_by) != str(current_user.id):
+    if _is_admin(current_user):
+        wh_id = scoped_warehouse_id(current_user)
+        if not wh_id or str(obj.warehouse_id) != wh_id:
+            raise HTTPException(status_code=404, detail="Ticket not found")
+    elif str(obj.created_by) != str(current_user.id):
         raise HTTPException(status_code=403, detail="You can only edit tickets you created.")
 
     # Record old values
@@ -497,7 +512,11 @@ def delete_my_ticket(
     obj = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    if not _is_admin(current_user) and str(obj.created_by) != str(current_user.id):
+    if _is_admin(current_user):
+        wh_id = scoped_warehouse_id(current_user)
+        if not wh_id or str(obj.warehouse_id) != wh_id:
+            raise HTTPException(status_code=404, detail="Ticket not found")
+    elif str(obj.created_by) != str(current_user.id):
         raise HTTPException(status_code=403, detail="You can only delete tickets you created.")
     
     # Gather details for deletion notification before purging
@@ -534,6 +553,16 @@ def delete_my_ticket(
     return {"message": "Ticket deleted", "id": ticket_id}
 
 
+@router.get("/{ticket_id}/details", response_model=TicketDetailsOut)
+def get_ticket_details(ticket_id: UUID, db: Session = Depends(get_db), current_user: Profile = Depends(get_current_user)):
+    """Creator, assignee, site and status history for the staff ticket view.
+    404 for a ticket outside the caller's scope."""
+    ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    if not ticket or not can_view_ticket(ticket, current_user):
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    return ticket_details(db, ticket, current_user)
+
+
 @router.get("/{ticket_id}", response_model=TicketOut)
 def get_ticket(ticket_id: str, db: Session = Depends(get_db), current_user: Profile = Depends(get_current_user)):
     obj = db.query(Ticket).filter(Ticket.id == ticket_id).first()
@@ -543,7 +572,11 @@ def get_ticket(ticket_id: str, db: Session = Depends(get_db), current_user: Prof
     # (and comment on) any ticket in their own warehouse; only owners/admins
     # may edit one (enforced in update_my_ticket/update_ticket). Without
     # this, any authenticated user could read any ticket by
-    # guessing/incrementing its id.
+    # guessing/incrementing its id. Admins are held to their active warehouse.
+    if is_admin_role(current_user):
+        wh_id = scoped_warehouse_id(current_user)
+        if wh_id and str(obj.warehouse_id) != wh_id:
+            raise HTTPException(status_code=404, detail="Ticket not found")
     if not is_admin_role(current_user):
         uid = str(current_user.id)
         user_wh_id = getattr(current_user, "warehouse_id", None)
@@ -566,6 +599,9 @@ def update_ticket(
         raise HTTPException(status_code=403, detail="Only admins can update tickets")
     obj = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not obj:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    wh_id = scoped_warehouse_id(current_user)
+    if wh_id and str(obj.warehouse_id) != wh_id:
         raise HTTPException(status_code=404, detail="Ticket not found")
 
     updates = payload.model_dump(exclude_unset=True)
@@ -646,6 +682,9 @@ def delete_ticket(
     """
     obj = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not obj:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    wh_id = scoped_warehouse_id(current_user)
+    if wh_id and str(obj.warehouse_id) != wh_id:
         raise HTTPException(status_code=404, detail="Ticket not found")
 
     # Gather details for deletion notification before purging
@@ -753,7 +792,7 @@ def categorize_ticket_endpoint(payload: TicketCategorizationRequest):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to categorize ticket: {exc}") from exc
+        raise internal_error("The ticket could not be categorised.", exc) from exc
 
 
 @router.post(
@@ -773,4 +812,4 @@ def prioritize_ticket_endpoint(payload: TicketPriorityRequest):
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to classify ticket priority: {exc}") from exc
+        raise internal_error("The ticket priority could not be predicted.", exc) from exc

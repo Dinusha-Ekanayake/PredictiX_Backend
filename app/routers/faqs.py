@@ -4,6 +4,7 @@ from typing import Optional
 from datetime import datetime
 from sqlalchemy.orm import Session
 
+from app.chatbot.knowledge_service import invalidate_faq_index
 from app.deps import get_current_user, is_admin_role, get_db
 from app.db.supabase_client import supabase
 from app.services.notification_service import NotificationService
@@ -73,6 +74,7 @@ def create_faq(
         creator_name
     )
 
+    invalidate_faq_index()
     return response.data
 
 
@@ -93,6 +95,7 @@ def update_faq(faq_id: str, payload: FaqUpdate, current_user: object = Depends(g
 
     if not response.data:
         raise HTTPException(status_code=404, detail="FAQ not found")
+    invalidate_faq_index()
     return response.data
 
 
@@ -102,4 +105,5 @@ def delete_faq(faq_id: str, current_user: object = Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Only admins can delete FAQs")
 
     supabase.from_("faqs").delete().eq("id", faq_id).execute()
+    invalidate_faq_index()
     return {"message": "FAQ deleted"}

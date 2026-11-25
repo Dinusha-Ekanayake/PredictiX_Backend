@@ -10,18 +10,25 @@ Architecture:
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Optional
 
 from sqlalchemy import text, or_, and_, func, cast, String
 from sqlalchemy.orm import Session
 
-from app.db.supabase_client import supabase
+from app.ai.agent.safe_sql import SqlScope, UnsafeSQLError, run_scoped_query, strip_code_fences
+from app.ai.agent.guardrails import fence_untrusted
+from app.ai.agent.scoping import scope_asset_query, scope_profile_query, scope_ticket_query
 
 log = logging.getLogger("predictix.tools")
 
 
 # ─── Context ─────────────────────────────────────────────────────────────────
+
+# Matches no row; used when a caller has no warehouse (see ToolContext).
+NO_WAREHOUSE = "00000000-0000-0000-0000-000000000000"
+
 
 @dataclass
 class ToolContext:
@@ -48,8 +55,17 @@ class ToolContext:
 
     @property
     def warehouse_id(self) -> Optional[str]:
-        wid = getattr(self.user, "warehouse_id", None)
-        return str(wid) if wid else None
+        """The caller's active warehouse (a super admin's choice at login)."""
+        from app.deps import scoped_warehouse_id
+
+        return scoped_warehouse_id(self.user)
+
+    @property
+    def scope_warehouse_id(self) -> str:
+        """Warehouse id for filters. Never None: a caller with no warehouse gets
+        an id that matches nothing, so a missing warehouse narrows to no rows
+        instead of widening to every warehouse."""
+        return self.warehouse_id or NO_WAREHOUSE
 
 
 # ─── Full Database Schema ─────────────────────────────────────────────────────
@@ -57,7 +73,7 @@ class ToolContext:
 DB_SCHEMAS: dict[str, str] = {
     "warehouses": "id, code, name, address, city, district, country, timezone, is_active, climate_zone, warehouse_type, metadata, created_at, updated_at",
     "departments": "id, warehouse_id, code, name, description, is_active, created_at, updated_at",
-    "profiles": "id, employee_id, full_name, email, phone, role(ENUM: admin|super_admin|user), status(ENUM: active|inactive|suspended), warehouse_id, department_id, avatar_url, meta, created_at, updated_at",
+    "profiles": "id, employee_id, full_name, email, phone, role(ENUM: admin|super_admin|user), status(ENUM: active|inactive|suspended), warehouse_id, department_id, avatar_url, created_at, updated_at",
     "assets": "id, asset_code, warehouse_id, department_id, asset_name, asset_type, category(e.g. Heavy Truck (16T), Forklift 2.5T, Delivery Van (1.5T), Medium Truck (7T), Light Truck (3.5T), Mini Truck (1T)), vehicle_type, make, model, manufacture_year, registration_number, vin, status(ENUM: active|inactive|under_maintenance|decommissioned), health_band(ENUM: excellent|good|moderate|poor|critical), criticality_score(float 0-100), purchase_date, warranty_expiry_date, assigned_to, current_mileage, last_service_date, next_service_date, description, fuel_type, transmission, make_model, maintenance_priority, created_at, updated_at",
     "maintenance_events": "id, asset_id, event_type(ENUM: preventive|corrective|inspection|emergency), title, description, performed_by, scheduled_date, performed_at, odometer_reading, downtime_hours, cost_amount, currency, vendor_name, notes, metadata, created_at, updated_at",
     "sensor_readings": "id, asset_id, recorded_at, temperature, vibration, pressure, humidity, rpm, voltage, fuel_level, odometer, engine_hours_since_last_service, days_since_last_service, tire_health_pct, brake_health_pct, battery_health_pct, oil_life_pct, hydraulic_health_pct, vibration_rms_mm_s, fuel_efficiency_km_per_l, engine_hours_total, coolant_temp_max_c, battery_voltage_v, odometer_km",
@@ -158,152 +174,155 @@ def handle_navigation(question: str, ctx: ToolContext) -> dict:
     }
 
 
-def handle_faq(question: str, ctx: ToolContext) -> dict:
-    """Fetch FAQs from Supabase, synthesize with LLM, and fallback to admin if not found."""
-    from app.ai.services.llm_service import call_groq
+#: A ticket in one of these states is finished; every other ticket is still open work.
+DONE_TICKET_STATUSES = ("resolved", "closed", "cancelled")
 
-    def _get_faq_fallback() -> dict:
-        return {
-            "answer": "Please reach out to our admins at **neuromindspredictix@gmail.com** and they'll get back to you as soon as possible.",
-            "action_buttons": [{"label": "Copy Admin Email", "path": "copy:neuromindspredictix@gmail.com"}],
-        }
 
-    try:
-        resp = (
-            supabase.from_("faqs")
-            .select("id,question,answer,category")
-            .eq("is_active", True)
-            .execute()
-        )
-        all_faqs = resp.data or []
-    except Exception as e:
-        log.warning("FAQ fetch failed: %s", e)
-        all_faqs = []
+HELP_NOT_FOUND = "NOT_FOUND"
+# How far below the best help match another item may score and still be used.
+HELP_SCORE_MARGIN = 0.12
+_SUPPORT_EMAIL = "neuromindspredictix@gmail.com"
 
-    q_lower = question.lower()
-    words = [w for w in q_lower.split() if len(w) > 2]
-    scored = []
-    for faq in all_faqs:
-        faq_q = faq.get("question", "").lower()
-        faq_a = faq.get("answer", "").lower()
-        score = sum(2 for w in words if w in faq_q) + sum(1 for w in words if w in faq_a)
-        if score > 0:
-            scored.append((score, faq))
 
-    scored.sort(key=lambda x: x[0], reverse=True)
-    top = [faq for _, faq in scored[:4]]
-
-    if not top:
-        return handle_knowledge(question, ctx)
-
-    context_str = "\n".join(
-        f"Q: {faq['question']}\nA: {faq['answer']}" for faq in top
-    )
-    user_name = ctx.full_name.split()[0] if ctx.full_name else "there"
-
-    try:
-        summary, fb = call_groq(
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are PredictiX Assistant. Answer the user's question using ONLY the provided FAQ context. "
-                        "CRITICAL INSTRUCTION: If the provided context does NOT contain the exact answer to the user's specific question (for example, they ask how to delete a ticket, but the context only explains how to open or view tickets), you MUST reply EXACTLY with the word: NOT_FOUND. Do not try to guess or invent an answer based on unrelated context. "
-                        "If the context DOES answer the question accurately, be conversational, encouraging, and use simple language. "
-                        "Never mention 'the FAQ', 'the context', or 'the database'. Just answer naturally. "
-                        "Always start your response with a ✅ emoji and end with: '*Let me know if you need any more help! 😊*'"
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"My name is {user_name}. My question is: \"{question}\"\n\n"
-                        f"FAQ Context:\n{context_str}"
-                    ),
-                },
-            ],
-            max_tokens=400,
-            temperature=0.1,
-        )
-        
-        if not summary or "NOT_FOUND" in str(summary).strip():
-            return handle_knowledge(question, ctx)
-            
-        answer = fb + str(summary)
-    except Exception as e:
-        log.error("FAQ LLM synthesis failed: %s", e)
-        return handle_knowledge(question, ctx)
-
+def _help_not_covered() -> dict:
     return {
-        "answer": answer,
-        "action_buttons": [],
+        "answer": (
+            "📚 I couldn't find that in the PredictiX help content. "
+            f"Please reach out to our admins at **{_SUPPORT_EMAIL}** and they'll get back to you as soon as possible."
+        ),
+        "action_buttons": [{"label": "Copy Admin Email", "path": f"copy:{_SUPPORT_EMAIL}"}],
     }
 
 
-def handle_knowledge(question: str, ctx: ToolContext) -> dict:
-    """Semantic search on knowledge base, then synthesize and format cleanly with fast model."""
-    from app.ai.services.llm_service import call_groq
-    from app.chatbot.knowledge_service import search_knowledge
+def _sources_line(hits: list[dict]) -> str:
+    labels = []
+    for h in hits:
+        kind = "FAQ" if h.get("source") == "faq" else "Article"
+        labels.append(f"{kind}: {h.get('title') or 'Help content'}")
+    return "\n\n📎 *Sources: " + "; ".join(dict.fromkeys(labels)) + "*"
 
-    raw_results = search_knowledge(question, match_count=4)
-    if not raw_results:
-        return {
-            "answer": "📚 I couldn't find anything relevant in the knowledge base for that question. Try rephrasing or ask about a specific asset/ticket.",
-            "action_buttons": [],
-        }
 
-    # Filter out low-similarity noisy matches (keep only relevant results with similarity >= 0.20)
-    filtered = [r for r in raw_results if r.get("similarity", 0) >= 0.20]
-    results = filtered if filtered else [raw_results[0]]
+def answer_from_help(question: str, ctx: ToolContext, hits: list[dict]) -> dict:
+    """Answer only from retrieved help content, citing it, or say it is not covered.
 
-    context_parts = [
-        f"Article Title: {r.get('title', 'Article')}\nContent: {r.get('content', '')}"
-        for r in results
-    ]
-    context_str = "\n\n".join(context_parts)
+    `hits` come from knowledge_service.search_help and are already filtered
+    for relevance. The model is told to answer from them alone and to reply
+    NOT_FOUND when they do not answer the question; the retrieved text is
+    passed as fenced data behind the shared security rules.
+    """
+    from app.ai.agent.guardrails import guarded_call_groq as call_groq
 
-    fallback_msg = ""
+    if not hits:
+        return _help_not_covered()
+    # Keep only items about as relevant as the best one, so weaker matches
+    # neither distract the model nor get cited as sources it did not use.
+    best = hits[0].get("similarity", 0.0)
+    hits = [h for h in hits if h.get("similarity", 0.0) >= best - HELP_SCORE_MARGIN][:3]
+
+    # Items are numbered so the model can say which ones it used. Only cited
+    # items are listed as sources, and an answer citing none is treated as
+    # "not covered": a decline in the model's own words, or an answer from
+    # general knowledge, never reaches the user dressed up with sources.
+    context = fence_untrusted(
+        "help_content",
+        "\n\n".join(
+            f"[{i}] ({'FAQ' if h.get('source') == 'faq' else 'Article'}) {h.get('title', '')}\n{h.get('content', '')}"
+            for i, h in enumerate(hits, start=1)
+        ),
+        limit=8000,
+    )
+    first_name = ctx.full_name.split()[0] if ctx.full_name else "there"
     try:
         summary, fallback_msg = call_groq(
             messages=[
                 {
                     "role": "system",
                     "content": (
-                        "You are PredictiX Assistant. Answer the user's question directly using ONLY the provided Knowledge Base articles.\n\n"
-                        "CRITICAL FORMATTING INSTRUCTIONS:\n"
-                        "1. Focus ONLY on the article that directly answers the question. Ignore any unrelated background articles.\n"
-                        "2. Format the response with clean, professional line breaks and spacing. Use bold titles, bullet points, or numbered steps for instructions.\n"
-                        "3. Do NOT dump raw lists of article titles or unformatted bullet points.\n"
-                        "4. Do NOT include general fleet statistics, counts of critical assets, or predicted failures unless explicitly asked.\n"
-                        "5. Start your response with an appropriate professional emoji (e.g., 👤 for profile/account, ⚙️ for assets, 🎫 for tickets, 📚 for guides, 💡 for tips).\n"
-                        "6. End with a polite closing, e.g. '*Let me know if you need any more help! 😊*'"
+                        "You are PredictiX Assistant. Answer the user's question using ONLY the help content provided. "
+                        "Use the item that directly answers the question and ignore unrelated ones. "
+                        "Mark which items you used with their numbers in square brackets, e.g. [1], at the end of the "
+                        "sentences that rely on them. "
+                        f"If the help content does not answer the question, reply with exactly {HELP_NOT_FOUND} and nothing else; "
+                        "do not apologise or answer from general knowledge instead. "
+                        "Never invent steps, settings or features that the help content does not describe. "
+                        "Use simple, friendly language with short steps or bullet points where useful. "
+                        "Do not mention 'the context', 'the FAQ' or 'the database'. "
+                        "Start with one fitting emoji and end with: '*Let me know if you need any more help! 😊*'"
                     ),
                 },
-                {"role": "user", "content": f"User Question: \"{question}\"\n\nKnowledge Base Articles:\n{context_str}"},
+                {"role": "user", "content": f"My name is {first_name}. My question: {question}\n\n{context}"},
             ],
-            max_tokens=400,
-            temperature=0.2,
+            max_tokens=450,
+            temperature=0.1,
         )
-        if summary:
-            return {
-                "answer": fallback_msg + str(summary).strip(),
-                "action_buttons": [],
-            }
+        text_out = str(summary or "").strip()
+        cited = sorted({int(n) for n in re.findall(r"\[(\d)\]", text_out) if 1 <= int(n) <= len(hits)})
+        if not text_out or HELP_NOT_FOUND in text_out or not cited:
+            return _help_not_covered()
+        used = [hits[n - 1] for n in cited]
+        return {"answer": (fallback_msg or "") + text_out + _sources_line(used), "action_buttons": []}
     except Exception as e:
-        log.error("Knowledge summarization failed: %s", e)
+        log.error("Help answer synthesis failed: %s", e)
 
-    # Fallback to single top article with clean formatting if LLM fails
-    top_art = results[0]
-    clean_ans = f"📚 **{top_art.get('title', 'Knowledge Article')}**\n\n{top_art.get('content', '')}\n\n*Let me know if you need any more help! 😊*"
+    # The model is unavailable: show the most relevant item as written.
+    top = hits[0]
     return {
-        "answer": fallback_msg + clean_ans,
+        "answer": (
+            f"📚 **{top.get('title', 'Help')}**\n\n{top.get('content', '')}"
+            f"{_sources_line([top])}\n\n*Let me know if you need any more help! 😊*"
+        ),
         "action_buttons": [],
     }
 
 
+def handle_faq(question: str, ctx: ToolContext) -> dict:
+    """How-to and help questions: FAQs and knowledge-base articles together."""
+    from app.chatbot.knowledge_service import search_help
+
+    return answer_from_help(question, ctx, search_help(question, match_count=4))
+
+
+#: A help item this similar is about using PredictiX itself and answers first.
+STRONG_HELP_MATCH = 0.55
+
+
+def handle_knowledge(question: str, ctx: ToolContext) -> dict:
+    """Concept and reference questions.
+
+    A question about using PredictiX is answered from the help content. A
+    maintenance, safety or standards question is answered from the
+    maintenance knowledge base, scoped to the caller's role and warehouse,
+    with citations (app.ai.agent.kb_answer). If neither covers it, the help
+    path's "not covered" reply is given.
+    """
+    from app.ai.agent.kb_answer import answer_from_kb, asks_about_local_law
+    from app.chatbot.knowledge_service import search_help
+
+    help_hits = search_help(question, match_count=4)
+    # Only an app FAQ answers first. Team articles cover maintenance topics too,
+    # and a legal question must always pass the jurisdiction guard.
+    top = help_hits[0] if help_hits else {}
+    if (top.get("source") == "faq" and top.get("similarity", 0.0) >= STRONG_HELP_MATCH
+            and not asks_about_local_law(question)):
+        return answer_from_help(question, ctx, help_hits)
+
+    try:
+        if ctx.db is not None:
+            kb = answer_from_kb(question, ctx.user, ctx.warehouse_id, ctx.db)
+        else:
+            from app.db.session import SessionLocal
+
+            with SessionLocal() as db:
+                kb = answer_from_kb(question, ctx.user, ctx.warehouse_id, db)
+    except Exception as exc:
+        log.error("Knowledge base answer failed: %s", exc)
+        kb = None
+    return kb if kb is not None else answer_from_help(question, ctx, help_hits)
+
+
 def handle_database(question: str, ctx: ToolContext) -> dict:
     """Two-agent pipeline: Table Selector → SQL Generator → Execute → Summarize."""
-    from app.ai.services.llm_service import call_groq
+    from app.ai.agent.guardrails import guarded_call_groq as call_groq
 
     def _get_generic_fallback() -> dict:
         # Instead of just throwing an email, let the LLM try to answer it based on general persona
@@ -350,13 +369,13 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                             "role": "system",
                             "content": (
                                 "You are Sidekick, the PredictiX AI Assistant. "
-                                "We had trouble querying the database directly, but we have this cached frontend dashboard state: "
-                                f"{str(fc)}\n\n"
+                                "We had trouble querying the database directly, but we have this cached frontend dashboard state:\n"
+                                f"{fence_untrusted('cached_page_data', fc)}\n\n"
                                 "Answer the user's question as best as you can using only this cached data. Keep it friendly, helpful, and concise. "
                                 "Do NOT mention 'frontend context', 'cached data', 'database errors', or 'SQL'. Just answer the question naturally. "
                                 "Do NOT include general fleet statistics, counts of critical assets, or predicted failures from the cached state (e.g. '205 assets at critical risk', '125 predicted to fail') unless the user's question explicitly asks for numbers, counts, or statistics. "
                                 "Use professional emojis strategically to format your response (e.g., 📊 for stats, 🎫 for tickets, ⚙️ for assets, 👥 for users, 💡 for suggestions, ⚠️ for alerts). "
-                                "If you cannot answer the question using the provided state, say: 'The database is temporarily busy, but you can find this information on the main dashboard page.'"
+                                "If you cannot answer the question using the provided state, say: 'I could not find that in the system data, but the dashboard and the asset and ticket pages show the full records.'"
                             )
                         },
                         {"role": "user", "content": question}
@@ -370,7 +389,7 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                 log.error("Failed to generate contextual fallback: %s", e)
 
         return {
-            "answer": "⚠️ The database is temporarily busy. You can find this information on the dashboard or relevant asset/ticket pages using the navigation buttons below.",
+            "answer": "⚠️ I couldn't answer that from the system data just now. The dashboard and the asset and ticket pages, linked below, show the full records.",
             "action_buttons": [
                 {"label": "Go to Dashboard", "path": "/admin/dashboard"},
                 {"label": "View Assets", "path": "/admin/assets"},
@@ -392,9 +411,9 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             target_num = ticket_match.group(0).replace("#", "").strip() if ticket_match else None
             t = None
             if target_num:
-                t = ctx.db.query(Ticket).filter(Ticket.ticket_number.ilike(f"%{target_num}%")).first()
+                t = scope_ticket_query(ctx.db.query(Ticket), ctx).filter(Ticket.ticket_number.ilike(f"%{target_num}%")).first()
             if not t and "detail" in q_lower:
-                t = ctx.db.query(Ticket).order_by(Ticket.created_at.desc()).first()
+                t = scope_ticket_query(ctx.db.query(Ticket), ctx).order_by(Ticket.created_at.desc()).first()
 
             if t:
                 creator = ctx.db.query(Profile).filter(Profile.id == t.created_by).first() if t.created_by else None
@@ -451,7 +470,7 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
         clean_user = re.sub(r'\b(user|profile|details|info)\b', '', clean_user, flags=re.IGNORECASE).strip(' "\'')
         
         if clean_user and len(clean_user) >= 2:
-            target_user = ctx.db.query(Profile).filter(
+            target_user = scope_profile_query(ctx.db.query(Profile), ctx).filter(
                 or_(
                     Profile.full_name.ilike(f"%{clean_user}%"),
                     Profile.email.ilike(f"%{clean_user}%"),
@@ -477,7 +496,7 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                 # Fetch active assigned tickets
                 assigned_tickets = ctx.db.query(Ticket).filter(
                     Ticket.assigned_to == target_user.id,
-                    Ticket.status.notin_(('closed', 'cancelled'))
+                    Ticket.status.notin_(DONE_TICKET_STATUSES)
                 ).all()
                 if assigned_tickets:
                     ticket_lines = "\n".join([f"• **{t.ticket_number}:** {t.title} [Priority: `{str(t.priority).upper()}`, Status: `{str(t.status).upper()}`]" for t in assigned_tickets[:5]])
@@ -519,7 +538,7 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             clean_asset = re.sub(r'\b(asset|vehicle|details|info)\b', '', clean_asset, flags=re.IGNORECASE).strip(' "\'')
         
         if clean_asset and len(clean_asset) >= 2:
-            target_asset = ctx.db.query(Asset).filter(
+            target_asset = scope_asset_query(ctx.db.query(Asset), ctx).filter(
                 or_(
                     Asset.asset_code.ilike(f"%{clean_asset}%"),
                     Asset.asset_name.ilike(f"%{clean_asset}%"),
@@ -554,7 +573,7 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                 # Open tickets for this asset
                 open_tickets = ctx.db.query(Ticket).filter(
                     Ticket.asset_id == target_asset.id,
-                    Ticket.status.notin_(('closed', 'cancelled'))
+                    Ticket.status.notin_(DONE_TICKET_STATUSES)
                 ).all()
                 if open_tickets:
                     ticket_summary = "\n".join([f"• **{t.ticket_number}:** {t.title} [Priority: `{str(t.priority).upper()}`, Status: `{str(t.status).upper()}`]" for t in open_tickets])
@@ -608,9 +627,8 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                     "FROM assets a JOIN pdm_batch_predictions p ON a.id = p.asset_id "
                 )
                 params = {}
-                if ctx.warehouse_id:
-                    sql_str += " WHERE a.warehouse_id = :wid "
-                    params["wid"] = ctx.warehouse_id
+                sql_str += " WHERE a.warehouse_id = :wid "
+                params["wid"] = ctx.scope_warehouse_id
                 sql_str += " ORDER BY p.failure_probability DESC, p.health_score ASC LIMIT 1"
                 query = ctx.db.execute(text(sql_str), params).mappings().first()
             
@@ -639,13 +657,19 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             log.error("Critical asset fast-path failed: %s", e)
 
     # ── Fast-Path B: Category Breakdown & Count Queries ───────────────────────
-    breakdown_triggers = [
-        "how many ticket", "how many asset", "how many user", "number of ticket", "number of asset",
-        "number of user", "total ticket", "total asset", "total user", "count of ticket", "count of asset",
-        "count of user", "by category", "by sub category", "by sub categories", "by status", "by priority",
-        "by role", "by health", "breakdown", "all sub categories"
+    count_triggers = [
+        "how many", "number of", "count of", "count", "total", "breakdown",
+        "all sub categories", "by category", "by status", "by priority"
     ]
-    is_count_breakdown = any(t in q_lower for t in breakdown_triggers)
+    entity_keywords = ["ticket", "asset", "user", "warehouse", "profile", "fleet", "vehicle"]
+    
+    has_count_trigger = any(ct in q_lower for ct in count_triggers)
+    has_entity = any(e in q_lower for e in entity_keywords)
+    
+    is_count_breakdown = (has_count_trigger and has_entity) or any(k in q_lower for k in [
+        "how many ticket", "how many asset", "how many user", "how many open",
+        "tickets here", "assets here", "users here", "total ticket", "total asset", "total user"
+    ])
 
     if is_count_breakdown:
         try:
@@ -677,14 +701,14 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                 }
 
             # 2. Admin System / Warehouse Breakdown
-            w_clause_t = " WHERE warehouse_id = :wid " if ctx.warehouse_id else ""
-            w_clause_a = " WHERE warehouse_id = :wid " if ctx.warehouse_id else ""
-            w_clause_p = " WHERE (warehouse_id = :wid OR warehouse_id IS NULL) " if ctx.warehouse_id else ""
-            params = {"wid": ctx.warehouse_id} if ctx.warehouse_id else {}
+            w_clause_t = " WHERE warehouse_id = :wid "
+            w_clause_a = " WHERE warehouse_id = :wid "
+            w_clause_p = " WHERE warehouse_id = :wid "
+            params = {"wid": ctx.scope_warehouse_id}
 
-            is_t = "ticket" in q_lower or "all sub categories" in q_lower
-            is_a = "asset" in q_lower or "all sub categories" in q_lower
-            is_u = "user" in q_lower or "all sub categories" in q_lower
+            is_t = "ticket" in q_lower or "all sub categories" in q_lower or "how many open" in q_lower or "tickets here" in q_lower
+            is_a = "asset" in q_lower or "all sub categories" in q_lower or "assets here" in q_lower or "fleet" in q_lower
+            is_u = "user" in q_lower or "all sub categories" in q_lower or "users here" in q_lower
             if not (is_t or is_a or is_u):
                 is_t = is_a = is_u = True
 
@@ -701,8 +725,16 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                 prio_items = ", ".join([f"{str(p).title()}: {c}" for p, c in t_prio if p])
                 cat_items = ", ".join([f"{str(cat).title()}: {c}" for cat, c in t_cat if cat])
 
+                open_count = sum(c for s, c in t_status if s and str(s).lower() == "open")
+                active_count = sum(c for s, c in t_status if s and str(s).lower() in ("open", "in_progress", "pending"))
+                header_title = (
+                    f"🎫 **Open Tickets: {open_count:,}** (still being worked on, including in progress: "
+                    f"{active_count:,}; total: {total_t:,})"
+                    if "open" in q_lower else f"🎫 **Tickets Breakdown (Total: {total_t:,})**"
+                )
+
                 output_sections.append(
-                    f"🎫 **Tickets Breakdown (Total: {total_t:,})**\n\n"
+                    f"{header_title}\n\n"
                     f"• **By Status:** {status_items or 'None'}\n"
                     f"• **By Priority:** {prio_items or 'None'}\n"
                     f"• **By Category:** {cat_items or 'None'}"
@@ -785,8 +817,7 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             total_assets, operational, maintenance, critical_band, offline, avg_health_val = 0, 0, 0, 0, 0, 0
             if is_asset or not (is_ticket or is_user):
                 asset_q = ctx.db.query(Asset)
-                if ctx.warehouse_id:
-                    asset_q = asset_q.filter(Asset.warehouse_id == ctx.warehouse_id)
+                asset_q = asset_q.filter(Asset.warehouse_id == ctx.scope_warehouse_id)
                 asset_rows = asset_q.with_entities(
                     func.count(Asset.id),
                     func.count(Asset.id).filter(cast(Asset.status, String) == "active"),
@@ -809,8 +840,7 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                         (PdmBatchPrediction.asset_id == Asset.id) & (PdmBatchPrediction.status == "ok"),
                     )
                 )
-                if ctx.warehouse_id:
-                    health_q = health_q.filter(Asset.warehouse_id == ctx.warehouse_id)
+                health_q = health_q.filter(Asset.warehouse_id == ctx.scope_warehouse_id)
                 avg_health = health_q.scalar()
                 avg_health_val = int(round(float(avg_health))) if avg_health is not None else 64
 
@@ -818,12 +848,11 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             open_tickets, high_priority, tickets_resolved, avg_resolution_days = 0, 0, 0, 0.0
             if is_ticket or not (is_asset or is_user):
                 ticket_q = ctx.db.query(Ticket)
-                if ctx.warehouse_id:
-                    ticket_q = ticket_q.filter(Ticket.warehouse_id == ctx.warehouse_id)
+                ticket_q = ticket_q.filter(Ticket.warehouse_id == ctx.scope_warehouse_id)
                 
                 ticket_rows = ticket_q.with_entities(
-                    func.count(Ticket.id).filter(Ticket.status.notin_(('closed', 'cancelled'))),
-                    func.count(Ticket.id).filter((Ticket.priority == 'high') & Ticket.status.notin_(('closed', 'cancelled'))),
+                    func.count(Ticket.id).filter(Ticket.status.notin_(DONE_TICKET_STATUSES)),
+                    func.count(Ticket.id).filter((Ticket.priority == 'high') & Ticket.status.notin_(DONE_TICKET_STATUSES)),
                     func.count(Ticket.id).filter(Ticket.status.in_(('resolved', 'closed'))),
                     func.avg(
                         case(
@@ -844,8 +873,7 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             total_users, active_users, admins, regular_users = 0, 0, 0, 0
             if is_user or not (is_asset or is_ticket):
                 users_q = ctx.db.query(Profile)
-                if ctx.warehouse_id:
-                    users_q = users_q.filter((Profile.warehouse_id == ctx.warehouse_id) | (Profile.warehouse_id.is_(None)))
+                users_q = users_q.filter(Profile.warehouse_id == ctx.scope_warehouse_id)
                 all_users = users_q.all()
                 total_users = len(all_users)
                 active_users = sum(1 for u in all_users if getattr(u, "status", "").lower() == "active")
@@ -936,17 +964,15 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
             f"Table '{t}': columns → {DB_SCHEMAS[t]}" for t in selected_tables
         )
 
-        # Build role-based scoping instruction
-        if ctx.is_admin:
-            role_instructions = "SECURITY RULE: The user is an ADMIN. You may query ALL records across the entire system."
-            if ctx.warehouse_id:
-                role_instructions += f" The admin is scoped to warehouse_id = '{ctx.warehouse_id}'."
-        else:
-            role_instructions = (
-                f"SECURITY RULE: The current user is a STANDARD USER (id='{ctx.user_id}'). "
-                "You MUST add a WHERE clause to only show records where created_by = '{user_id}' OR assigned_to = '{user_id}'. "
-                "Never expose other users' private data."
-            ).replace("{user_id}", ctx.user_id)
+        # Row access is enforced by safe_sql.run_scoped_query, which only lets
+        # the query see the rows this caller may see. The note below just
+        # tells the model so it does not add filters of its own.
+        role_instructions = (
+            "The tables are already filtered to the records this user may see, "
+            "so do not add warehouse or user filters unless the question asks for them. "
+            f"The current user's id is '{ctx.user_id}'. "
+            "Use unqualified table names only (no schema prefix)."
+        )
 
         sql_prompt = (
             f"You are a PostgreSQL expert for the PredictiX Smart Asset Management System.\n"
@@ -969,15 +995,13 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
         )
 
         try:
-            from app.ai.services.llm_service import MODEL_COMPOUND
             raw_sql, fb = call_groq(
                 messages=[{"role": "user", "content": sql_prompt}],
-                model=MODEL_COMPOUND,
                 max_tokens=300,
                 temperature=0.1,
             )
             if fb and not fallback_msg: fallback_msg = fb
-            sql = str(raw_sql).strip().lstrip("```sql").lstrip("```").rstrip("```").strip()
+            sql = strip_code_fences(raw_sql)
         except Exception as e:
             log.error("SQL generator failed: %s", e)
             return _get_contextual_fallback("SQL generator failed")
@@ -988,39 +1012,36 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                 "action_buttons": [],
             }
 
-        if sql.startswith("ERROR: Permission Denied"):
-            return {
-                "answer": "🔒 You do not have permission to view system-wide data. You can only view records assigned to or created by you.",
-                "action_buttons": [],
-            }
-
         if sql.startswith("ERROR:"):
-            return _get_contextual_fallback(sql)
+            # The question is not about records (often a maintenance or standards
+            # question the router sent here): answer it from the knowledge base.
+            from app.ai.agent.tracing import record
 
-        # Security guard: block any mutation
-        import re
-        sql_upper = sql.upper()
-        for dangerous in ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE", "GRANT"]:
-            if re.search(rf"\b{dangerous}\b", sql_upper):
-                return _get_generic_fallback()
+            record("handler", name="handle_database", note="not answerable from data; using the knowledge base",
+                   reason=sql[:200])
+            return handle_knowledge(question, ctx)
 
         # ── Step 3: Execute (with self-healing retry on DB error) ────────────────
         if ctx.db is None:
             return {"answer": "⚠️ Database is not available right now. Please try again in a moment.", "action_buttons": []}
 
+        scope = SqlScope.build(user_id=ctx.user_id, is_admin=ctx.is_admin, warehouse_id=ctx.warehouse_id)
+        engine = ctx.db.get_bind()
+
         def _run_sql(sql_to_run: str):
-            result = ctx.db.execute(text(sql_to_run)).fetchall()
-            if not result:
-                return None
-            keys = list(result[0]._mapping.keys())
-            return [dict(zip(keys, row)) for row in result[:50]]
+            # Validation and scoping happen inside run_scoped_query, for the
+            # first attempt and for the corrected retry alike.
+            result = run_scoped_query(engine, sql_to_run, scope)
+            return result[:50] if result else None
 
         rows = None
         try:
             rows = _run_sql(sql)
+        except UnsafeSQLError as rejected:
+            log.warning("Generated SQL rejected: %s | SQL: %s", rejected, sql)
+            return _get_generic_fallback()
         except Exception as first_err:
             log.warning("SQL execution failed (attempt 1): %s | SQL: %s", first_err, sql)
-            ctx.db.rollback()
             # Self-healing: feed the error back to the LLM to fix the SQL
             try:
                 fix_prompt = (
@@ -1036,17 +1057,18 @@ def handle_database(question: str, ctx: ToolContext) -> dict:
                 )
                 corrected_sql_raw, _ = call_groq(
                     messages=[{"role": "user", "content": fix_prompt}],
-                    model=MODEL_COMPOUND,
                     max_tokens=350,
                     temperature=0.1,
                 )
-                corrected_sql = str(corrected_sql_raw).strip().lstrip("```sql").lstrip("```").rstrip("```").strip()
+                corrected_sql = strip_code_fences(corrected_sql_raw)
                 log.info("Self-healed SQL: %s", corrected_sql)
                 rows = _run_sql(corrected_sql)
                 sql = corrected_sql  # update for logging
+            except UnsafeSQLError as rejected:
+                log.warning("Corrected SQL rejected: %s | SQL: %s", rejected, corrected_sql)
+                return _get_generic_fallback()
             except Exception as second_err:
                 log.error("SQL self-healing also failed: %s", second_err)
-                ctx.db.rollback()
                 return _get_contextual_fallback(str(second_err))
 
         if rows is None:
@@ -1204,21 +1226,5 @@ def handle_prediction_info(question: str, ctx: ToolContext) -> dict:
             {"label": "Go to Assets", "path": "/admin/assets"},
         ]
         return {"answer": answer, "action_buttons": buttons}
-    # Otherwise, check if they are asking about a specific asset's health/prediction for the widget demo
-    if "show asset health card" in q_lower or "health card for" in q_lower:
-        # For the proof-of-concept Widget, we return a mock/real asset data payload
-        return {
-            "answer": "Here is the latest predictive health assessment for the requested asset.",
-            "action_buttons": [],
-            "widget_type": "ASSET_HEALTH",
-            "widget_data": {
-                "name": "Heavy Duty Forklift A-1",
-                "healthScore": 82,
-                "status": "Warning",
-                "failureProbability": 0.45,
-                "predictedFailureDate": "2026-08-15"
-            }
-        }
-
     # Otherwise, query the actual prediction data from DB
     return handle_database(question, ctx)

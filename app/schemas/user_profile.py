@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 
 class UserProfileOut(BaseModel):
@@ -77,7 +77,9 @@ class UserCreate(BaseModel):
     role: str
     department: str
     status: str
-    password: Optional[str] = None  # if omitted, the DEFAULT_PASSWORD is hashed
+    # The admin sets the first password; the user can change it in Settings.
+    # 8 characters is the floor NIST SP 800-63B sets for user-chosen passwords.
+    password: str = Field(..., min_length=8, max_length=128)
 
 class UserUpdate(BaseModel):
     """Fields an admin may change on an existing user.

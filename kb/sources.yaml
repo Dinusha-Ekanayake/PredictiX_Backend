@@ -1,0 +1,333 @@
+# PredictiX knowledge-base source registry.
+#
+# This file is the source of truth for every document the RAG pipeline may
+# load. A source is added, changed or withdrawn only by editing this file in a
+# reviewed pull request; `python -m app.kb.pipeline ingest` then brings the
+# database in line with it. See kb/README.md for the full process and
+# docs/adr/0006-knowledge-base-sources.md for the admission policy.
+#
+# Admission rules (all must hold):
+#   1. Relevant: supports a PredictiX feature (`supports`) for a real user group
+#      (`audience`) and covers the fleet (road vehicles, forklifts).
+#   2. Authoritative: published by a government body, standards body or a
+#      peer-reviewed journal.
+#   3. Licensed for reuse, with the licence confirmed in the document itself
+#      (`licence_evidence`). An unconfirmed licence means exclusion.
+#   4. Honest about jurisdiction: `applicability` says how a foreign rule may be
+#      used, so answers never present it as Sri Lankan law.
+#
+# Audience values match profile roles: user (drivers, technicians, department
+# staff), admin (warehouse administrators), super_admin (network managers).
+# Scope: `network` applies to every warehouse; `warehouse` lists the warehouse
+# codes (LL-COL Colombo, LL-GLE Galle, LL-BDL Badulla) it applies to.
+
+registry_version: 1
+
+sources:
+  - id: S01
+    title: "Part 396 - Inspection, Repair, and Maintenance"
+    container: "Code of Federal Regulations, Title 49, Subtitle B, Chapter III"
+    publisher: "U.S. Federal Motor Carrier Safety Administration"
+    edition: "eCFR point-in-time edition"
+    published: "2026-01-01"
+    url: "https://www.ecfr.gov/current/title-49/subtitle-B/chapter-III/subchapter-B/part-396"
+    fetch:
+      - url: "https://www.ecfr.gov/api/versioner/v1/full/2026-01-01/title-49.xml?part=396"
+        format: ecfr_xml
+    licence: "Public domain (work of the U.S. Government, 17 U.S.C. 105)"
+    licence_url: "https://www.usa.gov/government-copyright"
+    licence_evidence: "Federal regulation text published by the Office of the Federal Register (eCFR)."
+    attribution: "49 CFR Part 396, eCFR, U.S. Office of the Federal Register."
+    jurisdiction: US
+    doc_type: regulation
+    applicability: "U.S. federal rule for commercial motor carriers. Use as reference practice for vehicle inspection, repair and maintenance programmes and records; it is not Sri Lankan law."
+    audience: [user, admin, super_admin]
+    supports: [warehouse_reports, asset_reports, chatbot, compliance]
+    asset_categories: [road_vehicle]
+    components: [brakes, tyres, steering, suspension, electrical, general]
+    review_due: "2027-11-23"
+
+  - id: S02
+    title: "Part 570 - Vehicle In Use Inspection Standards"
+    container: "Code of Federal Regulations, Title 49, Subtitle B, Chapter V"
+    publisher: "U.S. National Highway Traffic Safety Administration"
+    edition: "eCFR point-in-time edition"
+    published: "2026-01-01"
+    url: "https://www.ecfr.gov/current/title-49/subtitle-B/chapter-V/part-570"
+    fetch:
+      - url: "https://www.ecfr.gov/api/versioner/v1/full/2026-01-01/title-49.xml?part=570"
+        format: ecfr_xml
+    licence: "Public domain (work of the U.S. Government, 17 U.S.C. 105)"
+    licence_url: "https://www.usa.gov/government-copyright"
+    licence_evidence: "Federal regulation text published by the Office of the Federal Register (eCFR)."
+    attribution: "49 CFR Part 570, eCFR, U.S. Office of the Federal Register."
+    jurisdiction: US
+    doc_type: regulation
+    applicability: "U.S. inspection standards for brakes, steering, suspension, tyres and wheels on vehicles in use (light and heavy). Use as reference inspection criteria; it is not Sri Lankan law."
+    audience: [user, admin, super_admin]
+    supports: [warehouse_reports, asset_reports, chatbot]
+    asset_categories: [road_vehicle]
+    components: [brakes, tyres, steering, suspension]
+    review_due: "2027-11-23"
+
+  - id: S03
+    title: "Tire Safety: Everything Rides On It"
+    publisher: "U.S. National Highway Traffic Safety Administration"
+    published: "n.d."
+    url: "https://www.nhtsa.gov/vehicle-safety/tires"
+    fetch:
+      - url: "https://www.nhtsa.gov/sites/nhtsa.gov/files/one.pdf"
+        format: pdf
+    licence: "Public domain (work of the U.S. Government, 17 U.S.C. 105)"
+    licence_url: "https://www.usa.gov/government-copyright"
+    licence_evidence: "Consumer guidance published by a U.S. federal agency; the document carries no copyright notice."
+    attribution: "National Highway Traffic Safety Administration, Tire Safety: Everything Rides On It."
+    jurisdiction: US
+    doc_type: guidance
+    applicability: "General tyre care guidance (inflation, tread, load, rotation) that applies to any vehicle; follow the vehicle maker's pressures and load ratings."
+    audience: [user, admin, super_admin]
+    supports: [asset_reports, chatbot, warehouse_reports]
+    asset_categories: [road_vehicle]
+    components: [tyres]
+    review_due: "2027-11-23"
+
+  - id: S04
+    title: "Joint Oil Analysis Program Manual, Volume I: Introduction, Theory, Benefits, Customer Sampling Procedures, Programs and Reports"
+    publisher: "U.S. Department of Defense, Joint Oil Analysis Program"
+    identifiers: ["NAVAIR 17-15-50.1", "TM 38-301-1", "T.O. 33-1-37-1"]
+    published: "2024-11-15"
+    url: "https://www.tinker.af.mil/Portals/106/33-1-37-1.pdf"
+    fetch:
+      - url: "https://www.tinker.af.mil/Portals/106/33-1-37-1.pdf"
+        format: pdf
+        pages: "11-20,26-29"
+    licence: "Distribution Statement A: approved for public release, distribution unlimited (U.S. Government work)"
+    licence_url: "https://www.esd.whs.mil/DD/DoD-Issuances/"
+    licence_evidence: "Cover page: 'DISTRIBUTION STATEMENT A. Approved for public release; distribution is unlimited, determined on 15 November 2024.'"
+    attribution: "Joint Oil Analysis Program Manual, Vol. I (NAVAIR 17-15-50.1), U.S. Department of Defense, 2024."
+    jurisdiction: US
+    doc_type: technical_manual
+    applicability: "Only the oil analysis theory, wear-metal and contamination guidance and sampling practice (pages 11-20 and 26-29) are loaded; they apply to diesel and petrol fleet engines. Military forms and aviation procedures are excluded."
+    audience: [user, admin, super_admin]
+    supports: [warehouse_reports, asset_reports, chatbot, prediction_explanations]
+    asset_categories: [road_vehicle, forklift]
+    components: [oil, engine, cooling]
+    review_due: "2027-11-23"
+
+  - id: S05
+    title: "Forest Service Handbook 7109.19 - Fleet Equipment Management Handbook, Chapter 40: Inspection, Maintenance, and Repair"
+    publisher: "U.S. Department of Agriculture, Forest Service"
+    edition: "Amendment 7109.19-2018-2"
+    published: "2018-03-05"
+    url: "https://www.usda.gov/sites/default/files/guidance-documents/ForestService.Handbook%207109.19%2040%20Inspection%20Maintenance%20and%20Repair.pdf"
+    fetch:
+      - url: "https://www.usda.gov/sites/default/files/guidance-documents/ForestService.Handbook%207109.19%2040%20Inspection%20Maintenance%20and%20Repair.pdf"
+        format: pdf
+    licence: "Public domain (work of the U.S. Government, 17 U.S.C. 105)"
+    licence_url: "https://www.usa.gov/government-copyright"
+    licence_evidence: "Agency directive published on usda.gov; no copyright notice."
+    attribution: "USDA Forest Service, Forest Service Handbook 7109.19, Chapter 40, 2018."
+    jurisdiction: US
+    doc_type: handbook
+    applicability: "A U.S. agency's fleet inspection and maintenance programme. Use as an example of how a multi-site fleet organises inspections, preventive maintenance and repairs."
+    audience: [admin, super_admin]
+    supports: [warehouse_reports, compliance]
+    asset_categories: [road_vehicle, forklift]
+    components: [general]
+    review_due: "2027-11-23"
+
+  - id: S07
+    title: "Section 1910.178 - Powered Industrial Trucks"
+    container: "Code of Federal Regulations, Title 29, Part 1910"
+    publisher: "U.S. Occupational Safety and Health Administration"
+    edition: "eCFR point-in-time edition"
+    published: "2026-01-01"
+    url: "https://www.ecfr.gov/current/title-29/subtitle-B/chapter-XVII/part-1910/subpart-N/section-1910.178"
+    fetch:
+      - url: "https://www.ecfr.gov/api/versioner/v1/full/2026-01-01/title-29.xml?section=1910.178"
+        format: ecfr_xml
+    licence: "Public domain (work of the U.S. Government, 17 U.S.C. 105)"
+    licence_url: "https://www.usa.gov/government-copyright"
+    licence_evidence: "Federal regulation text published by the Office of the Federal Register (eCFR)."
+    attribution: "29 CFR 1910.178, eCFR, U.S. Office of the Federal Register."
+    jurisdiction: US
+    doc_type: regulation
+    applicability: "U.S. forklift rule covering battery charging, fuelling, maintenance and truck operation. Use as reference practice; Sri Lankan duties for lifting machines are in the Factories Ordinance (S13)."
+    audience: [user, admin, super_admin]
+    supports: [warehouse_reports, asset_reports, chatbot, compliance]
+    asset_categories: [forklift]
+    components: [battery, hydraulics, brakes, lifting, general]
+    review_due: "2027-11-23"
+
+  - id: S08
+    title: "Rider-operated lift trucks: Operator training and safe use. Approved Code of Practice and guidance (L117)"
+    publisher: "Health and Safety Executive (UK)"
+    edition: "Third edition"
+    identifiers: ["L117", "ISBN 978-0-7176-6441-2"]
+    published: "2013"
+    url: "https://www.hse.gov.uk/pubns/books/l117.htm"
+    fetch:
+      - url: "https://www.hse.gov.uk/pubns/priced/l117.pdf"
+        format: pdf
+        headings: none
+    licence: "Open Government Licence v3.0 (Crown copyright)"
+    licence_url: "https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/"
+    licence_evidence: "Page 2: 'You may reuse this information (excluding logos) free of charge in any format or medium, under the terms of the Open Government Licence.' Text only is loaded; images and logos are not."
+    attribution: "Contains public sector information published by the Health and Safety Executive and licensed under the Open Government Licence."
+    jurisdiction: UK
+    doc_type: code_of_practice
+    applicability: "Great Britain Approved Code of Practice. Use as reference practice for forklift operator training, daily checks, maintenance and thorough examination."
+    audience: [user, admin, super_admin]
+    supports: [warehouse_reports, asset_reports, chatbot, compliance]
+    asset_categories: [forklift]
+    components: [lifting, brakes, tyres, hydraulics, general]
+    review_due: "2027-11-23"
+
+  - id: S09
+    title: "Preventing Injuries and Deaths of Workers Who Operate or Work Near Forklifts (NIOSH Alert)"
+    publisher: "U.S. National Institute for Occupational Safety and Health"
+    identifiers: ["DHHS (NIOSH) Publication No. 2001-109"]
+    published: "2001-06"
+    url: "https://www.cdc.gov/niosh/docs/2001-109/"
+    fetch:
+      - url: "https://www.cdc.gov/niosh/docs/2001-109/pdfs/2001-109.pdf"
+        format: pdf
+    licence: "Public domain"
+    licence_url: "https://www.usa.gov/government-copyright"
+    licence_evidence: "Page 1: 'This document is in the public domain and may be freely copied or reprinted.'"
+    attribution: "NIOSH, Publication No. 2001-109, 2001."
+    jurisdiction: US
+    doc_type: guidance
+    applicability: "Safety alert based on U.S. incident investigations; its findings and recommendations on overturns, pedestrians and operator practice apply to forklift work in any warehouse."
+    audience: [user, admin, super_admin]
+    supports: [chatbot, warehouse_reports]
+    asset_categories: [forklift]
+    components: [lifting, general]
+    review_due: "2027-11-23"
+
+  - id: S10
+    title: "NIST/SEMATECH e-Handbook of Statistical Methods, Chapter 8: Assessing Product Reliability"
+    publisher: "U.S. National Institute of Standards and Technology"
+    published: "2012"
+    url: "https://itl.nist.gov/div898/handbook/apr/apr.htm"
+    fetch:
+      - url: "https://itl.nist.gov/div898/handbook/toolaids/pff/apr.pdf"
+        format: pdf
+        pages: "4-24,35-43,154-160"
+        headings: multilevel
+    licence: "Public domain (work of the U.S. Government, 17 U.S.C. 105)"
+    licence_url: "https://www.nist.gov/oism/copyrights"
+    licence_evidence: "Published by NIST, a U.S. federal agency; NIST content is not subject to copyright in the United States."
+    attribution: "NIST/SEMATECH e-Handbook of Statistical Methods, Chapter 8, National Institute of Standards and Technology."
+    jurisdiction: US
+    doc_type: handbook
+    applicability: "Statistical background for the component remaining-life (Weibull) and failure-risk models: reliability terms, hazard rate, censoring and parameter estimation. Sections 8.1.1-8.1.3, 8.1.6.2 and 8.4.1 only."
+    audience: [admin, super_admin]
+    supports: [prediction_explanations, warehouse_reports]
+    asset_categories: [road_vehicle, forklift]
+    components: [general]
+    review_due: "2027-11-23"
+
+  - id: S11
+    title: "Predictive Maintenance in the Automotive Sector: A Literature Review"
+    container: "Mathematical and Computational Applications, vol. 27, no. 1, art. 2"
+    authors: ["F. Arena", "M. Collotta", "L. Luca", "M. Ruggieri", "F. G. Termine"]
+    publisher: "MDPI"
+    published: "2021-12-31"
+    url: "https://www.mdpi.com/2297-8747/27/1/2"
+    doi: "10.3390/mca27010002"
+    fetch:
+      - url: "https://www.mdpi.com/2297-8747/27/1/2/pdf"
+        format: pdf
+    licence: "CC BY 4.0"
+    licence_url: "https://creativecommons.org/licenses/by/4.0/"
+    licence_evidence: "Page 1: 'open access article distributed under the terms and conditions of the Creative Commons Attribution (CC BY) license.'"
+    attribution: "F. Arena et al., Math. Comput. Appl. 2022, 27, 2, licensed under CC BY 4.0."
+    jurisdiction: INT
+    doc_type: review_article
+    applicability: "Peer-reviewed survey of predictive maintenance methods for vehicles; background for explaining how and why PredictiX predicts maintenance needs."
+    audience: [admin, super_admin]
+    supports: [prediction_explanations, warehouse_reports]
+    asset_categories: [road_vehicle]
+    components: [general, engine, battery, brakes]
+    review_due: "2027-11-23"
+
+  - id: S13
+    title: "Factories Ordinance, Sections 27-29: Hoists and lifts; Chains, ropes and lifting tackle; Cranes and other lifting machines"
+    container: "Labour Code of Sri Lanka, Chapter 4: Occupational Safety and Health"
+    publisher: "Department of Labour, Sri Lanka"
+    published: "n.d."
+    url: "https://labourdept.gov.lk/downloads/labour_code/42.pdf"
+    fetch:
+      - url: "https://labourdept.gov.lk/downloads/labour_code/42.pdf"
+        format: pdf
+        pages: "11-14"
+        include_sections: ["Section 27", "Section 28", "Section 29"]
+    licence: "Official text of legislation (not subject to copyright under Sri Lanka's Intellectual Property Act No. 36 of 2003)"
+    licence_evidence: "Statutory text republished by the Department of Labour, Sri Lanka."
+    attribution: "Factories Ordinance (Cap. 128), ss. 27-29, as published by the Department of Labour, Sri Lanka."
+    jurisdiction: LK
+    doc_type: legislation
+    applicability: "Sri Lankan law on hoists, lifting tackle and lifting machines in factories, including examination and safe working load marking. Applies to all three warehouses."
+    audience: [admin, super_admin]
+    supports: [compliance, warehouse_reports]
+    asset_categories: [forklift]
+    components: [lifting]
+    review_due: "2027-11-23"
+
+  - id: D01
+    title: "Ticket issue patterns by warehouse"
+    publisher: "PredictiX (LankaLogix operational data)"
+    published: "n.d."
+    url: "predictix://tickets"
+    fetch:
+      - format: db_ticket_patterns
+    licence: "Internal operational data of LankaLogix; for use inside PredictiX only"
+    licence_evidence: "Derived from the PredictiX tickets table; aggregates only, personal data removed before embedding (app/kb/pipeline/privacy.py)."
+    attribution: "PredictiX ticket records, aggregated per warehouse."
+    jurisdiction: LK
+    doc_type: internal_data
+    applicability: "Each passage describes one recurring issue at one warehouse: how often it occurs, how it is usually categorised and prioritised, how long it takes to resolve and which vehicles it affects. Passages are visible only to that warehouse and to the network view."
+    audience: [admin, super_admin]
+    supports: [warehouse_reports, chatbot]
+    asset_categories: [road_vehicle, forklift]
+    components: [general]
+    review_due: "2027-05-24"
+
+# Considered and not loaded. Kept so the decision and its reason stay on record.
+excluded:
+  - id: X01
+    title: "OSHA Powered Industrial Trucks eTool"
+    url: "https://www.osha.gov/etools/powered-industrial-trucks/"
+    reason: "Site refuses automated clients (HTTP 403); not circumvented. The underlying rule is loaded from eCFR as S07."
+    decided: "2026-11-23"
+  - id: X02
+    title: "GSA, Enhancing Fleet Reliability"
+    url: "https://gsa.gov/system/files/Enhancing%20Fleet%20Reliability.pdf"
+    reason: "Document no longer available at the published address (HTTP 404)."
+    decided: "2026-11-23"
+  - id: X03
+    title: "Sri Lanka Gazette Extraordinary 2306/02 (Motor Traffic Act)"
+    url: "https://www.documents.gov.lk/view/extra-gazettes/2022/11/2306-02_E.pdf"
+    reason: "Publisher site failed the TLS handshake, so the content could not be verified. Revisit with an official copy."
+    decided: "2026-11-23"
+  - id: X04
+    title: "HSE HSG136, A guide to workplace transport safety"
+    url: "https://www.hse.gov.uk/pubns/books/hsg136.htm"
+    reason: "The document states only 'Crown copyright' and refers to a web page; no reuse licence is stated in the document itself."
+    decided: "2026-11-23"
+  - id: X05
+    title: "Statistical Abstract of Sri Lanka 2024, Chapter 1 (climate tables)"
+    url: "https://www.statistics.gov.lk/abstract2024/chapter1"
+    reason: "Trilingual numeric tables whose station labels do not extract in line with their values; loading them risks attributing rainfall to the wrong station. To be replaced by a curated, hand-checked climate profile per warehouse."
+    decided: "2026-11-23"
+  - id: X06
+    title: "World Bank Climate Knowledge Portal, Sri Lanka"
+    url: "https://climateknowledgeportal.worldbank.org/country/sri-lanka"
+    reason: "Site refuses automated clients (HTTP 403); not circumvented."
+    decided: "2026-11-23"
+  - id: X07
+    title: "FEMP O&M Best Practices Guide; NASA RCM Guide"
+    url: "https://www1.eere.energy.gov/femp/pdfs/OM_6.pdf"
+    reason: "About buildings and facilities, not vehicle fleets; outside the application's scope."
+    decided: "2026-11-23"

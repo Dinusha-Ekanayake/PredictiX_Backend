@@ -4,9 +4,10 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import String, cast
 from sqlalchemy.orm import Session
-from app.deps import get_db, get_current_user, is_admin_role, require_admin, require_user
+from app.deps import (
+    get_db, get_current_user, is_admin_role, require_admin, require_user, assert_asset_in_scope,
+)
 from app.models import Asset, MaintenanceEvent, Profile
-from app.routers.assets import _assert_asset_in_scope
 from app.schemas.maintenance import (
     MaintenanceEventCreate,
     MaintenanceEventUpdate,
@@ -21,11 +22,24 @@ router = APIRouter(
 )
 
 
+def _assert_event_in_scope(db: Session, event, current_user) -> None:
+    """404 unless the event's asset is inside the admin's active warehouse."""
+    asset = db.query(Asset).filter(Asset.id == event.asset_id).first()
+    if asset is None:
+        raise HTTPException(status_code=404, detail="Maintenance event not found")
+    assert_asset_in_scope(asset, current_user)
+
+
 @router.post("/", response_model=MaintenanceEventOut, dependencies=[Depends(require_admin)])
-def create_maintenance_event(payload: MaintenanceEventCreate, db: Session = Depends(get_db)):
+def create_maintenance_event(
+    payload: MaintenanceEventCreate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
     asset = db.query(Asset).filter(Asset.id == payload.asset_id).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
+    assert_asset_in_scope(asset, current_user)
 
     obj = MaintenanceEvent(**payload.model_dump())
     db.add(obj)
@@ -84,7 +98,7 @@ def log_maintenance(
     asset = db.query(Asset).filter(Asset.id == asset_id).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
-    _assert_asset_in_scope(asset, current_user)
+    assert_asset_in_scope(asset, current_user)
 
     if (
         payload.odometer_reading is not None
@@ -176,8 +190,11 @@ def get_maintenance_event(
         raise HTTPException(status_code=404, detail="Maintenance event not found")
 
     # Same ownership rule as list_maintenance_events above, a regular user
-    # may only fetch a single event for an asset assigned to them.
-    if not is_admin_role(current_user):
+    # may only fetch a single event for an asset assigned to them; an admin
+    # only events for assets in their active warehouse.
+    if is_admin_role(current_user):
+        _assert_event_in_scope(db, obj, current_user)
+    else:
         uid = str(getattr(current_user, "id", ""))
         asset = db.query(Asset).filter(Asset.id == obj.asset_id).first()
         if not asset or str(asset.assigned_to) != uid:
@@ -187,10 +204,21 @@ def get_maintenance_event(
 
 
 @router.put("/{event_id}", response_model=MaintenanceEventOut, dependencies=[Depends(require_admin)])
-def update_maintenance_event(event_id: str, payload: MaintenanceEventUpdate, db: Session = Depends(get_db)):
+def update_maintenance_event(
+    event_id: str,
+    payload: MaintenanceEventUpdate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
     obj = db.query(MaintenanceEvent).filter(MaintenanceEvent.id == event_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Maintenance event not found")
+    _assert_event_in_scope(db, obj, current_user)
+    if payload.model_dump(exclude_unset=True).get("asset_id") not in (None, obj.asset_id):
+        moved_to = db.query(Asset).filter(Asset.id == payload.asset_id).first()
+        if not moved_to:
+            raise HTTPException(status_code=404, detail="Asset not found")
+        assert_asset_in_scope(moved_to, current_user)
 
     for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(obj, key, value)
@@ -201,10 +229,15 @@ def update_maintenance_event(event_id: str, payload: MaintenanceEventUpdate, db:
 
 
 @router.delete("/{event_id}", dependencies=[Depends(require_admin)])
-def delete_maintenance_event(event_id: str, db: Session = Depends(get_db)):
+def delete_maintenance_event(
+    event_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
     obj = db.query(MaintenanceEvent).filter(MaintenanceEvent.id == event_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Maintenance event not found")
+    _assert_event_in_scope(db, obj, current_user)
     db.delete(obj)
     db.commit()
     return {"message": "Maintenance event deleted"}

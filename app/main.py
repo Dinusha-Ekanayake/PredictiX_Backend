@@ -11,6 +11,7 @@ import os
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 import json
+from datetime import datetime, timezone
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -23,7 +24,17 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import InterfaceError, OperationalError
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.core.config import allowed_frontend_origins
+from app.core.config import allowed_frontend_origins, api_docs_enabled, is_production, scheduler_enabled
+
+# Application loggers write through the root logger. uvicorn configures only its
+# own loggers, so without this every INFO line from the app is dropped. Applied
+# only when nothing else has configured logging (pytest, a custom runner).
+if not logging.getLogger().handlers:
+    _level = logging.getLevelName(os.getenv("LOG_LEVEL", "INFO").strip().upper())
+    logging.basicConfig(
+        level=_level if isinstance(_level, int) else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
 # ─── Routers ──────────────────────────────────────────────────────────────────
 from .routers.admin_dashboard import admin_dashboard_router
@@ -300,6 +311,47 @@ def _run_service_reminder_job() -> None:
         db.close()
 
 
+def kb_refresh_enabled() -> bool:
+    """Whether this host should run the nightly knowledge-base refresh.
+
+    Bulk ingestion embeds with the local model only (see
+    app/kb/pipeline/embedding.py), so a host without sentence-transformers,
+    such as the EC2 instance, cannot refresh and would only log a failure
+    every night. KB_REFRESH_ENABLED=true|false overrides the detection.
+    """
+    flag = os.getenv("KB_REFRESH_ENABLED", "auto").strip().lower()
+    if flag in ("true", "1", "yes"):
+        return True
+    if flag in ("false", "0", "no"):
+        return False
+    import importlib.util
+
+    return importlib.util.find_spec("sentence_transformers") is not None
+
+
+def _refresh_derived_kb() -> None:
+    """Scheduled job: reload knowledge-base sources built from PredictiX data
+    (D01 ticket patterns). Incremental: a source whose snapshot has not
+    changed is skipped by its fingerprint, so a quiet day costs one query."""
+    from app.db.session import SessionLocal
+    from app.kb.pipeline.archive import SupabaseArchive
+    from app.kb.pipeline.embedding import Embedder
+    from app.kb.pipeline.ingest import ingest_source
+    from app.kb.pipeline.registry import load_registry
+
+    try:
+        derived = [s for s in load_registry().active if any(f.internal for f in s.fetch)]
+        if not derived:
+            return
+        embedder, archive = Embedder(), SupabaseArchive()
+        for source in derived:
+            report = ingest_source(source, embedder=embedder, db_factory=SessionLocal,
+                                   archive=archive, dry_run=False)
+            log.info("Knowledge-base refresh %s: %s (%d passages)", source.id, report.outcome, report.chunks)
+    except Exception:
+        log.exception("Knowledge-base refresh failed; the previous version stays in place")
+
+
 def _run_startup_batch() -> None:
     """Startup-only wrapper: waits 10s for Uvicorn to fully bind before running."""
     import time
@@ -307,32 +359,28 @@ def _run_startup_batch() -> None:
     _run_scheduled_batch()
 
 
-def _ping_hf_models() -> None:
-    """Scheduled job, pings HuggingFace models to prevent cold starts."""
-    if os.getenv("DISABLE_HF_MODELS", "false").lower() == "true":
-        return
+def hf_keepalive_hours() -> float:
+    """How often to wake the Hugging Face Spaces; 0 turns it off.
 
-    from app.ai.services._hf_inference import call_hf_inference
-
-    repos = [
-        "Dinusha-Ekanayake/predictix-asset_summarization_model",
-        "Dinusha-Ekanayake/predictix-ticket_summarization_model",
-        "Dinusha-Ekanayake/predictix-ticket_categorization_model",
-        "Dinusha-Ekanayake/predictix-ticket_prioritization_model",
-    ]
-
-    for repo in repos:
-        try:
-            call_hf_inference(repo, "keep_warm_ping", timeout=30, max_cold_start_wait=20)
-            log.debug("Pinged %s to keep warm.", repo)
-        except Exception as exc:
-            log.warning("HF keep-warm ping failed for %s (non-fatal): %s", repo, exc)
+    Free Spaces sleep after 48 hours without traffic, so the default of 6 hours
+    keeps them awake with a wide margin. HF_SPACE_KEEPALIVE_HOURS overrides it.
+    """
+    try:
+        return max(0.0, float(os.getenv("HF_SPACE_KEEPALIVE_HOURS", "6")))
+    except ValueError:
+        return 6.0
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     """Load PdM models on startup; start batch scheduler; optionally warm HF models."""
     global scheduler
+
+    # Refuse to serve without a signing secret; unsigned or guessable tokens
+    # would let anyone forge an admin session.
+    from app.core.config import require_runtime_settings
+
+    require_runtime_settings()
 
     _load_pdm_models()
 
@@ -364,6 +412,24 @@ async def lifespan(_: FastAPI):
     else:
         log.info("HuggingFace models disabled (DISABLE_HF_MODELS=true). Skipping warmup.")
 
+    # Warm the chatbot's help search in the background, so the first question
+    # does not wait for the embedding model and the FAQ index.
+    if os.getenv("WARM_HELP_SEARCH", "true").lower() == "true":
+        import threading
+
+        from app.chatbot.knowledge_service import warm_up as _warm_help_search
+
+        threading.Thread(target=_warm_help_search, daemon=True, name="help_search_warmup").start()
+
+    # Only the deployed API should run the background jobs, since every process
+    # that runs them writes predictions and sends reminder mail against the same
+    # database. Dev servers and CI set SCHEDULER_ENABLED=false.
+    if not scheduler_enabled():
+        log.info("Background jobs disabled (SCHEDULER_ENABLED=false).")
+        yield
+        log.info("Shutting down PredictiX API.")
+        return
+
     # ── Batch PDM scheduler ─────────────────────────────────────────────────────
     batch_interval_hours = int(os.getenv("BATCH_INTERVAL_HOURS", "24"))
     scheduler = BackgroundScheduler(daemon=True)
@@ -376,17 +442,23 @@ async def lifespan(_: FastAPI):
         replace_existing=True,
     )
 
-    if os.getenv("ENABLE_HF_WARMER", "false").lower() == "true":
+    # ── Keep the Hugging Face Spaces (categorisation, summaries) awake ──────────
+    # They run remotely whatever DISABLE_HF_MODELS says, so that flag does not
+    # apply here. The same code runs from hf-keepalive.yml when the API is down.
+    from app.ai.services.hf_spaces import configured_spaces, keep_warm_job
+
+    keepalive_hours = hf_keepalive_hours()
+    if keepalive_hours and configured_spaces():
         scheduler.add_job(
-            _ping_hf_models,
+            keep_warm_job,
             trigger="interval",
-            minutes=7,
-            jitter=180,
-            id="hf_ping",
-            name="HF Models Keep-Warm Ping",
+            hours=keepalive_hours,
+            next_run_time=datetime.now(timezone.utc),
+            id="hf_space_keepalive",
+            name="Hugging Face Spaces keep-alive",
             replace_existing=True,
         )
-        log.info("HF Inference Warmer enabled (4-10 min intervals).")
+        log.info("Hugging Face Spaces keep-alive every %.1f h.", keepalive_hours)
 
     # ── Daily service reminder email sweep ─────────────────────────────────────
     reminder_hour = int(os.getenv("SERVICE_REMINDER_HOUR", "9"))
@@ -402,6 +474,22 @@ async def lifespan(_: FastAPI):
         "Service reminder scheduler registered — daily at %d:00 %s",
         reminder_hour, reminder_tz,
     )
+
+    # ── Nightly refresh of knowledge-base sources derived from PredictiX data ──
+    if kb_refresh_enabled():
+        scheduler.add_job(
+            _refresh_derived_kb,
+            trigger=CronTrigger(hour=int(os.getenv("KB_REFRESH_HOUR", "2")), minute=30, timezone=reminder_tz),
+            id="kb_derived_refresh",
+            name="Nightly knowledge-base refresh (ticket patterns)",
+            replace_existing=True,
+        )
+    else:
+        log.info(
+            "Nightly knowledge-base refresh not scheduled: the local embedding model "
+            "is not installed here. Run `python -m app.kb.pipeline ingest` from a host "
+            "that has it (see docs/EC2_Deployment.md)."
+        )
 
     if os.getenv("SERVICE_REMINDER_RUN_ON_STARTUP", "false").lower() == "true":
         import threading
@@ -429,7 +517,38 @@ async def lifespan(_: FastAPI):
     log.info("Shutting down PredictiX API.")
 
 
-app = FastAPI(title="PredictiX API", version="1.0", lifespan=lifespan)
+_docs = api_docs_enabled()
+app = FastAPI(
+    title="PredictiX API",
+    version="1.0",
+    lifespan=lifespan,
+    docs_url="/docs" if _docs else None,
+    redoc_url="/redoc" if _docs else None,
+    openapi_url="/openapi.json" if _docs else None,
+)
+
+
+# ── Security headers ──────────────────────────────────────────────────────────
+# Responses are JSON or files meant for this app only: no MIME sniffing, no
+# framing, no referrer leakage, and no caching of per-user data by browsers or
+# shared proxies. HSTS is sent only in production, where TLS terminates in
+# front of the API.
+_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-store",
+}
+
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    response = await call_next(request)
+    for name, value in _SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
+    if is_production():
+        response.headers.setdefault("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
+    return response
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
 # allowed_frontend_origins() is the single source of truth for "which

@@ -4,6 +4,7 @@ Handles sending emails to admins and relevant team members when users are create
 All data is fetched from PostgreSQL database - no mock data used
 """
 
+import logging
 from typing import List, Optional
 import os
 from datetime import datetime
@@ -11,6 +12,8 @@ from sqlalchemy.orm import Session
 from pathlib import Path
 
 from app.deps import ADMIN_ROLES
+
+log = logging.getLogger(__name__)
 
 # Load environment variables from .env file
 try:
@@ -429,7 +432,7 @@ class NotificationService:
 
         recipients = [e for e in to_emails if e]
         if not recipients:
-            print("[NOTIFICATION] No valid recipients - skipping email")
+            log.warning("[NOTIFICATION] No valid recipients - skipping email")
             return False
 
         reply_to_email = "neuromindspredictix@gmail.com"
@@ -444,10 +447,10 @@ class NotificationService:
                     html_body=html_body,
                     reply_to=reply_to_email,
                 )
-            print(f"[NOTIFICATION] Email sent via SMTP to {len(recipients)} recipient(s)", flush=True)
+            log.info(f"[NOTIFICATION] Email sent via SMTP to {len(recipients)} recipient(s)")
             return True
         except Exception as smtp_err:
-            print(f"[NOTIFICATION-WARNING] Direct SMTP failed: {smtp_err}, trying Brevo API...", flush=True)
+            log.warning(f"[NOTIFICATION-WARNING] Direct SMTP failed: {smtp_err}, trying Brevo API...")
 
         # 2. Secondary Fallback: Brevo API
         if use_wh_key:
@@ -458,12 +461,11 @@ class NotificationService:
                 # not what was asked for, so it is stated rather than silent.
                 api_key = os.getenv("BREVO_API_KEY")
                 if api_key:
-                    print("[NOTIFICATION-WARNING] No warehouse Brevo key set "
+                    log.warning("[NOTIFICATION-WARNING] No warehouse Brevo key set "
                           "(WH_BREVO_API_KEY/WHBREVO); sending on the general "
-                          "BREVO_API_KEY instead.", flush=True)
+                          "BREVO_API_KEY instead.")
         else:
             api_key = os.getenv("BREVO_API_KEY")
-
         sender_email = os.getenv("BREVO_SENDER_EMAIL", "neuromindspredictix@11453287.brevosend.com")
         sender_name = os.getenv("BREVO_SENDER_NAME", "PredictiX Admin")
 
@@ -486,11 +488,11 @@ class NotificationService:
                     timeout=15,
                 )
                 if resp.status_code in (200, 201, 202):
-                    print(f"[NOTIFICATION] Email sent from {sender_email} via Brevo to {len(recipients)} recipient(s)", flush=True)
+                    log.info(f"[NOTIFICATION] Email sent from {sender_email} via Brevo to {len(recipients)} recipient(s)")
                     return True
-                print(f"[NOTIFICATION-ERROR] Brevo API returned {resp.status_code}: {resp.text[:200]}", flush=True)
+                log.error(f"[NOTIFICATION-ERROR] Brevo API returned {resp.status_code}: {resp.text[:200]}")
             except Exception as brevo_err:
-                print(f"[NOTIFICATION-ERROR] Brevo sending failed: {brevo_err}", flush=True)
+                log.error(f"[NOTIFICATION-ERROR] Brevo sending failed: {brevo_err}")
 
         return False
     
@@ -503,10 +505,10 @@ class NotificationService:
             
             user = session.query(Profile).filter(Profile.id == new_user_id).first()
             if not user:
-                print(f"[NOTIFICATION-ERROR] User with ID {new_user_id} not found in database", flush=True)
+                log.error(f"[NOTIFICATION-ERROR] User with ID {new_user_id} not found in database")
                 return False
                 
-            print(f"[NOTIFICATION] Processing new user notifications for: {user.full_name}", flush=True)
+            log.info(f"[NOTIFICATION] Processing new user notifications for: {user.full_name}")
             
             department_name = "Not Assigned"
             if user.department_id:
@@ -519,7 +521,7 @@ class NotificationService:
             
             admin_emails = NotificationService._admin_emails_for_warehouse(session, user.warehouse_id)
             if admin_emails:
-                print(f"[NOTIFICATION] Notifying {len(admin_emails)} admin(s) of new user from database", flush=True)
+                log.info(f"[NOTIFICATION] Notifying {len(admin_emails)} admin(s) of new user from database")
                 subject, html_body = EmailTemplates.new_user_admin_notification(
                     new_user_name=user.full_name,
                     department=department_name,
@@ -541,7 +543,7 @@ class NotificationService:
                 ]
                 
                 if dept_member_emails:
-                    print(f"[NOTIFICATION] Notifying {len(dept_member_emails)} department member(s) of new user from database", flush=True)
+                    log.info(f"[NOTIFICATION] Notifying {len(dept_member_emails)} department member(s) of new user from database")
                     subject, html_body = EmailTemplates.new_user_department_notification(
                         new_user_name=user.full_name,
                         department=department_name,
@@ -551,11 +553,11 @@ class NotificationService:
                     dept_success = NotificationService.send_email(dept_member_emails, subject, html_body)
                     success = success and dept_success
             
-            print(f"[NOTIFICATION] User creation notifications processed for {user.full_name}")
+            log.info(f"[NOTIFICATION] User creation notifications processed for {user.full_name}")
             return success
             
         except Exception as e:
-            print(f"[NOTIFICATION-ERROR] Failed to process user creation notifications: {str(e)}")
+            log.error(f"[NOTIFICATION-ERROR] Failed to process user creation notifications: {str(e)}")
             import traceback
             traceback.print_exc()
             return False
@@ -572,10 +574,10 @@ class NotificationService:
             
             user = session.query(Profile).filter(Profile.id == user_id).first()
             if not user:
-                print(f"[NOTIFICATION-ERROR] User with ID {user_id} not found in database", flush=True)
+                log.error(f"[NOTIFICATION-ERROR] User with ID {user_id} not found in database")
                 return False
             
-            print(f"[NOTIFICATION] Processing profile update notification for: {user.full_name}", flush=True)
+            log.info(f"[NOTIFICATION] Processing profile update notification for: {user.full_name}")
             
             department_name = "Not Assigned"
             if user.department_id:
@@ -607,7 +609,7 @@ class NotificationService:
                 admin_emails.append("neuromindspredictix@gmail.com")
 
             if admin_emails:
-                print(f"[NOTIFICATION] Notifying {len(admin_emails)} admin(s) of profile update from database", flush=True)
+                log.info(f"[NOTIFICATION] Notifying {len(admin_emails)} admin(s) of profile update from database")
                 
                 subject = f"Profile Updated: {user.full_name}"
                 
@@ -654,10 +656,10 @@ class NotificationService:
                 """
                 NotificationService.send_email(admin_emails, subject, html_body)
             
-            print(f"[NOTIFICATION] Profile update notification processed for {user.full_name}")
+            log.info(f"[NOTIFICATION] Profile update notification processed for {user.full_name}")
             return True
         except Exception as e:
-            print(f"[NOTIFICATION-ERROR] Failed to process profile update notification: {str(e)}")
+            log.error(f"[NOTIFICATION-ERROR] Failed to process profile update notification: {str(e)}")
             import traceback
             traceback.print_exc()
             return False
@@ -677,10 +679,10 @@ class NotificationService:
                 .all()
             ]
             if not user_emails:
-                print("[NOTIFICATION] No users to notify for new FAQ - skipping email", flush=True)
+                log.warning("[NOTIFICATION] No users to notify for new FAQ - skipping email")
                 return False
                 
-            print(f"[NOTIFICATION] Notifying {len(user_emails)} user(s) of new FAQ", flush=True)
+            log.info(f"[NOTIFICATION] Notifying {len(user_emails)} user(s) of new FAQ")
             subject, html_body = EmailTemplates.new_faq_notification(
                 question=question,
                 answer=answer,
@@ -689,7 +691,7 @@ class NotificationService:
             )
             return NotificationService.send_email(user_emails, subject, html_body)
         except Exception as e:
-            print(f"[NOTIFICATION-ERROR] Failed to notify on new FAQ: {str(e)}", flush=True)
+            log.error(f"[NOTIFICATION-ERROR] Failed to notify on new FAQ: {str(e)}")
             return False
         finally:
             if should_close:
@@ -704,7 +706,7 @@ class NotificationService:
             
             ticket = session.query(Ticket).filter(Ticket.id == ticket_id).first()
             if not ticket:
-                print(f"[NOTIFICATION-ERROR] Ticket with ID {ticket_id} not found", flush=True)
+                log.error(f"[NOTIFICATION-ERROR] Ticket with ID {ticket_id} not found")
                 return False
                 
             creator = session.query(Profile).filter(Profile.id == ticket.created_by).first()
@@ -728,10 +730,10 @@ class NotificationService:
                 
             email_list = list(recipients)
             if not email_list:
-                print("[NOTIFICATION] No recipients to notify for new ticket - skipping email", flush=True)
+                log.warning("[NOTIFICATION] No recipients to notify for new ticket - skipping email")
                 return False
                 
-            print(f"[NOTIFICATION] Notifying on new ticket {ticket.ticket_number} to {len(email_list)} recipients", flush=True)
+            log.info(f"[NOTIFICATION] Notifying on new ticket {ticket.ticket_number} to {len(email_list)} recipients")
             subject, html_body = EmailTemplates.new_ticket_notification(
                 ticket_number=ticket.ticket_number,
                 title=ticket.title,
@@ -742,7 +744,7 @@ class NotificationService:
             )
             return NotificationService.send_email(email_list, subject, html_body)
         except Exception as e:
-            print(f"[NOTIFICATION-ERROR] Failed to notify on new ticket: {str(e)}", flush=True)
+            log.error(f"[NOTIFICATION-ERROR] Failed to notify on new ticket: {str(e)}")
             return False
         finally:
             if should_close:
@@ -757,7 +759,7 @@ class NotificationService:
             
             ticket = session.query(Ticket).filter(Ticket.id == ticket_id).first()
             if not ticket:
-                print(f"[NOTIFICATION-ERROR] Ticket with ID {ticket_id} not found", flush=True)
+                log.error(f"[NOTIFICATION-ERROR] Ticket with ID {ticket_id} not found")
                 return False
                 
             updater = session.query(Profile).filter(Profile.id == updater_id).first()
@@ -788,7 +790,7 @@ class NotificationService:
                 changes.append(f"<li><b>Assignee:</b> Changed from <b>{old_assignee_name}</b> to <b>{new_assignee_name}</b></li>")
                 
             if not changes:
-                print(f"[NOTIFICATION] No status, priority, or assignee change on ticket {ticket.ticket_number} - skipping email", flush=True)
+                log.warning(f"[NOTIFICATION] No status, priority, or assignee change on ticket {ticket.ticket_number} - skipping email")
                 return False
                 
             changes_html = "<ul>" + "".join(changes) + "</ul>"
@@ -811,7 +813,7 @@ class NotificationService:
             if not email_list:
                 return False
                 
-            print(f"[NOTIFICATION] Notifying on update of ticket {ticket.ticket_number} to {len(email_list)} recipients", flush=True)
+            log.info(f"[NOTIFICATION] Notifying on update of ticket {ticket.ticket_number} to {len(email_list)} recipients")
             subject, html_body = EmailTemplates.ticket_updated_notification(
                 ticket_number=ticket.ticket_number,
                 title=ticket.title,
@@ -820,7 +822,7 @@ class NotificationService:
             )
             return NotificationService.send_email(email_list, subject, html_body)
         except Exception as e:
-            print(f"[NOTIFICATION-ERROR] Failed to notify on ticket update: {str(e)}", flush=True)
+            log.error(f"[NOTIFICATION-ERROR] Failed to notify on ticket update: {str(e)}")
             return False
         finally:
             if should_close:
@@ -845,10 +847,10 @@ class NotificationService:
                 
             email_list = list(recipients)
             if not email_list:
-                print("[NOTIFICATION] No recipients to notify for deleted ticket - skipping email", flush=True)
+                log.warning("[NOTIFICATION] No recipients to notify for deleted ticket - skipping email")
                 return False
                 
-            print(f"[NOTIFICATION] Notifying on deleted ticket {ticket_number} to {len(email_list)} recipients", flush=True)
+            log.info(f"[NOTIFICATION] Notifying on deleted ticket {ticket_number} to {len(email_list)} recipients")
             subject, html_body = EmailTemplates.ticket_deleted_notification(
                 ticket_number=ticket_number,
                 title=title,
@@ -856,6 +858,6 @@ class NotificationService:
             )
             return NotificationService.send_email(email_list, subject, html_body)
         except Exception as e:
-            print(f"[NOTIFICATION-ERROR] Failed to notify on ticket delete: {str(e)}", flush=True)
+            log.error(f"[NOTIFICATION-ERROR] Failed to notify on ticket delete: {str(e)}")
             return False
 

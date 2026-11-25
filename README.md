@@ -5,7 +5,7 @@
 ![PostgreSQL](https://img.shields.io/badge/Supabase-PostgreSQL-3ECF8E?logo=supabase&logoColor=white)
 ![LightGBM](https://img.shields.io/badge/LightGBM-v7-9ACD32)
 ![CatBoost](https://img.shields.io/badge/CatBoost-v5-FFCC00)
-![Tests](https://img.shields.io/badge/tests-195%20backend-brightgreen)
+![Tests](https://img.shields.io/badge/unit%20tests-371%20passing-brightgreen)
 
 PredictiX is a predictive maintenance platform for fleet and warehouse operations. It ingests
 vehicle telemetry, predicts whether an asset will need maintenance within a 30-day horizon,
@@ -33,8 +33,8 @@ and Groq LLM agents sit behind the API, backed by Supabase PostgreSQL.
 > variable so the instance can be rebuilt or moved without a code change. See
 > [`docs/CICD.md`](docs/CICD.md).
 
-Interactive API documentation is served by the running instance at `/docs` (Swagger UI)
-and `/redoc`.
+Interactive API documentation is served at `/docs` (Swagger UI) and `/redoc` outside
+production. With `ENV=production` they are off unless `ENABLE_API_DOCS=true`.
 
 ---
 
@@ -253,7 +253,7 @@ PredictiX_backend/
 │   │   │   └── survival_analysis/
 │   │   ├── services/                # AI orchestration, HF/Gradio clients, batch PDM
 │   │   └── agent/                   # Tool-calling Groq agent loop + tools
-│   ├── kb/                          # Knowledge base & vector store (WIP)
+│   ├── kb/                          # Knowledge-base ingestion pipeline and scoped retrieval
 │   └── tests/                       # Unit tests
 ├── seed_data/                       # SQL fixtures and demo data scripts
 ├── alembic/                         # Database migration scripts
@@ -357,7 +357,6 @@ PredictiX_backend/
 | GET/POST | `/asset-documents` | Document management |
 | GET/POST | `/asset-summaries/generate` | AI-generated asset descriptions |
 | POST | `/asset-reports/{asset_id}` | Generate full PDF report to Supabase Storage |
-| GET | `/asset-reports/dummy/pdf` | Dummy PDF for styling test |
 
 ### Maintenance & Sensors
 
@@ -426,7 +425,7 @@ PredictiX_backend/
 |---|---|---|
 | POST | `/chatbot/ask` | Legacy RAG Q&A (no auth) |
 | POST | `/chatbot/agent` | Tool-calling Groq agent (JWT required) |
-| WS | `/ws` | Real-time WebSocket connection |
+| WS | `/ws/notifications/{user_id}` | Real-time notifications. The client sends `{"type": "auth", "token": "<JWT>"}` as its first message; the token must belong to `user_id`. Unauthenticated sockets are closed with 1008 |
 
 ### Warmup
 
@@ -442,9 +441,21 @@ PredictiX_backend/
 
 | Model | File | Task | Output |
 |---|---|---|---|
-| PDM Classifier | `app/ai/models/pdm_classifier_model/predictive_maintenance_model.pkl` | Failure probability | 0–1 score, risk level, recommended action |
-| PDM Regressor | `app/ai/models/pdm_regressor_model/days_until_next_maintenance_regressor.pkl` | Days until maintenance | Numeric estimate + SHAP importances |
-| Survival Analysis | `app/ai/models/survival_analysis/` | Component RUL (Weibull AFT) | Survival curves, 30/90-day risk flags |
+| PdM Classifier (LightGBM v7) | `app/ai/models/pdm_classifier_model/predictix_pdm_classifier_v7.txt` | 30-day maintenance probability | 0–1 score, risk level |
+| PdM Regressor (LightGBM v7) | `app/ai/models/pdm_regressor_model/predictix_pdm_regressor_v7.txt` | Days until maintenance | Numeric estimate + SHAP drivers |
+| Breakdown cost (CatBoost v5) | `app/ai/models/cost_estimation_model/predictix_breakdown_cost_model_v5.pkl` | Repair cost (LKR) | Point estimate + 80% interval |
+| Survival Analysis | `app/ai/models/survival_analysis/survival_bundle.pkl` | Component RUL (Weibull AFT × 5) | Survival curves, 30/90-day risk flags |
+
+The two pickled files are loaded only if their SHA-256 matches
+`app/ai/models/model_checksums.json`, because unpickling runs code stored in the file. After
+retraining a model, check the new file and record it with `python scripts/update_model_checksums.py`.
+
+**Training data.** Every model is trained and evaluated on generated data
+(`app/ai/dataset/srilanka_single_warehouse_vehicle_maintenance_dataset_v11_realistic.csv`, and the
+survival snapshots built from it), with a temporal split (train ≤ 2024, test 2025). The reported
+test scores (classifier AUC 0.96, regressor R² 0.81, cost R² 0.82) measure how well each model
+recovers the patterns in that generated data. They are not evidence of accuracy on real fleet
+failures, which needs labelled production history to measure.
 
 ### Remote HuggingFace / Gradio Models (optional)
 
@@ -468,7 +479,7 @@ Ticket categorisation and priority can also route through the external Gradio Sp
 
 ### SHAP Explainability
 
-CatBoost regressor predictions include per-feature SHAP values stored in `PredictionExplanation` and `PredictionFeatureImportance` tables, served to the frontend for risk driver visualisation.
+LightGBM regressor predictions include per-feature SHAP values stored in `PredictionExplanation` and `PredictionFeatureImportance` tables, served to the frontend for risk driver visualisation.
 
 ---
 
@@ -498,19 +509,52 @@ ADMIN_AI_SUMMARY_TTL=21600
 
 ## Authentication
 
-**Method:** JWT HS256, 60-minute expiry
+**Method:** JWT (HS256, PyJWT), passwords hashed with bcrypt. Access tokens last
+`ACCESS_TOKEN_TTL_MINUTES` (default 480, eight hours). There is no refresh token, so that is also
+the longest a session lasts.
 
 ```
 POST /auth/login
-Body:     { "email": "...", "password": "...", "role": "ADMIN" | "USER" }
-Response: { "access_token": "...", "token_type": "bearer" }
+Body:     { "email": "...", "password": "..." }      role is read from the profile
+Response: { "access_token": "...", "token_type": "bearer", "role": "...", ... }
+          super_admin: { "requires_warehouse_selection": true, "selection_token": "...", "warehouses": [...] }
+
+POST /auth/login/select-warehouse   { "selection_token": "...", "warehouse_id": "..." }
 
 Protected routes: Authorization: Bearer <token>
 ```
 
-**Token payload:** `sub` (user_id), `email`, `role`, `warehouse_id`, `exp`
+**Token payload:** `sub` (profile id), `email`, `role`, `warehouse_id` (admins and super admins),
+`type` (`access`), `iat`, `nbf`, `exp`. The 5-minute super admin `selection_token` has
+`type: warehouse_selection` and is rejected everywhere except the select-warehouse step.
 
-**Demo accounts (development seed data — LankaLogix):**
+**How a request is authorised**
+
+1. `deps.get_current_user` verifies the signature and expiry, rejects any token that is not an
+   access token, then loads the profile. A token whose profile has been deleted, deactivated or
+   suspended stops working on the next request.
+2. Admins and users are scoped by their profile's warehouse. Only a super admin's warehouse comes
+   from the token (the one picked at login), and it is never written back to their profile.
+3. Role checks are `require_user`, `require_admin` and `require_super_admin`; record-level checks
+   (`assert_asset_in_scope`, `user_can_view_asset`, `assert_can_manage_user`,
+   `assert_in_active_warehouse`) return 404 outside the caller's scope, so the response never
+   reveals that a record exists.
+4. A regular admin manages users and admins of their own warehouse only and cannot grant the
+   `super_admin` role. Creating a warehouse is super admin only.
+5. Logins are limited to `LOGIN_RATE_LIMIT` attempts per minute per client IP, chatbot calls to
+   `AI_RATE_LIMIT` per user per minute, and AI warehouse reports to `REPORT_RATE_LIMIT`.
+
+**Chatbot database questions.** SQL written by the model never touches the real tables. It runs on
+its own connection inside a read-only transaction with a 5 second timeout, after every table has
+been replaced by a temporary view holding only the rows the caller may see (`profiles` without the
+`meta` column, which holds password hashes). Queries that name a schema, read system catalogs, call
+setting or SQL-from-string functions, or contain more than one statement are refused. See
+`app/ai/agent/safe_sql.py`.
+
+**Demo accounts.** Six built-in logins with no database row (one user, one admin, four super
+admins) are accepted while `ENABLE_DEMO_ACCOUNTS` is true, which is the default. Their passwords
+are in this public repository, so set `ENABLE_DEMO_ACCOUNTS=false` on any deployment that does not
+need them.
 
 | Email | Password | Role |
 |---|---|---|
@@ -524,10 +568,22 @@ Protected routes: Authorization: Bearer <token>
 Create a `.env` file in the project root:
 
 ```env
-# JWT
-JWT_SECRET=your-secret-uuid-here
+# JWT (JWT_SECRET should be at least 32 bytes)
+JWT_SECRET=<random-secret>
 JWT_ALGORITHM=HS256
-ACCESS_TOKEN_EXPIRE_MINUTES=60
+ACCESS_TOKEN_TTL_MINUTES=480        # session length; there is no refresh token
+
+# Auth hardening
+ENABLE_DEMO_ACCOUNTS=true           # set false wherever the built-in demo logins are not needed
+RATE_LIMIT_ENABLED=true
+LOGIN_RATE_LIMIT=20                 # login attempts per minute per client IP
+AI_RATE_LIMIT=30                    # chatbot calls per minute per user
+REPORT_RATE_LIMIT=6                 # AI warehouse reports per minute per user
+
+# Background jobs run only where this is true. Keep it true on the deployed API
+# and false on dev servers and CI, which share the same database.
+SCHEDULER_ENABLED=true
+LOG_LEVEL=INFO
 
 # Supabase
 SUPABASE_URL=https://<project-ref>.supabase.co
@@ -558,7 +614,8 @@ HF_TICKET_CATEGORIZATION_REPO=Dinusha-Ekanayake/predictix-ticket_categorization_
 HF_TICKET_SUMMARIZATION_REPO=Dinusha-Ekanayake/predictix-ticket_summarization_model
 HF_TICKET_PRIORITIZATION_REPO=AroshN/priority_classif_xgb
 HF_ASSET_SUMMARIZATION_REPO=Dinusha-Ekanayake/predictix-asset_summarization_model
-ENABLE_HF_WARMER=false
+# Wake the three Spaces every N hours (0 disables); they sleep after 48 h idle.
+HF_SPACE_KEEPALIVE_HOURS=6
 
 # Asset and ticket summary Spaces, reached with gradio_client.
 ASSET_SUMMARY_SPACE=SharadaAbeywickrama/Asset_summery_generation
@@ -621,8 +678,9 @@ PROD_ALLOWED_ORIGINS=https://your-frontend.vercel.app
 DEV_ALLOWED_ORIGINS=http://localhost:3000,http://localhost:5173
 ALLOWED_ORIGINS=http://localhost:3000,https://your-frontend.vercel.app
 
-# Misc
-DEFAULT_PASSWORD=Predictix@123
+# API docs (/docs, /redoc, /openapi.json): on by default, off when ENV=production.
+# ENABLE_API_DOCS=true|false overrides either way.
+# ENABLE_API_DOCS=
 ```
 
 Never commit `.env`. On EC2, systemd loads the same values through the service `EnvironmentFile`.
@@ -675,19 +733,21 @@ The API is available at `http://localhost:8000`.
 
 ## Database Migrations
 
+Schema changes are plain, idempotent SQL files in [`docs/migrations/`](docs/migrations),
+numbered in the order they were applied (`001_…` to `011_…`). Alembic is not used: there is no
+`alembic/` directory, and `alembic.ini` is left over from the original scaffold.
+
 ```bash
-# Apply all pending migrations
-alembic upgrade head
+# Show the SQL a migration will run (dry run)
+python scripts/apply_migration.py 011
 
-# Generate a migration from model changes
-alembic revision --autogenerate -m "description"
-
-# Roll back one migration
-alembic downgrade -1
-
-# View migration history
-alembic history
+# Apply it to the database DATABASE_URL points at
+python scripts/apply_migration.py 011 --apply
 ```
+
+Each file is written to be safe to re-run (guarded by `IF NOT EXISTS` or a `WHERE` clause). A new
+schema change gets the next number and the same treatment. `app/models.py` must be updated in the
+same change so the ORM and the database agree.
 
 ---
 
@@ -829,10 +889,10 @@ SERVICE_REMINDER_HOUR=9
 SERVICE_REMINDER_TZ=Asia/Colombo
 SERVICE_REMINDER_OFFSETS=14,7,3,1
 SERVICE_REMINDER_RUN_ON_STARTUP=false
-ENABLE_HF_WARMER=false
+HF_SPACE_KEEPALIVE_HOURS=6
 ```
 
-For Supabase free-tier protection, keep `BATCH_INTERVAL_HOURS=24`, keep startup batch runs disabled unless you intentionally need an immediate rebuild, and keep `ENABLE_HF_WARMER=false` unless the Space cold-start cost is more important than the extra traffic.
+For Supabase free-tier protection, keep `BATCH_INTERVAL_HOURS=24`, keep startup batch runs disabled unless you intentionally need an immediate rebuild, The Hugging Face Spaces (categorisation and summaries) are woken every `HF_SPACE_KEEPALIVE_HOURS` (default 6; they sleep after 48 hours idle). The `HF Spaces keep-alive` GitHub workflow does the same every 12 hours, so they stay awake while the API is down. To wake them by hand: `python -m app.ai.services.hf_spaces`.
 
 ---
 
@@ -851,6 +911,107 @@ Set `DISABLE_HF_MODELS=true` (default) to skip downloading and loading HuggingFa
 - **Pydantic validation** — All request/response bodies are fully typed with `from_attributes=True` for ORM compatibility
 - **Dashboard caching** — `DashboardCache` and `ai_summary_cache` decouple request latency from Supabase network RTT
 
-### Knowledge Base (WIP)
+### Chatbot architecture
 
-`app/kb/` contains early-stage vector store and document embedding utilities (`kb_vector_store.py`, `kb_documents.py`, `kb_annotator.py`). These power SHAP-enriched annotations in warehouse reports and are not yet exposed as standalone API endpoints.
+```mermaid
+graph TD
+    U["User prompt"] --> G["Input bounds · rate limit<br/>routers/chatbot.py"]
+    G --> R["Router agent<br/>agent_service.run_agent"]
+    R --> C{"Intent<br/>keyword rules, then LLM classifier"}
+    C -->|GREETING · WHOAMI · NAVIGATION| Z["Zero-token handlers"]
+    C -->|FAQ · KNOWLEDGE| H["Help retrieval<br/>FAQs + articles, merged"]
+    H --> HS["Help synthesizer<br/>answers only from sources, cites them"]
+    C -->|PREDICTION| P["Prediction info"]
+    C -->|ACTION| A["Action router<br/>same permission rules as the API"]
+    C -->|DATABASE| D["Database orchestrator<br/>scoped fast paths first"]
+    D --> TS["Table selector"] --> SG["SQL generator"]
+    SG --> SB{"SQL sandbox<br/>safe_sql.run_scoped_query"}
+    SB -->|error| SH["Self-healer"] --> SB
+    SB -->|one record| W["Record widget"]
+    SB -->|rows| S["Summarizer"]
+    SB -->|refused or failed| F["Fallback answer"]
+    Z & HS & P & A & W & S & F --> RC["Response compiler<br/>in-app buttons only"]
+    RC --> U
+
+    style SB fill:#0F4C5C,color:#fff
+    style G fill:#E6F1F4,stroke:#0F4C5C
+    style RC fill:#E6F1F4,stroke:#0F4C5C
+```
+
+Every model call goes through `guardrails.guarded_call_groq`, which puts the same security rules
+first. Text from the user, the browser or the database reaches the model only inside labelled
+data fences. What data each caller can reach is enforced in code, not by the prompt:
+`safe_sql.py` (generated SQL), `scoping.py` (chatbot lookups and actions) and `app/deps.py` (the
+REST API) apply the same warehouse and ownership rules.
+
+### Tracing an AI answer back
+
+Every chatbot reply and AI warehouse report gets an audit trace, stored in the
+`ai_traces` table (migration 013) by `app/ai/agent/tracing.py`. The chat widget
+shows a short reference under each answer (`Ref c4d8538b`); click to copy the
+full id.
+
+```
+GET /chatbot/traces/{trace_id}     one trace with every step, in order
+GET /chatbot/traces?user_id=&channel=chatbot|report&limit=50   recent traces, newest first
+```
+
+Users see their own traces, admins those of their active warehouse, super
+admins all; anything else is a 404. A trace records who asked (role,
+warehouse), the question and answer, and each step with its time offset:
+
+| Step | Recorded |
+|---|---|
+| `intent` | the route taken and whether keyword rules or the LLM decided it |
+| `rewrite` | a follow-up rewritten from the chat history |
+| `retrieval` | corpus, method, the query used, every hit with source, id, title and score |
+| `llm_call` | purpose, model, latency, success, a preview of the reply |
+| `sql` | the generated SQL, the caller's scope, and the sandbox outcome (refused and why, database error, or rows returned) |
+| `action` | a create or update the chatbot was asked to perform |
+| `report_context` | for reports, the size of the live data and the standards documents used |
+| `result` | the answer, its buttons and widget |
+
+Recording never changes or delays an answer: outside a trace it is a no-op, and
+a failed save is logged and dropped. Traces hold questions, answers and SQL,
+so they stay in the project database behind the same access rules as the rest
+of the API; set a retention period that suits your policy (for example a
+scheduled `DELETE FROM ai_traces WHERE created_at < now() - interval '180 days'`).
+
+### Retrieval (RAG)
+
+| Corpus | Table | Used by | Code |
+|---|---|---|---|
+| FAQs, edited by admins | `faqs` | Chatbot help answers | `app/chatbot/knowledge_service.py` (`search_help`) |
+| Help and reference articles, edited at `/admin/knowledge-base` | `knowledge_base` | Chatbot help answers | same |
+| Registered maintenance knowledge base: published standards and PredictiX-derived ticket patterns, listed in `kb/sources.yaml` | `kb_sources`, `kb_chunks` | AI warehouse report, chatbot knowledge answers | `app/kb/retrieval.py`, `app/ai/agent/kb_answer.py` |
+| Team-written maintenance articles (legacy corpus; its unaudited PDFs are not served) | `kb_documents` | AI warehouse report | `app/kb/kb_vector_store.py` |
+
+- **Embedding.** `sentence-transformers/all-MiniLM-L6-v2` (384 dimensions, normalised), the model
+  the stored vectors were made with. Queries use the local model when it is cached, otherwise the
+  Hugging Face endpoint (which needs inference credits). `main.py` keeps the hub offline, so cache
+  the model once on a new server:
+  `HF_HUB_OFFLINE=0 python -c "from sentence_transformers import SentenceTransformer as S; S('all-MiniLM-L6-v2')"`.
+- **Help retrieval** searches FAQs and articles together and ranks them on one similarity scale.
+  Articles use their pgvector column; FAQs have no vector column, so their question, answer and
+  tags are embedded in memory and refreshed on every FAQ write. Only active rows are searched.
+- **Relevance threshold 0.30.** Measured with `python scripts/eval_rag.py` (20 paraphrased
+  questions with known answers, 6 off-topic): hit@1 85%, hit@3 90%, every off-topic question
+  rejected. Correct hits score 0.41 to 0.79, off-topic questions at most 0.14. Adding synonyms to
+  an FAQ's tags ("sign out" for "log out") is the way to fix a miss.
+- **Answering.** The synthesizer answers only from the retrieved items, replies "not covered" with
+  the admin contact when they do not answer the question, never invents steps, and lists its
+  sources. If the model is unavailable, the most relevant item is shown as written.
+- **When no embedding can be made** both help search and the report store fall back to TF-IDF over
+  the same rows, so retrieval degrades instead of returning nothing.
+- Article and FAQ edits refresh their indexes immediately.
+
+The registered knowledge base is loaded by an auditable pipeline
+(`python -m app.kb.pipeline`): licence-checked sources, archived originals,
+token-aware chunking, hybrid vector and full-text search, and retrieval scoped
+to the caller's role and warehouse. Legal questions are answered only from Sri
+Lankan sources. See [`kb/README.md`](kb/README.md) and
+[ADR-0006](docs/adr/0006-knowledge-base-sources.md); references are in
+[`kb/REFERENCES.md`](kb/REFERENCES.md).
+
+`kb_annotator.py` adds deterministic, rule-based annotations (SHAP drivers, health-band and
+benchmark notes) to the report alongside the retrieved text.

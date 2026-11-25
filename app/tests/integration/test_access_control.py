@@ -94,3 +94,13 @@ def test_invalid_notification_type_is_a_client_error(client, auth):
               "notification_type": "not_a_real_type", "enabled": True},
     )
     assert resp.status_code == 422
+
+
+# ── response hardening ───────────────────────────────────────────────────────
+
+def test_api_responses_carry_security_headers(client):
+    resp = client.get("/assets/")  # 401, still must carry the headers
+    assert resp.headers["x-content-type-options"] == "nosniff"
+    assert resp.headers["x-frame-options"] == "DENY"
+    assert resp.headers["cache-control"] == "no-store"
+    assert resp.headers["referrer-policy"] == "no-referrer"

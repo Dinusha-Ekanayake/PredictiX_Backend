@@ -1,0 +1,80 @@
+# Server runtime: everything the API needs to start and serve every route.
+# This is what the EC2 instance installs (see docs/EC2_Deployment.md), so it
+# must stay free of torch and any other multi-gigabyte package: the instance
+# has 1 GB of RAM and an 8 GB disk. Heavier local-only extras live in
+# requirements.txt, which includes this file.
+#
+# Every pin must have wheels for Python 3.12 (CI) and 3.14 (Ubuntu 26.04 on
+# EC2); the "EC2 compatibility" CI job installs this file on 3.14 with
+# --only-binary to prove it. Update deliberately: bump a pin, test, commit.
+
+# ── Core web / DB ──────────────────────────────────────────────────────────────
+fastapi==0.165.0
+uvicorn==0.40.0
+sqlalchemy==2.0.46
+alembic==1.18.3
+apscheduler==3.11.2
+psycopg[binary]==3.3.2
+psycopg2-binary==2.9.11
+pydantic-settings==2.16.3
+python-multipart==0.0.34
+python-dotenv==1.2.4
+requests==2.33.0
+email-validator==2.3.0
+
+# ── Auth ───────────────────────────────────────────────────────────────────────
+# JWTs are signed and verified with PyJWT and passwords hashed with bcrypt
+# directly (app/core/security.py). Both read and write the same formats the
+# previous python-jose/passlib code did, so existing tokens and hashes stay valid.
+PyJWT==2.15.1
+bcrypt==4.0.1
+
+# ── ML / data ──────────────────────────────────────────────────────────────────
+pandas==2.3.3
+numpy==2.4.3
+# 1.7.2 is the oldest release with Python 3.14 wheels. No shipped model
+# pickles a scikit-learn estimator (only LightGBM's sklearn wrapper), so the
+# bump does not affect loading them.
+scikit-learn==1.7.2
+catboost==1.2.10
+shap==0.51.0
+# The CPU build of xgboost (same `xgboost` module). The standard Linux wheel
+# also pulls nvidia-nccl-cu12, about 300 MB of CUDA libraries a CPU host
+# never loads.
+xgboost-cpu==3.2.0
+lightgbm==4.6.0
+lifelines==0.30.3
+joblib==1.5.3
+
+# ── NLP / LLM / inference ──────────────────────────────────────────────────────
+openai==3.3.0
+huggingface_hub==1.8.0
+safetensors==0.7.0
+nltk==3.10.4
+groq==0.37.1
+langchain-groq==1.1.2
+langchain-core==1.5.6
+# Warehouse report generation builds its LLM with ChatOpenAI pointed at
+# OpenRouter (app/agents/report_agents._get_llm), so this is required for the
+# report feature to import at all.
+langchain-openai==1.5.2
+
+# ── Other ──────────────────────────────────────────────────────────────────────
+supabase==2.28.3
+reportlab==4.5.1
+gradio_client==2.5.0
+
+# playwright renders /reports/render-pdf's HTML-to-PDF export with headless
+# Chromium. The browser binary is separate and is fetched once per host with
+# `python -m playwright install chromium` (the deploy script does this).
+# Without it the route answers 503 and the frontend falls back to the
+# browser's print dialog.
+playwright==1.62.0
+pgvector==0.5.0
+
+# Chatbot query embeddings without torch: the official ONNX export of
+# all-MiniLM-L6-v2, run by ONNX Runtime (app/chatbot/onnx_embedder.py).
+# tokenizers stays within the range transformers accepts (<=0.23.0).
+onnxruntime==1.32.0
+tokenizers==0.22.2
+pypdf==6.21.4

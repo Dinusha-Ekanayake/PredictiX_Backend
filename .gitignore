@@ -2,6 +2,8 @@
 # a `.env.production`, was still committable with every secret in it.
 .env
 .env.*
+# The template holds names and placeholders only, so it is tracked.
+!.env.example
 .venv/
 
 __pycache__/
@@ -25,7 +27,6 @@ onnx_ticket_summary*/
 build_onnx.py
 *_quality_test.py
 ticket_quality_test.py
-.env.example
 
 # Logs / profiling / scratch output
 profile.out
@@ -77,3 +78,17 @@ app/chatbot/scratch/
 
 # Exported user reports carry names, emails and phone numbers.
 *_report.csv
+
+# Graphify knowledge graph (local, rebuilt with `graphify update .`)
+graphify-out/
+
+# Coverage outputs (pytest --cov)
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Knowledge-base pipeline: local download cache and per-run reports.
+# Originals are archived in the private kb-sources storage bucket.
+kb/.cache/
+kb/reports/

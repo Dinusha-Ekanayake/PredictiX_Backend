@@ -8,9 +8,12 @@ from datetime import datetime, timezone
 import uuid
 
 from app.ai.agent.tools import ToolContext
-from app.ai.services.llm_service import call_groq
+from app.ai.agent.guardrails import guarded_call_groq as call_groq
 from app.models import Ticket, Asset, Profile
-from app.services.user_ticket_service import generate_ticket_number
+from app.ai.agent.scoping import scope_asset_query, scope_ticket_query
+from app.ai.agent.guardrails import clamp
+from app.deps import assert_can_assign
+from fastapi import HTTPException
 
 log = logging.getLogger("predictix.actions")
 
@@ -107,10 +110,80 @@ If you cannot understand the action or it's a delete operation, return:
 """
 
 
+def _parse_action_rule_based(question: str) -> dict:
+    """Deterministic regex-based fallback for action parsing when LLM is unavailable."""
+    q = question.strip()
+    q_lower = q.lower()
+
+    # 1. Create Ticket
+    if any(k in q_lower for k in ["ticket", "fault", "issue", "breakdown", "complaint", "incident"]):
+        priority = "medium"
+        if "high priority" in q_lower or "urgent" in q_lower or "critical" in q_lower:
+            priority = "high"
+        elif "low priority" in q_lower:
+            priority = "low"
+
+        # Extract title
+        title = "New Maintenance Ticket"
+        title_match = re.search(r"titled\s+['\"]?([^'\"]+?)['\"]?(?:\s+with\s+description|\s+for|\s*$)", q, re.IGNORECASE)
+        if title_match:
+            title = title_match.group(1).strip()
+        else:
+            t_match2 = re.search(r"ticket\s+(?:for\s+[^'\"]+?\s+)?titled\s+['\"]?([^'\"]+?)['\"]?", q, re.IGNORECASE)
+            if t_match2:
+                title = t_match2.group(1).strip()
+
+        # Extract description
+        desc = "Created via Sidekick Chatbot"
+        desc_match = re.search(r"description\s+['\"]?([^'\"]+?)['\"]?$", q, re.IGNORECASE)
+        if desc_match:
+            desc = desc_match.group(1).strip()
+        elif "with description" in q_lower:
+            desc = q.split("with description", 1)[1].strip(" '\"")
+
+        # Extract asset
+        asset_name = None
+        asset_match = re.search(r"for\s+([A-Za-z0-9\-\s]+?)\s+(?:titled|with|priority)", q, re.IGNORECASE)
+        if asset_match:
+            asset_name = asset_match.group(1).strip()
+
+        return {
+            "action": "create_ticket",
+            "title": title,
+            "description": desc,
+            "priority": priority,
+            "asset_name": asset_name
+        }
+
+    # 2. Create Asset
+    if "asset" in q_lower and ("create" in q_lower or "add" in q_lower or "insert" in q_lower):
+        name_match = re.search(r"(?:asset|name)\s+['\"]?([^'\"]+?)['\"]?(?:\s+type|\s+code|$)", q, re.IGNORECASE)
+        name = name_match.group(1).strip() if name_match else "New Asset"
+        return {
+            "action": "create_asset",
+            "asset_name": name,
+            "asset_code": None,
+            "asset_type": "vehicle"
+        }
+
+    # 3. Create User
+    if "user" in q_lower and ("create" in q_lower or "add" in q_lower or "insert" in q_lower):
+        email_match = re.search(r"[\w\.-]+@[\w\.-]+\.\w+", q)
+        email = email_match.group(0) if email_match else None
+        return {
+            "action": "create_user",
+            "email": email,
+            "full_name": "New User",
+            "role": "user"
+        }
+
+    return {"action": "unauthorized"}
+
+
 def handle_action(question: str, ctx: ToolContext) -> dict:
     """Handles data insertion requests strictly."""
     
-    # 1. Use LLM to parse the intent into structured JSON
+    # 1. Use LLM to parse the intent into structured JSON with regex fallback
     try:
         raw_json, _ = call_groq(
             messages=[
@@ -123,10 +196,15 @@ def handle_action(question: str, ctx: ToolContext) -> dict:
         data = _extract_json_data(raw_json)
         action = data.get("action")
     except Exception as e:
-        log.error("Failed to parse action JSON from LLM: %s", e)
-        return {"answer": "⚠️ I couldn't understand the action details. Please try rephrasing with the title and description.", "action_buttons": []}
+        log.warning("LLM action parsing failed, falling back to rule-based parser: %s", e)
+        data = _parse_action_rule_based(question)
+        action = data.get("action")
         
-    if action == "unauthorized":
+    from app.ai.agent.tracing import record
+
+    record("action", action=action or "none", requested=data or {})
+
+    if not data or action == "unauthorized":
         return {"answer": "🔒 I am only allowed to create or update maintenance records. I cannot delete existing data.", "action_buttons": []}
 
     # Ensure valid database session
@@ -145,29 +223,20 @@ def handle_action(question: str, ctx: ToolContext) -> dict:
             asset_ref = data.get("asset_name") or data.get("asset_code")
             if asset_ref:
                 asset_clean = str(asset_ref).strip()
-                asset = (
-                    db.query(Asset)
-                    .filter(
-                        or_(
-                            Asset.asset_code.ilike(f"%{asset_clean}%"),
-                            Asset.asset_name.ilike(f"%{asset_clean}%"),
-                            Asset.registration_number.ilike(f"%{asset_clean}%"),
-                        )
+                asset_query = db.query(Asset).filter(
+                    or_(
+                        Asset.asset_code.ilike(f"%{asset_clean}%"),
+                        Asset.asset_name.ilike(f"%{asset_clean}%"),
+                        Asset.registration_number.ilike(f"%{asset_clean}%"),
                     )
-                    .first()
                 )
+                asset = scope_asset_query(asset_query, ctx).first()
 
-            # Resolve creator UUID
-            created_by_uuid = None
-            if ctx.user_id:
-                try:
-                    created_by_uuid = uuid.UUID(str(ctx.user_id))
-                except Exception:
-                    pass
-            if not created_by_uuid:
-                first_prof = db.query(Profile).filter(Profile.status == "active").first()
-                if first_prof:
-                    created_by_uuid = first_prof.id
+            # The ticket is always raised in the caller's own name.
+            try:
+                created_by_uuid = uuid.UUID(str(ctx.user_id))
+            except (ValueError, TypeError, AttributeError):
+                return {"answer": "⚠️ I could not confirm who you are, so I did not create the ticket. Please sign in again.", "action_buttons": []}
 
             # Resolve warehouse ID
             wh_id = None
@@ -179,14 +248,13 @@ def handle_action(question: str, ctx: ToolContext) -> dict:
                 except Exception:
                     pass
 
-            ticket_num = generate_ticket_number(db)
             priority_val = _normalize_priority(data.get("priority"))
-            title_val = data.get("title") or "New Maintenance Ticket"
-            desc_val = data.get("description") or "Created via Sidekick Chatbot"
+            title_val = clamp(data.get("title") or "New Maintenance Ticket", 255)
+            desc_val = clamp(data.get("description") or "Created via Sidekick Chatbot", 5000)
 
             new_ticket = Ticket(
                 id=uuid.uuid4(),
-                ticket_number=ticket_num,
+                # ticket_number is assigned by the database (ticket_number_seq).
                 title=title_val,
                 description=desc_val,
                 priority=priority_val,
@@ -199,10 +267,15 @@ def handle_action(question: str, ctx: ToolContext) -> dict:
             db.commit()
             db.refresh(new_ticket)
 
-            # Trigger email notification
+            # Trigger email notification asynchronously
             try:
+                import threading
                 from app.services.notification_service import NotificationService
-                NotificationService.notify_on_new_ticket(db, str(new_ticket.id))
+                t_id_str = str(new_ticket.id)
+                threading.Thread(
+                    target=lambda: NotificationService.notify_on_new_ticket(None, t_id_str),
+                    daemon=True
+                ).start()
             except Exception as notify_err:
                 log.warning("Notification dispatch failed on chatbot ticket create: %s", notify_err)
             
@@ -256,9 +329,20 @@ def handle_action(question: str, ctx: ToolContext) -> dict:
             if not ctx.is_admin:
                 return {"answer": "🔒 You do not have permission to create users. Only admins can perform this action.", "action_buttons": []}
                 
-            email = data.get("email")
-            if not email:
-                return {"answer": "⚠️ I need an email address to create a new user.", "action_buttons": []}
+            email = str(data.get("email") or "").strip().lower()
+            if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[A-Za-z]{2,}", email):
+                return {"answer": "⚠️ I need a valid email address to create a new user.", "action_buttons": []}
+            role_val = str(data.get("role") or "user").strip().lower()
+            if role_val not in ("user", "admin", "super_admin"):
+                role_val = "user"
+            # Same rules as POST /users: a regular admin cannot grant
+            # super_admin or add users outside their own warehouse.
+            try:
+                assert_can_assign(ctx.user, role=role_val, warehouse_id=ctx.warehouse_id)
+            except HTTPException as denied:
+                return {"answer": f"🔒 {denied.detail}.", "action_buttons": []}
+            if db.query(Profile).filter(Profile.email == email).first():
+                return {"answer": f"⚠️ A user with the email `{email}` already exists.", "action_buttons": []}
                 
             wh_id = None
             if ctx.warehouse_id:
@@ -270,8 +354,8 @@ def handle_action(question: str, ctx: ToolContext) -> dict:
             new_profile = Profile(
                 id=uuid.uuid4(),
                 email=email,
-                full_name=data.get("full_name") or "New User",
-                role=data.get("role") or "user",
+                full_name=clamp(data.get("full_name") or "New User", 120),
+                role=role_val,
                 warehouse_id=wh_id
             )
             db.add(new_profile)
@@ -293,15 +377,15 @@ def handle_action(question: str, ctx: ToolContext) -> dict:
             ticket = None
             if ticket_id_str.isdigit() or ticket_id_str.startswith("#"):
                 num = ticket_id_str.replace("#", "")
-                ticket = db.query(Ticket).filter(Ticket.ticket_number.ilike(f"%{num}%")).first()
+                ticket = scope_ticket_query(db.query(Ticket), ctx).filter(Ticket.ticket_number.ilike(f"%{num}%")).first()
             elif ticket_id_str.upper().startswith("TKT-") or ticket_id_str.upper().startswith("T-"):
-                ticket = db.query(Ticket).filter(Ticket.ticket_number.ilike(f"%{ticket_id_str}%")).first()
+                ticket = scope_ticket_query(db.query(Ticket), ctx).filter(Ticket.ticket_number.ilike(f"%{ticket_id_str}%")).first()
             else:
                 try:
                     ticket_uuid = uuid.UUID(ticket_id_str)
-                    ticket = db.query(Ticket).filter(Ticket.id == ticket_uuid).first()
+                    ticket = scope_ticket_query(db.query(Ticket), ctx).filter(Ticket.id == ticket_uuid).first()
                 except ValueError:
-                    ticket = db.query(Ticket).filter(Ticket.ticket_number.ilike(f"%{ticket_id_str}%")).first()
+                    ticket = scope_ticket_query(db.query(Ticket), ctx).filter(Ticket.ticket_number.ilike(f"%{ticket_id_str}%")).first()
                     
             if not ticket:
                 return {"answer": f"⚠️ I couldn't find a ticket matching '{ticket_id_str}'. Please verify the ticket number.", "action_buttons": []}

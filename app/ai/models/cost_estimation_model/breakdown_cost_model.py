@@ -42,7 +42,10 @@ numba.core.serialize._unpickle__CustomPickled = _safe_unpickle
 
 def load_breakdown_bundle(path: Path | str | None = None) -> dict:
     """Load the breakdown cost bundle. Call once in lifespan."""
+    from app.ai.model_integrity import verify_model_file
+
     p = Path(path) if path else MODEL_PATH
+    verify_model_file(p)
     bundle = joblib.load(p)
     # gbm_dtypes_safe stores plain lists, rebuild CategoricalDtype at load time
     bundle["gbm_dtypes"] = {

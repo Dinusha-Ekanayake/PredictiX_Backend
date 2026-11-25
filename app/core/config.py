@@ -1,18 +1,72 @@
 import os
+from typing import Optional
 
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
-    DATABASE_URL: str
-    JWT_SECRET: str
+    # Optional at import so tooling and unit tests can load the package without
+    # secrets. The server still refuses to start without them: main.lifespan
+    # calls require_runtime_settings(), and jwt_secret() fails on use.
+    DATABASE_URL: Optional[str] = None
+    JWT_SECRET: Optional[str] = None
     JWT_ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    # Lifetime of an access token. The frontend has no refresh flow, so this is
+    # also the longest a session lasts before the user signs in again.
+    ACCESS_TOKEN_TTL_MINUTES: int = 480
 
     class Config:
         env_file = ".env"
         extra = "ignore"
 
 settings = Settings()
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().strip('"').strip("'").lower() in {"1", "true", "yes", "on"}
+
+
+def access_token_ttl_minutes() -> int:
+    """Access-token lifetime in minutes, read from ACCESS_TOKEN_TTL_MINUTES."""
+    raw = os.getenv("ACCESS_TOKEN_TTL_MINUTES")
+    try:
+        value = int(raw) if raw and raw.strip() else settings.ACCESS_TOKEN_TTL_MINUTES
+    except ValueError:
+        value = settings.ACCESS_TOKEN_TTL_MINUTES
+    return value if value > 0 else 480
+
+
+def demo_accounts_enabled() -> bool:
+    """Whether the built-in demo logins in app/routers/auth.py are accepted.
+
+    They have public passwords and no database row, so production should set
+    ENABLE_DEMO_ACCOUNTS=false once demos are no longer needed.
+    """
+    return _env_flag("ENABLE_DEMO_ACCOUNTS", True)
+
+
+def scheduler_enabled() -> bool:
+    """Whether this process runs the background jobs (PdM batch, reminders).
+
+    Every process that runs them writes to the same database, so only the
+    deployed API should. Local dev servers and CI set SCHEDULER_ENABLED=false.
+    """
+    return _env_flag("SCHEDULER_ENABLED", True)
+
+
+def require_runtime_settings() -> None:
+    """Fail fast at server start when a required secret is missing."""
+    jwt_secret()
+    if is_production():
+        from app.db.supabase_client import supabase_key
+
+        if not supabase_key():
+            raise RuntimeError(
+                "SUPABASE_SERVICE_ROLE_KEY is not configured. The server never uses the "
+                "public anon key; set the service-role key before starting the API."
+            )
 
 
 def jwt_secret() -> str:
@@ -63,6 +117,25 @@ def _origins_from_env(var_name: str, default: list[str]) -> list[str]:
     return parsed or default
 
 
+def is_production() -> bool:
+    """True when ENV=production."""
+    return os.getenv("ENV", "").strip().lower() == "production"
+
+
+def api_docs_enabled() -> bool:
+    """Whether /docs, /redoc and /openapi.json are served.
+
+    Off in production by default so the full endpoint map is not public;
+    ENABLE_API_DOCS=true/false overrides either way.
+    """
+    raw = os.getenv("ENABLE_API_DOCS", "").strip().lower()
+    if raw in {"true", "1", "yes"}:
+        return True
+    if raw in {"false", "0", "no"}:
+        return False
+    return not is_production()
+
+
 def allowed_frontend_origins() -> list[str]:
     """The frontend origins this API trusts, single source of truth.
 
@@ -80,11 +153,10 @@ def allowed_frontend_origins() -> list[str]:
       - ALLOWED_ORIGINS: comma-separated, always appended on top of the above.
       - ENV=production excludes dev origins entirely.
     """
-    is_production = os.getenv("ENV", "").strip().lower() == "production"
     prod_origins = _origins_from_env("PROD_ALLOWED_ORIGINS", _DEFAULT_PROD_FRONTEND_ORIGINS)
     extra = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
     origins = list(set(prod_origins + extra))
-    if not is_production:
+    if not is_production():
         dev_origins = _origins_from_env("DEV_ALLOWED_ORIGINS", _DEFAULT_DEV_FRONTEND_ORIGINS)
         origins = list(set(origins + dev_origins))
     return origins

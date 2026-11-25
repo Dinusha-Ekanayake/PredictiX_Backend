@@ -1037,7 +1037,27 @@ def _guard_narrative(ai_sections: dict, ctx: dict) -> dict:
     return ai_sections
 
 
-def run_warehouse_agent(db: Session, warehouse_id: str | None = None) -> dict:
+def _kb_context_lines(chunks: list[dict]) -> list[str]:
+    """Retrieved passages as prompt text, each with its citation and how far it applies."""
+    lines = [
+        "=" * 64,
+        "PREDICTIX KNOWLEDGE BASE - RETRIEVED MAINTENANCE STANDARDS",
+        "Cite passages by their [ID]. Follow each passage's 'Applies' note: foreign",
+        "rules are reference practice, never Sri Lankan law.",
+        "=" * 64,
+    ]
+    for chunk in chunks:
+        if chunk.get("corpus") == "registry":
+            lines.append(f"\n[{chunk['citation']}] {chunk['title']} ({chunk['publisher']}, {chunk['jurisdiction']})")
+            lines.append(f"Applies: {chunk['applicability']}")
+        else:
+            tags = chunk.get("tags") or []
+            lines.append(f"\n[Legacy KB: {tags[1] if len(tags) > 1 else chunk['id']}]")
+        lines.append(chunk["text"])
+    return lines
+
+
+def run_warehouse_agent(db: Session, warehouse_id: str | None = None, viewer=None) -> dict:
     """
     KB-Enhanced Warehouse Report Agent:
     1. Queries ALL PostgreSQL tables → builds context (build_warehouse_context)
@@ -1064,20 +1084,13 @@ def run_warehouse_agent(db: Session, warehouse_id: str | None = None) -> dict:
     shap_names = [s[0] for s in top_shap]
     query_str = "warehouse maintenance safety standards " + " ".join(shap_names)
     
-    # Retrieve top 12 most relevant chunks from the pgvector database
-    relevant_chunks = kb_store.retrieve(query_str, top_k=12)
-    
-    lines = [
-        "=" * 64,
-        "PREDICTIX KNOWLEDGE BASE - RETRIEVED MAINTENANCE STANDARDS",
-        "=" * 64,
-    ]
-    for chunk in relevant_chunks:
-        source = chunk['tags'][1] if chunk.get('tags') and len(chunk['tags']) > 1 else chunk['id']
-        lines.append(f"\n[Source: {source}]")
-        lines.append(chunk['text'])
-        
-    kb_full_context = "\n".join(lines)
+    # Top passages the caller may see: registered sources are filtered by the
+    # caller's role and this warehouse (no viewer, no registered passages).
+    from app.kb.retrieval import KBScope
+
+    scope = KBScope.for_viewer(viewer, warehouse_id)
+    relevant_chunks = kb_store.retrieve(query_str, top_k=12, scope=scope)
+    kb_full_context = "\n".join(_kb_context_lines(relevant_chunks))
 
     # ── Step 3: KB Annotations (deterministic — no LLM) ───────
     shap_enriched     = annotate_shap_features(ctx.get("top_shap_features", []))
@@ -1108,18 +1121,44 @@ def run_warehouse_agent(db: Session, warehouse_id: str | None = None) -> dict:
     # ── Step 4: LLM call with KB-grounded prompt ───────────────
     llm = _get_llm(temperature=0.25)
 
+    # Ticket titles and descriptions inside the live data are typed by users, so
+    # both blocks go to the model as fenced data behind the shared security
+    # rules. The limit is far above any real report, so nothing is cut.
+    from app.ai.agent.guardrails import PROMPT_GUARD, fence_untrusted
+
     combined_prompt = (
-        f"LIVE DATABASE DATA:\n{context_text}\n\n"
-        f"KNOWLEDGE BASE CONTEXT (ISO 55000 / SMRP Standards):\n{kb_full_context}"
+        "LIVE DATABASE DATA:\n"
+        f"{fence_untrusted('live_database_data', context_text, limit=500_000)}\n\n"
+        "KNOWLEDGE BASE CONTEXT (ISO 55000 / SMRP Standards):\n"
+        f"{fence_untrusted('knowledge_base_context', kb_full_context, limit=500_000)}"
     )
 
     messages = [
+        SystemMessage(content=PROMPT_GUARD),
         SystemMessage(content=WAREHOUSE_SYSTEM_PROMPT),
         HumanMessage(content=f"Generate the full KB-Enhanced warehouse report:\n\n{combined_prompt}"),
     ]
 
-    response = llm.invoke(messages)
+    import time as _time
+    from app.ai.agent.tracing import record
+
+    record(
+        "report_context",
+        warehouse_id=warehouse_id,
+        context_chars=len(context_text),
+        kb_chunks=len(relevant_chunks),
+        kb_sources=[c.get("id") for c in relevant_chunks],
+    )
+    started = _time.monotonic()
+    try:
+        response = llm.invoke(messages)
+    except Exception as exc:
+        record("llm_call", purpose="warehouse report", model=getattr(llm, "model_name", None), ok=False,
+               latency_ms=int((_time.monotonic() - started) * 1000), error=f"{type(exc).__name__}: {exc}")
+        raise
     content = response.content.strip()
+    record("llm_call", purpose="warehouse report", model=getattr(llm, "model_name", None), ok=True,
+           latency_ms=int((_time.monotonic() - started) * 1000), reply_preview=content[:300])
 
     # Strip code fences if model added them
     if content.startswith("```"):

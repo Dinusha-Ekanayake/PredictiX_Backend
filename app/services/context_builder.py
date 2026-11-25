@@ -6,12 +6,15 @@ using the Supabase Python REST client (no direct DB connection required).
 RLS-blocked tables are handled gracefully and return None / empty list.
 """
 
+import logging
 from uuid import UUID
 from datetime import datetime
 from fastapi import HTTPException
 from supabase import create_client, Client
 import os
 from dotenv import load_dotenv
+
+log = logging.getLogger(__name__)
 
 load_dotenv(override=True)
 
@@ -51,9 +54,11 @@ def _datetime(val) -> str:
 
 def _get_supabase() -> Client:
     url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
+    from app.db.supabase_client import supabase_key
+
+    key = supabase_key()
     if not url or not key:
-        raise RuntimeError("SUPABASE_URL or SUPABASE_KEY not set in .env")
+        raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set.")
     return create_client(url, key)
 
 
@@ -75,7 +80,7 @@ class AssetContextBuilder:
             result = query.limit(1).execute()
             return result.data[0] if result.data else None
         except Exception as e:
-            print(f"[context_builder] WARNING: Could not fetch from '{table}': {e}")
+            log.warning(f"[context_builder] WARNING: Could not fetch from '{table}': {e}")
             return None
 
     def _fetch_many(self, table: str, filters: dict, order_col: str = None,
@@ -89,7 +94,7 @@ class AssetContextBuilder:
             result = query.execute()
             return result.data or []
         except Exception as e:
-            print(f"[context_builder] WARNING: Could not fetch from '{table}': {e}")
+            log.warning(f"[context_builder] WARNING: Could not fetch from '{table}': {e}")
             return []
 
     def build_context(self, asset_id: UUID) -> dict:
@@ -179,6 +184,8 @@ class AssetContextBuilder:
         return {
             "generated_date": datetime.now().strftime("%B %d, %Y"),
             "report_id":      asset_id_str[:8].upper(),
+            # Raw id, not for display: the reports row needs it (reports_target_check).
+            "warehouse_id":   asset.get("warehouse_id"),
 
             # ── Asset core info ──────────────────────────
             "asset": {

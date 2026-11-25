@@ -28,7 +28,8 @@ from .tools import (
     handle_prediction_info,
 )
 from .actions.insert_actions import handle_action
-from app.ai.services.llm_service import call_groq
+from app.ai.agent.guardrails import guarded_call_groq as call_groq
+from app.ai.agent.tracing import current_trace, record, set_intent
 
 log = logging.getLogger("predictix.agent")
 
@@ -53,7 +54,9 @@ ROUTER_SYSTEM = (
     "3. NAVIGATION: 'take me to settings', 'go to dashboard', 'open tickets'\n"
     "4. FAQ: 'how to reset password', 'how to add an asset', general help questions\n"
     "5. PREDICTION: 'how to use failure prediction', 'cost estimation', 'run prediction'\n"
-    "6. KNOWLEDGE: 'how does the HVAC system work', 'what is predictive maintenance', definition questions\n"
+    "6. KNOWLEDGE: maintenance, safety and standards questions, e.g. 'how often should brakes be inspected', "
+    "'what do wear metals in engine oil mean', 'how should forklift batteries be charged', "
+    "'what is predictive maintenance', 'is this a recurring issue at our warehouse'\n"
     "7. DATABASE: ANY question about actual data, tickets, users, assets, or status counts (e.g. 'how many tickets', 'show my assets')\n"
     "8. ACTION: ANY command to create, insert, or add data (e.g. 'create a ticket', 'add a new user', 'insert an asset'). Do NOT include updates or deletes.\n\n"
     "Rules:\n"
@@ -93,7 +96,7 @@ def _classify_intent(question: str) -> str:
     if any(dt in q for dt in DATA_TRIGGERS) or re.search(r"\b(tkt-\d+|t-\d+|#\d+)\b", q):
         return INTENT_DATABASE
 
-    # Fast-path: navigation phrases, "open X", "go to X", "take me to X", "navigate to X"
+    # Fast-path: navigation phrases — "open X", "go to X", "take me to X", "navigate to X"
     NAV_TRIGGERS = (
         "open ", "go to ", "take me to ", "navigate to ",
         "bring me to ", "launch ", "redirect to ", "i want to go to ",
@@ -233,10 +236,17 @@ def run_agent(
         question = _rewrite_query_with_history(question, history)
         if question != original_q:
             log.info("Rewrote query: '%s' -> '%s'", original_q, question)
+            record("rewrite", original=original_q, rewritten=question)
 
     tool_trace: list[dict] = []
     intent = _classify_intent(question)
     log.info("Intent classified as: %s for question: %s", intent, question[:80])
+    set_intent(intent)
+    trace = current_trace()
+    decided_by = "llm" if trace and any(
+        st.get("kind") == "llm_call" and "PredictiX Router" in str(st.get("purpose")) for st in trace.steps
+    ) else "keyword rules"
+    record("intent", intent=intent, decided_by=decided_by)
 
     try:
         if intent == INTENT_GREETING:
@@ -253,11 +263,11 @@ def run_agent(
 
         elif intent == INTENT_FAQ:
             result = handle_faq(question, ctx)
-            tool_trace.append({"name": "handle_faq", "args": {"question": question}, "result_preview": f"Fetched FAQs from Supabase."})
+            tool_trace.append({"name": "handle_faq", "args": {"question": question}, "result_preview": "Searched FAQs and the knowledge base."})
 
         elif intent == INTENT_KNOWLEDGE:
             result = handle_knowledge(question, ctx)
-            tool_trace.append({"name": "handle_knowledge", "args": {"question": question}, "result_preview": "Knowledge base searched."})
+            tool_trace.append({"name": "handle_knowledge", "args": {"question": question}, "result_preview": "Help content and the maintenance knowledge base searched."})
 
         elif intent == INTENT_PREDICTION:
             result = handle_prediction_info(question, ctx)
@@ -273,14 +283,22 @@ def run_agent(
 
     except Exception as e:
         log.exception("Handler crashed for intent %s", intent)
+        record("error", where=f"handler for {intent}", error=f"{type(e).__name__}: {e}")
         result = {
             "answer": "⚠️ Oops! I ran into an unexpected issue while processing your request. Please try again in a moment.",
             "action_buttons": [],
         }
+
+    for step in tool_trace:
+        record("handler", name=step.get("name"), note=step.get("result_preview"))
 
     return {
         "answer": result.get("answer", "I'm sorry, I couldn't generate a response."),
         "action_buttons": result.get("action_buttons", []),
         "tool_trace": tool_trace,
         "iterations": 1,
+        # The record card (RECORD_SUMMARY) the database handler builds for a
+        # single-row result; the chat widget renders it under the answer.
+        "widget_type": result.get("widget_type"),
+        "widget_data": result.get("widget_data"),
     }

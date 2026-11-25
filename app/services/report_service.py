@@ -7,13 +7,12 @@ Full pipeline:
 Used by app/routers/asset_reports.py.
 """
 
+import logging
 import uuid
 import os
 from uuid import UUID
 from datetime import datetime, timezone
 
-from fastapi import HTTPException
-from supabase import create_client, Client
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
@@ -23,18 +22,36 @@ from app.services.ai_insights import AIInsightService
 from app.services.pdf_render import PDFRenderService
 from app.core.storage import supabase_storage
 
-
-def _get_supabase() -> Client:
-    return create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
+log = logging.getLogger(__name__)
 
 
 class ReportService:
     def __init__(self, db=None):
-        # db param kept for backwards compatibility — not used
-        self.supabase        = _get_supabase()
+        # The report row is written through the API's own database session.
+        # Supabase REST cannot write it: the reports table grants nothing to
+        # the REST roles, so those inserts were always rejected.
+        self.db              = db
         self.context_builder = AssetContextBuilder(db)
         self.ai_insight      = AIInsightService()
         self.pdf_render      = PDFRenderService()
+
+    def _record(self, row: dict) -> None:
+        """Insert the reports row, in the caller's session or a short-lived one."""
+        from app.models import Report
+
+        if self.db is not None:
+            try:
+                self.db.add(Report(**row))
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
+            return
+        from app.db.session import SessionLocal
+
+        with SessionLocal() as db:
+            db.add(Report(**row))
+            db.commit()
 
     def generate_asset_report(self, asset_id: UUID, user_id: UUID = None) -> str:
         """
@@ -78,15 +95,19 @@ class ReportService:
                 destination_path=file_name,
             )
 
-            # ── 5. Record in reports table via Supabase REST ──
+            # ── 5. Record in the reports table ─────────────
             asset_name = context["asset"].get("asset_name", "Asset")
+            warehouse_id = context.get("warehouse_id")
             report_row = {
-                "id":                       str(report_id),
+                "id":                       report_id,
                 "report_type":              "asset_report",
                 "status":                   "generated",
-                "asset_id":                 str(asset_id),
+                "asset_id":                 UUID(str(asset_id)),
+                # Set explicitly; the sync_report_warehouse trigger would also
+                # derive it from the asset (reports_target_check requires it).
+                "warehouse_id":             UUID(str(warehouse_id)) if warehouse_id else None,
                 "title":                    f"Asset Performance Report — {asset_name}",
-                "generated_by":             str(user_id) if user_id else None,
+                "generated_by":             UUID(str(user_id)) if user_id else None,
                 "file_path":                public_url,
                 "report_json":              {
                     "metrics":  context["metrics"],
@@ -95,14 +116,15 @@ class ReportService:
                         if k in ("executive_summary", "recommendations", "conclusion")
                     },
                 },
-                "generation_completed_at":  datetime.now(timezone.utc).isoformat(),
+                "generation_completed_at":  datetime.now(timezone.utc),
             }
 
             try:
-                self.supabase.table("reports").insert(report_row).execute()
+                self._record(report_row)
             except Exception as db_err:
-                # Log but don't fail — PDF was generated and uploaded successfully
-                print(f"[report_service] WARNING: Could not save report row to DB: {db_err}")
+                # The caller still gets the PDF, which was generated and uploaded;
+                # the missing history row is an error for operators to see.
+                log.error("Report %s was not recorded in the reports table: %s", report_id, db_err)
 
             return public_url, pdf_path
 
