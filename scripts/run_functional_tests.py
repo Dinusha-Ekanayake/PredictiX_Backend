@@ -126,7 +126,7 @@ FIXTURE_TAG = "ZZFUNCTEST"
 
 SWEEP = [
     ("tickets", "title LIKE '%ZZFUNCTEST%'"),
-    ("notifications", "title LIKE 'Functional test%'"),
+    ("notifications", "title LIKE 'Functional test%' OR message LIKE '%ZZFUNCTEST%'"),
     ("assets", "asset_code LIKE 'ZZFUNCTEST%'"),
     ("profiles", "email LIKE 'zzfunctest%'"),
 ]

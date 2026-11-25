@@ -142,6 +142,7 @@ def _notify_ticket_assignment(db: Session, ticket: Ticket) -> None:
             priority=ticket.priority or "medium",
             notification_type="ticket_updated",
             link_url=f"/admin/tickets?ticket_id={ticket.id}",
+            related_ticket_id=str(ticket.id),
         )
     except Exception:
         log.exception("Failed to send ticket assignment notification for %s", ticket.id)
@@ -376,12 +377,18 @@ def _serialize_user_ticket(t: Ticket, asset_name: str | None) -> dict:
 
 
 def _purge_ticket(db: Session, ticket_id: str) -> None:
-    """Delete a ticket's child rows + null soft refs, then the ticket."""
+    """Delete a ticket, its child rows and its notifications; null other soft refs.
+
+    Notifications about a ticket ("Ticket assigned to you", status changes)
+    exist only to send someone to that ticket. Kept after deletion they become
+    dead links in people's inboxes, so they go with it; the people involved
+    are told about the deletion by notify_on_ticket_delete instead.
+    """
     db.query(TicketComment).filter(TicketComment.ticket_id == ticket_id).delete(synchronize_session=False)
     db.query(TicketAttachment).filter(TicketAttachment.ticket_id == ticket_id).delete(synchronize_session=False)
     db.query(TicketStatusHistory).filter(TicketStatusHistory.ticket_id == ticket_id).delete(synchronize_session=False)
     db.query(TicketPrediction).filter(TicketPrediction.ticket_id == ticket_id).delete(synchronize_session=False)
-    db.query(Notification).filter(Notification.related_ticket_id == ticket_id).update({Notification.related_ticket_id: None}, synchronize_session=False)
+    db.query(Notification).filter(Notification.related_ticket_id == ticket_id).delete(synchronize_session=False)
     db.query(PredictionRun).filter(PredictionRun.ticket_id == ticket_id).update({PredictionRun.ticket_id: None}, synchronize_session=False)
     db.query(Report).filter(Report.ticket_id == ticket_id).update({Report.ticket_id: None}, synchronize_session=False)
     db.query(Ticket).filter(Ticket.id == ticket_id).delete(synchronize_session=False)
@@ -539,7 +546,8 @@ def delete_my_ticket(
         db.commit()
     except IntegrityError as exc:
         db.rollback()
-        raise HTTPException(status_code=409, detail=f"Cannot delete ticket: {getattr(exc, 'orig', exc)}")
+        log.warning("ticket %s delete blocked by a constraint", ticket_id, exc_info=True)
+        raise HTTPException(status_code=409, detail="This ticket is still referenced elsewhere and cannot be deleted.") from exc
         
     background_tasks.add_task(
         NotificationService.notify_on_ticket_delete,
@@ -675,10 +683,8 @@ def delete_ticket(
 ):
     """Delete a ticket and clean up its dependent rows in one transaction.
 
-    Child rows (comments, attachments, status history, predictions) are
-    deleted; soft references (notifications, prediction_runs, reports) are
-    NULLed out. Then the ticket itself is removed. FK violations roll back
-    and return 409.
+    See _purge_ticket for what is removed. FK violations roll back and
+    return 409.
     """
     obj = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not obj:
@@ -703,38 +709,12 @@ def delete_ticket(
     deleter_name = getattr(current_user, "full_name", "Admin")
 
     try:
-        # Delete owned child rows.
-        db.query(TicketComment).filter(TicketComment.ticket_id == ticket_id).delete(
-            synchronize_session=False
-        )
-        db.query(TicketAttachment).filter(
-            TicketAttachment.ticket_id == ticket_id
-        ).delete(synchronize_session=False)
-        db.query(TicketStatusHistory).filter(
-            TicketStatusHistory.ticket_id == ticket_id
-        ).delete(synchronize_session=False)
-        db.query(TicketPrediction).filter(
-            TicketPrediction.ticket_id == ticket_id
-        ).delete(synchronize_session=False)
-
-        # NULL out soft references.
-        db.query(Notification).filter(
-            Notification.related_ticket_id == ticket_id
-        ).update({Notification.related_ticket_id: None}, synchronize_session=False)
-        db.query(PredictionRun).filter(PredictionRun.ticket_id == ticket_id).update(
-            {PredictionRun.ticket_id: None}, synchronize_session=False
-        )
-        db.query(Report).filter(Report.ticket_id == ticket_id).update(
-            {Report.ticket_id: None}, synchronize_session=False
-        )
-
-        db.delete(obj)
+        _purge_ticket(db, ticket_id)
         db.commit()
     except IntegrityError as exc:
         db.rollback()
-        orig = getattr(exc, "orig", None)
-        detail = str(orig) if orig else str(exc)
-        raise HTTPException(status_code=409, detail=f"Cannot delete ticket: {detail}")
+        log.warning("ticket %s delete blocked by a constraint", ticket_id, exc_info=True)
+        raise HTTPException(status_code=409, detail="This ticket is still referenced elsewhere and cannot be deleted.") from exc
 
     background_tasks.add_task(
         NotificationService.notify_on_ticket_delete,

@@ -150,8 +150,12 @@ def test_ns_04_notifications_are_own_only(client, auth, db):
         assert leaked == 0, (
             f"{leaked} notifications belonging to other users were returned")
     finally:
+        # Only the owner may delete a notification, so cleanup must run as the
+        # user it was raised for. Deleting as the admin got a 404 that went
+        # unnoticed and left one probe behind in production per run.
         if seeded_id:
-            client.delete(f"/notifications/{seeded_id}", headers=auth("admin"))
+            gone = client.delete(f"/notifications/{seeded_id}", headers=auth("user"))
+            assert gone.status_code == 200, f"cleanup: probe not deleted ({gone.status_code})"
 
 
 @case("NS-05", "Open profile page", "Current profile information is displayed")

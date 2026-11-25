@@ -20,6 +20,7 @@ class InAppNotificationService:
         notification_type: str,
         link_url: str = None,
         meta: dict = None,
+        related_ticket_id: str | None = None,
     ) -> list:
         """Create a notification for every id in user_ids with ONE preference
         query, ONE bulk insert, and ONE commit, rather than a per-user loop
@@ -97,6 +98,9 @@ class InAppNotificationService:
                             message=message,
                             type=notification_type,
                             meta=meta_data,
+                            # A real FK, so deleting the ticket can find and
+                            # remove its notifications (see tickets._purge_ticket).
+                            related_ticket_id=related_ticket_id,
                         )
                     )
 
@@ -188,10 +192,12 @@ class InAppNotificationService:
         notification_type: str,
         link_url: str = None,
         meta: dict = None,
+        related_ticket_id: str | None = None,
     ):
         """Single-recipient convenience wrapper around the bulk path."""
         created = InAppNotificationService._create_notifications_bulk(
-            db, [user_id], title, message, priority, notification_type, link_url, meta
+            db, [user_id], title, message, priority, notification_type, link_url, meta,
+            related_ticket_id=related_ticket_id,
         )
         return created[0] if created else None
 
@@ -204,10 +210,12 @@ class InAppNotificationService:
         priority: str = "medium",
         notification_type: str = "system",
         link_url: str = None,
-        meta: dict = None
+        meta: dict = None,
+        related_ticket_id: str | None = None,
     ):
         return InAppNotificationService._create_notification(
-            db, user_id, title, message, priority, notification_type, link_url, meta
+            db, user_id, title, message, priority, notification_type, link_url, meta,
+            related_ticket_id=related_ticket_id,
         )
 
     @staticmethod
