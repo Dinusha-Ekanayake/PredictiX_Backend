@@ -614,7 +614,8 @@ HF_TICKET_CATEGORIZATION_REPO=Dinusha-Ekanayake/predictix-ticket_categorization_
 HF_TICKET_SUMMARIZATION_REPO=Dinusha-Ekanayake/predictix-ticket_summarization_model
 HF_TICKET_PRIORITIZATION_REPO=AroshN/priority_classif_xgb
 HF_ASSET_SUMMARIZATION_REPO=Dinusha-Ekanayake/predictix-asset_summarization_model
-ENABLE_HF_WARMER=false
+# Wake the three Spaces every N hours (0 disables); they sleep after 48 h idle.
+HF_SPACE_KEEPALIVE_HOURS=6
 
 # Asset and ticket summary Spaces, reached with gradio_client.
 ASSET_SUMMARY_SPACE=SharadaAbeywickrama/Asset_summery_generation
@@ -888,10 +889,10 @@ SERVICE_REMINDER_HOUR=9
 SERVICE_REMINDER_TZ=Asia/Colombo
 SERVICE_REMINDER_OFFSETS=14,7,3,1
 SERVICE_REMINDER_RUN_ON_STARTUP=false
-ENABLE_HF_WARMER=false
+HF_SPACE_KEEPALIVE_HOURS=6
 ```
 
-For Supabase free-tier protection, keep `BATCH_INTERVAL_HOURS=24`, keep startup batch runs disabled unless you intentionally need an immediate rebuild, and keep `ENABLE_HF_WARMER=false` unless the Space cold-start cost is more important than the extra traffic.
+For Supabase free-tier protection, keep `BATCH_INTERVAL_HOURS=24`, keep startup batch runs disabled unless you intentionally need an immediate rebuild, The Hugging Face Spaces (categorisation and summaries) are woken every `HF_SPACE_KEEPALIVE_HOURS` (default 6; they sleep after 48 hours idle). The `HF Spaces keep-alive` GitHub workflow does the same every 12 hours, so they stay awake while the API is down. To wake them by hand: `python -m app.ai.services.hf_spaces`.
 
 ---
 
