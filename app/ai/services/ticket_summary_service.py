@@ -29,6 +29,13 @@ _GARBLE_PATTERNS = [
     re.compile(r"(?:\b\d[\d.]*\b[\s:,()]+){6,}"),   # 6+ bare numbers (quantization garble)
 ]
 
+# The model sometimes emits change markers such as "(Δ+1)" from its training data.
+_ARTIFACTS = re.compile(r"\s*\(\s*Δ\s*[+-]?\d+\s*\)")
+
+#: Below this many characters a description is already as short as a summary,
+#: so the "shorter than the source" rule is not applied.
+MIN_DESCRIPTION_TO_SHORTEN = 80
+
 
 def _postprocess(text: str) -> str:
     """Clean raw model output: unglue sentences and trim trailing rambling.
@@ -38,6 +45,7 @@ def _postprocess(text: str) -> str:
     which always begin lowercase or with a mid-word "word:word" glue. We keep
     the leading well-formed sentences and drop the rest.
     """
+    text = _ARTIFACTS.sub("", text)
     text = re.sub(r"(\.)([A-Za-z])", r"\1 \2", text.strip())   # unglue "DC.day"
     text = re.sub(r"\s{2,}", " ", text).strip()
 
@@ -64,11 +72,42 @@ def _parse_input_fields(input_text: str) -> dict[str, str]:
     return fields
 
 
-def _is_clean_summary(text: str) -> bool:
-    """True only if the generated summary is coherent enough to publish."""
+def _shorter_than(text: str, description: str) -> bool:
+    """A summary must be shorter than what it summarises (long descriptions only)."""
+    return len(description) < MIN_DESCRIPTION_TO_SHORTEN or len(text) < len(description)
+
+
+def _is_clean_summary(text: str, description: str = "") -> bool:
+    """True only if the generated summary is coherent enough to publish
+    and actually shorter than the description."""
     if not text or len(text.strip()) < 15:
         return False
-    return not any(p.search(text) for p in _GARBLE_PATTERNS)
+    if any(p.search(text) for p in _GARBLE_PATTERNS):
+        return False
+    return _shorter_than(text, description)
+
+
+MAX_DETAIL_CHARS = 160
+MIN_DETAIL_CHARS = 40   # shorter than this, a trimmed detail says too little to keep
+
+
+def _detail_budget(desc: str, sentences: list[str]) -> int:
+    """Characters left for the description detail in the fallback summary."""
+    if len(desc) < MIN_DESCRIPTION_TO_SHORTEN:
+        return MAX_DETAIL_CHARS
+    used = len(" ".join(sentences)) + 1          # +1 for the joining space
+    return min(MAX_DETAIL_CHARS, len(desc) - used - 1)
+
+
+def _fit_detail(desc: str, *, budget: int) -> str:
+    """The description, capitalised and cut at a word boundary to fit `budget`."""
+    text = desc[0].upper() + desc[1:]
+    if len(text) <= budget:
+        return text if text.endswith((".", "…", "!", "?")) else (text + "." if len(text) < budget else "")
+    if budget < MIN_DETAIL_CHARS:
+        return ""
+    cut = text[: budget - 1].rsplit(" ", 1)[0].rstrip(" ,;:")
+    return cut + "…" if len(cut) >= MIN_DETAIL_CHARS else ""
 
 
 def _fallback_summary(fields: dict[str, str]) -> str:
@@ -94,20 +133,21 @@ def _fallback_summary(fields: dict[str, str]) -> str:
         tail.append(f"on asset {asset}")
     sentences = [f"{subject} is " + " ".join(tail) + "." if tail else subject + "."]
 
-    # 2) Detail from the description (trimmed, grounded)
-    if desc and desc.lower() not in subject.lower():
-        d = desc if len(desc) <= 160 else desc[:157].rstrip() + "…"
-        if not d.endswith((".", "…", "!", "?")):
-            d += "."
-        sentences.append(d[0].upper() + d[1:])
-
-    # 3) Priority + recommendation
+    # 2) Priority + recommendation
     if priority in ("high", "critical"):
         sentences.append(f"It is assessed as {priority} priority and needs prompt attention.")
     elif priority == "low":
         sentences.append(f"It is assessed as {priority} priority and can be scheduled routinely.")
     elif priority:
         sentences.append(f"It is assessed as {priority} priority.")
+
+    # 3) Detail from the description, placed after the first sentence and
+    #    trimmed at a word boundary so the whole summary stays shorter than
+    #    the description it summarises.
+    if desc and desc.lower() not in subject.lower():
+        detail = _fit_detail(desc, budget=_detail_budget(desc, sentences))
+        if detail:
+            sentences.insert(1, detail)
 
     return " ".join(sentences)
 
@@ -183,7 +223,7 @@ def generate_ticket_summary(input_text: str) -> str:
     space_out = _summarize_via_space(os.getenv("TICKET_SUMMARY_SPACE"), input_text)
     if space_out:
         cleaned = _postprocess(space_out)
-        if _is_clean_summary(cleaned):
+        if _is_clean_summary(cleaned, fields.get("description", "")):
             return cleaned
 
     return _fallback_summary(fields)
