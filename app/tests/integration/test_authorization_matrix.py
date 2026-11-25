@@ -27,6 +27,7 @@ CASES = [
     ("admin user list", "admin", "GET", "/users/", None, 200),
     ("admin own user's assets", "admin", "GET", "/users/{user_same}/assets", None, 200),
     ("user own warehouse ticket", "user", "GET", "/tickets/{ticket_same}", None, 200),
+    ("admin own ticket details", "admin", "GET", "/tickets/{ticket_same}/details", None, 200),
     # Other warehouse is invisible
     ("admin other asset", "admin", "GET", "/assets/{asset_other}", None, 404),
     ("admin other ticket", "admin", "GET", "/tickets/{ticket_other}", None, 404),
@@ -39,6 +40,11 @@ CASES = [
     ("admin other cost prediction", "admin", "GET", "/predictions/cost/{asset_other}", None, 404),
     ("user other user's assets", "user", "GET", "/users/{user_other}/assets", None, 404),
     ("user other warehouse ticket", "user", "GET", "/tickets/{ticket_other}", None, 404),
+    ("admin other ticket details", "admin", "GET", "/tickets/{ticket_other}/details", None, 404),
+    ("user other ticket details", "user", "GET", "/tickets/{ticket_other}/details", None, 404),
+    # Attachments only arrive as uploads the API validates, never as bare URLs
+    ("attachment by URL is gone", "admin", "POST", "/ticket-attachments/",
+     {"ticket_id": "{ticket_same}", "file_path": "https://evil.example/x.png"}, 405),
     # Privilege escalation is refused before any write
     ("admin grants super_admin", "admin", "PUT", "/users/{user_same}", {"role": "super_admin"}, 403),
     ("admin edits other warehouse user", "admin", "PUT", "/users/{user_other}", {"role": "admin"}, 404),
@@ -92,6 +98,25 @@ def test_image_upload_rejects_disguised_svg(api, world, bearer):
     resp = api.post(f"/assets/{world['asset_same']}/image",
                     files={"file": ("x.png", io.BytesIO(svg), "image/png")}, headers=bearer("admin"))
     assert resp.status_code == 415
+
+
+PNG_1PX = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+    "0000000d49444154789c6360000002000154a24f5b0000000049454e44ae426082"
+)
+
+
+def test_attachment_upload_rejects_disguised_svg(api, world, bearer):
+    svg = b"<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>"
+    resp = api.post("/ticket-attachments/upload", data={"ticket_id": world["ticket_same"]},
+                    files={"file": ("x.png", io.BytesIO(svg), "image/png")}, headers=bearer("admin"))
+    assert resp.status_code == 415
+
+
+def test_attachment_upload_to_another_warehouse_is_refused(api, world, bearer):
+    resp = api.post("/ticket-attachments/upload", data={"ticket_id": world["ticket_other"]},
+                    files={"file": ("x.png", io.BytesIO(PNG_1PX), "image/png")}, headers=bearer("admin"))
+    assert resp.status_code == 404
 
 
 def test_login_is_rate_limited(api):

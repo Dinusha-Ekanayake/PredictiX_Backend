@@ -1,0 +1,40 @@
+name: HF Spaces keep-alive
+
+# The categorisation and summary models run on free Hugging Face Spaces,
+# which sleep after 48 hours without traffic. The API wakes them every few
+# hours, but only while it is running; this keeps them awake regardless, and
+# fails loudly if a Space no longer starts.
+on:
+  schedule:
+    - cron: "41 */12 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wake:
+    name: Wake every Space
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: ci
+    env:
+      HF_AI_SPACE_URL: ${{ secrets.HF_AI_SPACE_URL }}
+      # Space ids are not secret, so they are environment variables.
+      TICKET_SUMMARY_SPACE: ${{ vars.TICKET_SUMMARY_SPACE }}
+      ASSET_SUMMARY_SPACE: ${{ vars.ASSET_SUMMARY_SPACE }}
+      HF_TOKEN_space: ${{ secrets.HF_TOKEN_space }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        # Only what the wake script needs; it imports nothing else from the app.
+        run: pip install "requests==2.33.0" "python-dotenv==1.2.4"
+
+      - name: Wake and wait until every Space is ready
+        run: python -m app.ai.services.hf_spaces --wait 600

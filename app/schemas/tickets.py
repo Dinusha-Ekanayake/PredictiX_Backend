@@ -140,3 +140,24 @@ class TicketPriorityRequest(BaseModel):
 
 class TicketPriorityResponse(BaseModel):
     priority: str
+
+
+# ── Staff ticket view: names and history ──────────────────────────────────────
+
+class TicketHistoryEntryOut(BaseModel):
+    id: UUID
+    old_status: Optional[str] = None
+    new_status: str
+    changed_by: Optional[UUID] = None
+    changed_by_name: Optional[str] = None
+    note: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+
+class TicketDetailsOut(BaseModel):
+    creator_name: Optional[str] = None
+    creator_email: Optional[str] = None   # admins only
+    assignee_name: Optional[str] = None
+    warehouse_name: Optional[str] = None
+    department_name: Optional[str] = None
+    history: list[TicketHistoryEntryOut] = []

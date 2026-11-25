@@ -6,7 +6,6 @@ Reads credentials directly from environment variables.
 
 import logging
 import os
-import uuid
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
@@ -18,7 +17,9 @@ load_dotenv(override=True)
 class SupabaseStorage:
     def __init__(self):
         self.url    = os.getenv("SUPABASE_URL")
-        self.key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
+        from app.db.supabase_client import supabase_key
+
+        self.key = supabase_key()
         self.client: Client | None = None
 
         if self.url and self.key:
@@ -42,8 +43,8 @@ class SupabaseStorage:
 
     def upload_file(self, bucket: str, file_path: str, destination_path: str) -> str:
         if not self.client:
-            log.info(f"Mocking upload to {bucket}/{destination_path} (Client not initialized)")
-            return f"https://mock.supabase.co/storage/v1/object/public/{bucket}/{destination_path}"
+            # Never pretend: a made-up URL here was recorded as if the file existed.
+            raise RuntimeError("File storage is not configured (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY).")
 
         self._ensure_bucket_exists(bucket)
 
@@ -64,15 +65,3 @@ class SupabaseStorage:
 
 supabase_storage = SupabaseStorage()
 
-
-def is_project_storage_url(url: str) -> bool:
-    """True if `url` is a public object in this project's Supabase Storage.
-
-    Ticket attachments are uploaded by the browser and only their URL is sent
-    here, so the URL is checked before it is stored and later rendered.
-    Without SUPABASE_URL there is no project storage, so nothing is accepted.
-    """
-    base = (os.getenv("SUPABASE_URL") or "").rstrip("/")
-    if not base:
-        return False
-    return isinstance(url, str) and url.startswith(f"{base}/storage/v1/object/public/") and ".." not in url

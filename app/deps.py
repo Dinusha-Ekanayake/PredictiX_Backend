@@ -269,8 +269,8 @@ _EMAIL_RE = __import__("re").compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$")
 def validate_account_fields(db, target, *, role=None, status=None, email=None) -> None:
     """Reject an invalid role or status, or an email another account already uses.
 
-    Email addresses identify accounts at login and in Google sign-in, so two
-    profiles must never share one.
+    Email addresses identify accounts at login, so two profiles must never
+    share one.
     """
     from app.models import Profile
 

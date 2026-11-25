@@ -79,16 +79,13 @@ class TicketCommentOut(TicketCommentCreate):
         from_attributes = True
 
 
-class TicketAttachmentCreate(BaseModel):
+class TicketAttachmentOut(BaseModel):
+    id: UUID
     ticket_id: UUID
     file_path: str
     mime_type: Optional[str] = None
     original_filename: Optional[str] = None
     uploaded_by: Optional[UUID] = None
-
-
-class TicketAttachmentOut(TicketAttachmentCreate):
-    id: UUID
     created_at: Optional[datetime] = None
 
     class Config:

@@ -59,6 +59,14 @@ def scheduler_enabled() -> bool:
 def require_runtime_settings() -> None:
     """Fail fast at server start when a required secret is missing."""
     jwt_secret()
+    if is_production():
+        from app.db.supabase_client import supabase_key
+
+        if not supabase_key():
+            raise RuntimeError(
+                "SUPABASE_SERVICE_ROLE_KEY is not configured. The server never uses the "
+                "public anon key; set the service-role key before starting the API."
+            )
 
 
 def jwt_secret() -> str:

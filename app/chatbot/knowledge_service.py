@@ -49,6 +49,8 @@ _RETIRED_HOST = "api-inference.huggingface.co"
 _model_lock = threading.Lock()
 _local_model = None
 _local_model_failed = False
+_onnx_model = None
+_onnx_model_failed = False
 
 
 def _embedding_url() -> str:
@@ -79,8 +81,26 @@ def _get_local_model():
                 log.info("Local embedding model %s loaded.", EMBEDDING_MODEL)
             except Exception as exc:  # not installed, or not in the local cache
                 _local_model_failed = True
-                log.warning("Local embedding model unavailable (%s); using the hosted endpoint.", exc)
+                log.info("sentence-transformers unavailable (%s); trying ONNX Runtime.", exc)
     return _local_model
+
+
+def _get_onnx_model():
+    """The ONNX Runtime embedder (same model, no torch), loaded once, or None."""
+    global _onnx_model, _onnx_model_failed
+    if _onnx_model is not None or _onnx_model_failed:
+        return _onnx_model
+    with _model_lock:
+        if _onnx_model is None and not _onnx_model_failed:
+            try:
+                from app.chatbot import onnx_embedder
+
+                _onnx_model = onnx_embedder.load()
+                log.info("ONNX embedding model %s loaded.", EMBEDDING_MODEL)
+            except Exception as exc:  # onnxruntime missing, or the model not cached
+                _onnx_model_failed = True
+                log.warning("ONNX embedding model unavailable (%s); using the hosted endpoint.", exc)
+    return _onnx_model
 
 
 def _embed_hosted(value: str) -> list[float]:
@@ -106,6 +126,9 @@ def embed_text(value: str) -> list[float]:
     model = _get_local_model()
     if model is not None:
         return [float(x) for x in model.encode(value, normalize_embeddings=True, show_progress_bar=False)]
+    onnx = _get_onnx_model()
+    if onnx is not None:
+        return onnx.encode(value)
     return _embed_hosted(value)
 
 

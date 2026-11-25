@@ -13,7 +13,9 @@ their names so the ``/asset-summaries`` router and shared callers don't change.
 import os
 import re
 import logging
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -47,13 +49,65 @@ _GARBLE_PATTERNS = [
     re.compile(r"requires\s+\w+\s+fuel", re.I),          # "requires diesel fuel"
     re.compile(r"priority of \w+\s+[\d.]+", re.I),       # "priority of critical 1.1"
     re.compile(r"requires a \w+ priority", re.I),        # "requires a maintenance priority of..."
-    re.compile(r"\b[A-Za-z][A-Za-z ]{1,25}:\s"),         # leaked "Label: value" fragments (model artifact)
 ]
+# Leaked "Label: value" fragments ("Maintenance priority: high") are a style
+# problem, not an integrity one: they restate real fields. They used to gate
+# publication too, which rejected nearly every model answer, so they no longer
+# do. Invented content and invented figures still do.
+
+MIN_SUMMARY_CHARS = 25
 
 
 def _numbers_in(text: str) -> set[str]:
-    """All numeric tokens in text, comma-stripped, for grounding checks."""
-    return {n.replace(",", "") for n in re.findall(r"\d[\d,]*\.?\d*", text or "")}
+    """All numeric tokens in text, comma-stripped, for grounding checks.
+
+    A sentence-ending period is not part of the number: "Health: 62." is 62.
+    """
+    return {n.replace(",", "").rstrip(".") for n in re.findall(r"\d[\d,]*\.?\d*", text or "")}
+
+
+def rejection_reason(text: str, input_text: str = "") -> str | None:
+    """Why a model summary must not be published, or None when it may be.
+
+    The integrity rule: every figure in the summary must appear in the asset
+    data it was generated from. A predictive-maintenance report that states
+    an invented number (a made-up bound, cost or date) misleads the people
+    acting on it, so such output falls back to the data-built summary.
+    """
+    if not text or len(text.strip()) < MIN_SUMMARY_CHARS:
+        return "too short"
+    for pattern in _GARBLE_PATTERNS:
+        if pattern.search(text):
+            return f"hallucinated content ({pattern.pattern})"
+    if input_text:
+        invented = sorted(_numbers_in(text) - _numbers_in(input_text))
+        if invented:
+            return f"figures not in the asset data: {', '.join(invented)}"
+        urgent = _urgent_signals(_parse_input_fields(input_text))
+        if urgent and _NO_MAINTENANCE.search(text):
+            return f"says no maintenance is needed, but {', '.join(urgent)}"
+    return None
+
+
+# "requires no maintenance", "needs no maintenance", "no maintenance is required"
+_NO_MAINTENANCE = re.compile(
+    r"\b(?:requires|needs)\s+no\s+maintenance\b|\bno\s+maintenance\s+(?:is\s+)?(?:required|needed)\b", re.I)
+_URGENT_VALUES = {
+    "maintenance priority": {"high", "critical", "urgent"},
+    "health": {"poor", "critical"},
+    "risk": {"high", "critical"},
+}
+
+
+def _urgent_signals(fields: dict[str, str]) -> list[str]:
+    """Fields saying the asset needs attention, e.g. ['maintenance priority is high']."""
+    signals = []
+    for key, urgent in _URGENT_VALUES.items():
+        value = fields.get(key, "").strip().lower()
+        first_word = value.split()[0] if value else ""
+        if first_word in urgent:
+            signals.append(f"{key} is {first_word}")
+    return signals
 
 
 def _parse_input_fields(input_text: str) -> dict[str, str]:
@@ -71,22 +125,9 @@ def _parse_input_fields(input_text: str) -> dict[str, str]:
 def _is_clean_summary(text: str, input_text: str = "") -> bool:
     """True only if the generated summary is coherent AND grounded in the data.
 
-    Rejects model output that (a) is too short, (b) matches a known garble/
-    hallucination pattern, or (c) contains a number absent from the source
-    fields — which guarantees any published model summary sticks to the
-    retrieved Supabase data. Anything rejected falls back to the deterministic
-    field-based summary.
+    See rejection_reason for the rules.
     """
-    if not text or len(text.strip()) < 25:
-        return False
-    if any(p.search(text) for p in _GARBLE_PATTERNS):
-        return False
-    if input_text:
-        source_numbers = _numbers_in(input_text)
-        for n in _numbers_in(text):
-            if n not in source_numbers:
-                return False  # invented/hallucinated number → not grounded
-    return True
+    return rejection_reason(text, input_text) is None
 
 
 def _join(items: list[str]) -> str:
@@ -237,17 +278,23 @@ def _summarize_via_space(space_id, input_text: str):
         return None
 
 
-def generate_asset_summary_with_source(input_text: str) -> tuple[str, str]:
-    """Summarise the formatted asset text and say which path produced it.
+@dataclass(frozen=True)
+class SummaryResult:
+    summary: str
+    source: str                     # "model" or "template"
+    fallback_reason: Optional[str]  # None, "unavailable", or "rejected: <rule>"
+
+
+def summarize_asset(input_text: str) -> SummaryResult:
+    """Summarise the formatted asset text, saying which path wrote it and why.
 
     Order: HF Space (online, ASSET_SUMMARY_SPACE) → deterministic fallback.
-    Whatever the Space returns is published; _is_clean_summary is no longer
-    applied here, so a summary can carry figures that are not in the input.
-
-    Returns (summary, source) where source is "model" when the Space answered
-    and "template" when the deterministic fallback was used. Callers need this:
-    the two are not interchangeable, and reporting a model version for
-    templated text says something untrue about where the sentence came from.
+    The Space's answer is published only when it states nothing the asset
+    data contradicts or lacks (rejection_reason). Otherwise the data-built
+    summary is used and the reason is reported and logged for the model owner:
+    "unavailable" when the Space did not answer, "rejected: ..." when its
+    answer broke an integrity rule. The two must not be confused: one is an
+    outage, the other the guard doing its job.
     """
     if not input_text or not input_text.strip():
         raise ValueError("input_text cannot be empty")
@@ -255,10 +302,19 @@ def generate_asset_summary_with_source(input_text: str) -> tuple[str, str]:
     fields = _parse_input_fields(input_text)
 
     space_out = _summarize_via_space(os.getenv("ASSET_SUMMARY_SPACE"), input_text)
-    if space_out:
-        return space_out, "model"
+    if not space_out:
+        return SummaryResult(_fallback_summary(fields), "template", "unavailable")
+    reason = rejection_reason(space_out, input_text)
+    if reason is None:
+        return SummaryResult(space_out, "model", None)
+    logger.warning("[AssetSummary] model output not published: %s", reason)
+    return SummaryResult(_fallback_summary(fields), "template", f"rejected: {reason}")
 
-    return _fallback_summary(fields), "template"
+
+def generate_asset_summary_with_source(input_text: str) -> tuple[str, str]:
+    """(summary, source) only; see summarize_asset."""
+    result = summarize_asset(input_text)
+    return result.summary, result.source
 
 
 def generate_asset_summary(input_text: str) -> str:

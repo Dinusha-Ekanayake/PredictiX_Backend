@@ -30,3 +30,22 @@ def internal_error(message: str, exc: BaseException, status_code: int = 500) -> 
         return HTTPException(status_code=503, detail=DB_UNAVAILABLE)
     log.error("%s (%s: %s)", message, type(exc).__name__, exc, exc_info=exc)
     return HTTPException(status_code=status_code, detail=message)
+
+
+def upload_error(exc: BaseException) -> HTTPException:
+    """The HTTP response for a rejected or failed file upload.
+
+    Covers the exceptions of app.services.image_upload_service (also raised by
+    attachment_service). Anything else is unexpected and becomes a plain 500.
+    """
+    from app.services import image_upload_service as uploads
+
+    status = {
+        uploads.ImageTooLarge: 413,
+        uploads.UnsupportedImage: 415,
+        uploads.StorageUnavailable: 503,
+        uploads.StorageFailed: 502,
+    }.get(type(exc))
+    if status is None:
+        return internal_error("The file could not be uploaded.", exc)
+    return HTTPException(status_code=status, detail=str(exc))

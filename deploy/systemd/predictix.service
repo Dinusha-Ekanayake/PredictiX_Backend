@@ -1,0 +1,45 @@
+# systemd unit for the PredictiX API on the EC2 instance.
+#
+#   sudo cp deploy/systemd/predictix.service /etc/systemd/system/predictix.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now predictix
+#
+# Paths assume the repository is cloned to /home/ubuntu/PredictiX_Backend with
+# its virtualenv in ./venv (docs/EC2_Deployment.md). Edit them if yours differ.
+
+[Unit]
+Description=PredictiX FastAPI backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/PredictiX_Backend
+EnvironmentFile=/home/ubuntu/PredictiX_Backend/.env
+Environment=PYTHONUNBUFFERED=1
+
+# Bound to loopback: nginx terminates TLS and is the only public entry point.
+# One worker, because the scheduler (nightly batch, reminder mail) must run in
+# exactly one process; --proxy-headers makes client IPs and the https scheme
+# visible to the app through nginx.
+ExecStart=/home/ubuntu/PredictiX_Backend/venv/bin/uvicorn app.main:app \
+    --host 127.0.0.1 --port 8000 --workers 1 \
+    --proxy-headers --forwarded-allow-ips 127.0.0.1
+
+Restart=always
+RestartSec=5
+# Model loading takes a few seconds; give shutdown time to finish a request.
+TimeoutStopSec=30
+
+# On a 1 GB instance, restart the API rather than let the kernel kill sshd.
+MemoryHigh=750M
+MemoryMax=900M
+
+# Hardening that does not get in the way of the app.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

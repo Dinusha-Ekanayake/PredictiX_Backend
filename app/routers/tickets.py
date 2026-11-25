@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime, timezone
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from sqlalchemy.exc import IntegrityError
@@ -33,7 +34,10 @@ from app.schemas.tickets import (
     TicketPriorityResponse,
     TicketPreviewRequest,
     TicketPreviewResponse,
+    TicketDetailsOut,
 )
+from app.services.ticket_access import can_view_ticket
+from app.services.ticket_detail_service import ticket_details
 from app.ai.services.ticket_categorization_service import categorize_ticket_text
 from app.ai.services.ticket_priority_service import predict_ticket_priority
 from app.services.notification_service import NotificationService
@@ -550,6 +554,16 @@ def delete_my_ticket(
         admin_emails
     )
     return {"message": "Ticket deleted", "id": ticket_id}
+
+
+@router.get("/{ticket_id}/details", response_model=TicketDetailsOut)
+def get_ticket_details(ticket_id: UUID, db: Session = Depends(get_db), current_user: Profile = Depends(get_current_user)):
+    """Creator, assignee, site and status history for the staff ticket view.
+    404 for a ticket outside the caller's scope."""
+    ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    if not ticket or not can_view_ticket(ticket, current_user):
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    return ticket_details(db, ticket, current_user)
 
 
 @router.get("/{ticket_id}", response_model=TicketOut)
