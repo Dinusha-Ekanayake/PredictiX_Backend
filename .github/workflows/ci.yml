@@ -261,6 +261,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt
 
+      - name: Wake the Hugging Face Spaces
+        # Free Spaces sleep after 48 h idle and take a minute or more to boot.
+        # Waking them first means a cold Space shows up here, by name, rather
+        # than as a model case failing for a reason the suite cannot see.
+        env:
+          HF_AI_SPACE_URL: ${{ secrets.HF_AI_SPACE_URL }}
+          ASSET_SUMMARY_SPACE: ${{ vars.ASSET_SUMMARY_SPACE }}
+          TICKET_SUMMARY_SPACE: ${{ vars.TICKET_SUMMARY_SPACE }}
+          HF_TOKEN_space: ${{ secrets.HF_TOKEN_SPACE }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python -m app.ai.services.hf_spaces --wait 600
+
       - name: Run the functional suite
         # Prints the ID / case / expected / status table the project report
         # carries, and exits non-zero if any case fails.
