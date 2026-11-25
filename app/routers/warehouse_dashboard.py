@@ -14,6 +14,18 @@ from ..models import Asset, Ticket, PdmBatchPrediction, PdmPredictionHistory, Ma
 from fastapi import BackgroundTasks
 from ..services.dashboard_cache import DashboardCache
 from app.core.errors import internal_error
+from app.services.health_bands import (
+    CRITICAL_THRESHOLD,
+    HEALTH_BAND_NAMES,
+    band_bounds,
+    band_count_sql,
+    band_for,
+)
+
+# "Healthy" = Good or better; "At Risk" = Poor or Critical. Both derived from
+# the shared bands so this page cannot drift from the admin dashboard again.
+HEALTHY_FROM: float = band_bounds("good")[0]
+AT_RISK_BELOW: float = band_bounds("moderate")[0]
 
 warehouse_dashboard_router = APIRouter(
     prefix="/warehouse-dashboard",
@@ -23,6 +35,16 @@ warehouse_dashboard_router = APIRouter(
 
 _cache = DashboardCache("warehouse", ttl=int(__import__("os").getenv("WAREHOUSE_DASHBOARD_TTL", "60")))
 _survival_cache = DashboardCache("warehouse_survival", ttl=int(__import__("os").getenv("WAREHOUSE_DASHBOARD_TTL", "60")))
+
+
+def _band_range_label(band: str) -> str:
+    """Human range for a band, e.g. '50–59%' or '< 25%'."""
+    lower, upper = band_bounds(band)
+    if lower is None:
+        return f"< {upper:g}%"
+    if upper is None:
+        return f"≥ {lower:g}%"
+    return f"{lower:g}–{upper - 1:g}%"
 
 
 def _months_ending_at(anchor: datetime, n: int) -> list[tuple[int, int, str]]:
@@ -95,19 +117,26 @@ def _build_warehouse_summary(db: Session, warehouse_id: str | None = None):
     # pdm_batch_predictions since the v7/decision-layer unification and
     # never written to since — reading from them here silently produced
     # stale/empty KPIs regardless of how current the real predictions were.
+    #
+    # Healthy / At Risk / Critical come from app.services.health_bands, the
+    # definition the admin dashboard, assets page and chatbot use. These were
+    # hard-coded at >=70 / <60 here, which labelled 366 of Colombo's 400
+    # assets "critical" while the admin dashboard reported 127.
     kpi_row = db.execute(text(f"""
         SELECT
             (SELECT ROUND(AVG(health_score)::numeric, 1) FROM pdm_batch_predictions
              WHERE status = 'ok' AND {_assets_in})                                 AS avg_health,
             (SELECT COUNT(*) FROM pdm_batch_predictions
-             WHERE status = 'ok' AND {_assets_in} AND health_score >= 70)          AS healthy_assets,
+             WHERE status = 'ok' AND {_assets_in} AND health_score >= {HEALTHY_FROM})   AS healthy_assets,
             (SELECT COUNT(*) FROM pdm_batch_predictions
-             WHERE status = 'ok' AND {_assets_in} AND health_score < 60)           AS at_risk_assets,
+             WHERE status = 'ok' AND {_assets_in} AND health_score < {AT_RISK_BELOW})   AS at_risk_assets,
             (SELECT COUNT(*) FROM assets {_assets_where})                          AS total_assets,
             (SELECT COUNT(*) FROM tickets WHERE {_tickets_and} status != 'closed') AS active_tickets,
             (SELECT COUNT(*) FROM tickets {_tickets_where})                        AS total_tickets,
             (SELECT COALESCE(SUM(estimated_cost_lkr), 0) FROM pdm_batch_predictions
-             WHERE status = 'ok' AND {_assets_in})                                 AS total_cost
+             WHERE status = 'ok' AND {_assets_in})                                 AS total_cost,
+            (SELECT COUNT(*) FROM pdm_batch_predictions
+             WHERE status = 'ok' AND {_assets_in} AND health_score < {CRITICAL_THRESHOLD}) AS critical_assets
     """), _wh).fetchone()
 
     avg_health_score     = float(kpi_row[0] or 0)
@@ -117,6 +146,7 @@ def _build_warehouse_summary(db: Session, warehouse_id: str | None = None):
     active_tickets_count = int(kpi_row[4] or 0)
     total_tickets_count  = int(kpi_row[5] or 0)
     total_cost           = int(kpi_row[6] or 0)
+    critical_assets      = int(kpi_row[7] or 0)
 
     avg_health_pct   = f"{avg_health_score:.1f}%" if avg_health_score else "N/A"
     total_assets_str = f"{healthy_assets} of {total_assets} total" if total_assets else "0 of 0 total"
@@ -125,12 +155,12 @@ def _build_warehouse_summary(db: Session, warehouse_id: str | None = None):
     kpis = [
         {"label": "Average Health",  "value": avg_health_pct,            "sub": "Across all assets",          "icon": "Activity"},
         {"label": "Healthy Assets",  "value": str(healthy_assets),        "sub": total_assets_str,             "icon": "ShieldCheck"},
-        {"label": "At Risk",         "value": str(at_risk_assets),        "sub": "Require attention",          "icon": "AlertTriangle"},
+        {"label": "At Risk",         "value": str(at_risk_assets),        "sub": "Poor or critical health",    "icon": "AlertTriangle"},
         {"label": "Active Tickets",  "value": str(active_tickets_count),  "sub": f"Of {total_tickets_count} total", "icon": "Ticket"},
     ]
     kpi_grid = [
         {"title": "Total Vehicles",           "value": str(total_assets),    "subtitle": "Across all warehouse operations"},
-        {"title": "Critical Assets",          "value": str(at_risk_assets),  "subtitle": "Require immediate attention"},
+        {"title": "Critical Assets",          "value": str(critical_assets), "subtitle": f"Below {CRITICAL_THRESHOLD:g}% health"},
         {"title": "Avg Component Health",     "value": avg_health_pct,       "subtitle": "Overall fleet component health"},
         {"title": "Monthly Maintenance Cost", "value": formatted_cost,       "subtitle": "Estimated current month cost"},
     ]
@@ -162,18 +192,17 @@ def _build_warehouse_summary(db: Session, warehouse_id: str | None = None):
         "p.asset_id IN (SELECT id FROM assets WHERE warehouse_id = :wh) AND "
         if warehouse_id else ""
     )
-    bucket_rows = db.execute(text(f"""
-        SELECT width_bucket(health_score, 60, 100, 4) AS b, COUNT(*)
+    # Uses the shared bands (same SQL generator as the admin dashboard), so
+    # the Critical slice here always equals the Critical Assets KPI.
+    band_row = db.execute(text(f"""
+        SELECT {band_count_sql("p.health_score")}
         FROM pdm_batch_predictions p
         WHERE {_bucket_where}p.status = 'ok' AND p.health_score IS NOT NULL
-        GROUP BY b
-    """), _wh).fetchall()
-    # width_bucket(score, 60, 100, 4) → 0:<60, 1:60–69, 2:70–79, 3:80–89, 4&5:90–100
-    buckets = {"90–100%": 0, "80–89%": 0, "70–79%": 0, "60–69%": 0, "< 60%": 0}
-    _bucket_map = {0: "< 60%", 1: "60–69%", 2: "70–79%", 3: "80–89%", 4: "90–100%", 5: "90–100%"}
-    for b, c in bucket_rows:
-        buckets[_bucket_map.get(b, "< 60%")] += c
-    health_score_dist = [{"bucket": k, "count": v} for k, v in buckets.items()]
+    """), _wh).fetchone()
+    health_score_dist = [
+        {"bucket": band.title(), "range": _band_range_label(band), "count": int(band_row[i] or 0)}
+        for i, band in enumerate(HEALTH_BAND_NAMES)
+    ]
 
     # 7. Monthly Ticket Volume & Health/Maintenance Trends
     # Ticket counts per month — aggregated in SQL instead of pulling every row.
@@ -241,7 +270,7 @@ def _build_warehouse_summary(db: Session, warehouse_id: str | None = None):
         SELECT a.asset_code, a.model, a.asset_name, a.category, p.health_score
         FROM pdm_batch_predictions p
         JOIN assets a ON a.id = p.asset_id
-        WHERE p.status = 'ok' AND p.health_score < 70 {_crit_where}
+        WHERE p.status = 'ok' AND p.health_score < {AT_RISK_BELOW} {_crit_where}
         ORDER BY p.health_score ASC
         LIMIT 10
     """), _wh).fetchall()
@@ -249,13 +278,14 @@ def _build_warehouse_summary(db: Session, warehouse_id: str | None = None):
     critical_assets_list = []
     for asset_code, model, asset_name, category, health_score in critical_assets_query:
         hs = float(health_score)
+        is_critical = band_for(hs) == "critical"
         critical_assets_list.append({
             "id": asset_code or "Unknown",
             "vehicle": model or asset_name or "Vehicle",
             "component": category or "General",
             "health": f"{int(hs)}%",
-            "priority": "High" if hs < 50 else "Medium",
-            "status": "Critical" if hs < 50 else "Warning"
+            "priority": "High" if is_critical else "Medium",
+            "status": "Critical" if is_critical else "Poor",
         })
 
     # 9. Component Health (from sensor_readings — latest reading per asset)

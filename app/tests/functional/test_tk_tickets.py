@@ -161,3 +161,44 @@ def test_tk_12_unauthorized(client, auth, ticket):
     r = client.delete(f"/tickets/{ticket['id']}", headers=auth("user"))
     assert r.status_code in (401, 403), (
         f"a standard user deleted or was allowed to delete a ticket ({r.status_code})")
+
+
+def test_deleting_a_ticket_removes_its_notifications(client, auth, ctx, unique, db, monkeypatch):
+    """Regression: a deleted ticket's "Ticket assigned to you" notification was
+    left in the assignee's inbox, linking to a ticket that no longer exists.
+    Not a test-plan case, so the functional report does not list it."""
+    from sqlalchemy import text
+
+    from app.services.notification_service import NotificationService
+
+    # Creating and deleting a ticket emails real staff; this test is about
+    # in-app rows only, so email is stubbed out.
+    monkeypatch.setattr(NotificationService, "send_email", staticmethod(lambda *a, **kw: True))
+
+    tag = unique()
+    created = client.post("/tickets/", json={
+        "title": f"{tag} notification cleanup probe",
+        "description": SAMPLE,
+        "created_by": ctx["admin_profile_id"],
+        "asset_id": ctx["asset_in"],
+        "warehouse_id": ctx["warehouse_id"],
+    }, headers=auth("admin"))
+    assert created.status_code in (200, 201), f"setup failed ({created.status_code})"
+    tid = created.json()["id"]
+
+    def linked() -> int:
+        db.rollback()
+        return db.execute(text(
+            "SELECT count(*) FROM notifications "
+            "WHERE related_ticket_id = CAST(:t AS uuid) OR message LIKE :m"
+        ), {"t": tid, "m": f"%{tag}%"}).scalar()
+
+    try:
+        assigned = client.put(f"/tickets/{tid}", json={"assigned_to": ctx["admin_profile_id"]},
+                              headers=auth("admin"))
+        assert assigned.status_code == 200, f"setup: assignment failed ({assigned.status_code})"
+        assert linked() >= 1, "setup: assigning the ticket raised no notification"
+    finally:
+        gone = client.delete(f"/tickets/{tid}", headers=auth("admin"))
+    assert gone.status_code == 200, f"delete failed ({gone.status_code})"
+    assert linked() == 0, "notifications about the deleted ticket were left behind"
