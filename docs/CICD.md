@@ -88,11 +88,20 @@ unreachable, and skipping it in CI would defeat the point.
 
 ### Telling a model summary from a template
 
-`AssetSummaryResponse` now carries `source`, either `"model"` or `"template"`.
-It previously stamped `model_version: "1.0"` on both, so a caller could not tell
-whether a model wrote the sentence or the fallback did. AS-09 asserts
-`source == "model"`; without that field the case could only check that a
-non-empty string came back, which the template always satisfies.
+`AssetSummaryResponse` carries `source` (`"model"` or `"template"`) and
+`fallback_reason`:
+- `null`: the model's answer was published.
+- `"unavailable"`: the Space did not answer.
+- `"rejected: <rule>"`: the model answered but broke an integrity rule. It
+  stated a figure that is not in the asset data, used a known hallucinated
+  phrase, or said "requires no maintenance" for an asset its data marks as
+  urgent. Those answers are never published.
+
+AS-09 fails when the Space is `"unavailable"`, which is the outage it exists to
+catch. It also requires `source` and `fallback_reason` to agree. A rejected
+answer is the guard working, not a failure of the system. The model's
+acceptance rate is a model-quality figure for its owner; it is visible in the
+API logs (`model output not published: ...`).
 
 `static-checks` compiles every module, fails if `.env` or any `.pem`/`.key` is
 tracked by git, and fails on credential-shaped literals in source. Placeholders
