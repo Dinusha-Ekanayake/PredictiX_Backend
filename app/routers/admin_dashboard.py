@@ -108,10 +108,10 @@ def _build_admin_summary(db: Session, warehouse_id: str | None = None):
     # Reads pdm_batch_predictions, the table the asset detail page also reads.
     # asset_failure_predictions is on-demand only and goes stale between runs.
     #
-    # "Critical Alerts" uses the same <40 cutoff as h_critical below, so the
-    # headline number and the Health Distribution chart on the same page agree.
-    # A <60 cutoff here would be Poor (40-59) and Critical (<40) combined, and
-    # the one word "critical" would mean two different things on one screen.
+    # "Critical Alerts" uses CRITICAL_THRESHOLD, the same cutoff as h_critical
+    # below, so the headline number and the Health Distribution chart agree.
+    # Using a wider cutoff here would merge Poor into Critical, and the one
+    # word "critical" would mean two different things on one screen.
     pred_agg = db.execute(text(f"""
         SELECT
             COUNT(*)                                                        AS total_preds,

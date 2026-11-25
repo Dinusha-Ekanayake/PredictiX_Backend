@@ -39,10 +39,12 @@ from app.models import (
 # ── Health bands ─────────────────────────────────────────────────
 # Named locally so the count expressions below stay readable, but the values
 # come from the one shared definition rather than being restated here.
-_BAND_EXCELLENT = 80.0   # >= 80
-_BAND_GOOD      = 70.0   # >= 70  — "healthy" for reporting purposes
-_BAND_MODERATE  = 50.0   # >= 50
-_BAND_CRITICAL  = 30.0   # <  30 is critical
+from app.services.health_bands import CRITICAL_THRESHOLD, band_bounds  # noqa: E402
+
+_BAND_EXCELLENT = band_bounds("excellent")[0]
+_BAND_GOOD      = band_bounds("good")[0]       # "healthy" = good or better
+_BAND_MODERATE  = band_bounds("moderate")[0]   # below this = at risk (poor or critical)
+_BAND_CRITICAL  = CRITICAL_THRESHOLD           # below this = critical
 
 # ── KB Integration ───────────────────────────────────────────────
 from app.kb.kb_vector_store import get_kb_store
@@ -846,8 +848,8 @@ def _context_to_prompt_text(ctx: dict) -> str:
 ▶ HEALTH & PREDICTIVE ANALYTICS
   Average Fleet Health Score: {ctx['avg_health_pct']}%
   Average Failure Probability: {ctx['avg_failure_prob_pct']}%
-  Health Distribution: Healthy (≥70%): {ctx['healthy_count']} | Moderate (50-69%): {ctx['moderate_count']} | At-Risk (<50%): {ctx['at_risk_count']} | Critical (<30%): {ctx['critical_count']}
-  Critical Rate: {ctx['critical_rate_pct']}% ({ctx['critical_count']} of {ctx['total_assets']} assets, <30% health) | At-Risk Rate: {ctx['at_risk_rate_pct']}% (<50% health)
+  Health Distribution: Healthy (≥{_BAND_GOOD:g}%): {ctx['healthy_count']} | Moderate ({_BAND_MODERATE:g}-{_BAND_GOOD - 1:g}%): {ctx['moderate_count']} | At-Risk (<{_BAND_MODERATE:g}%): {ctx['at_risk_count']} | Critical (<{_BAND_CRITICAL:g}%): {ctx['critical_count']}
+  Critical Rate: {ctx['critical_rate_pct']}% ({ctx['critical_count']} of {ctx['total_assets']} assets, <{_BAND_CRITICAL:g}% health) | At-Risk Rate: {ctx['at_risk_rate_pct']}% (<{_BAND_MODERATE:g}% health)
   (Use these EXACT pre-computed rates when stating critical/at-risk percentages — do not recompute.)
   Risk Level Distribution: {kv(ctx['risk_breakdown'])}
   Assets Needing Urgent Service (≤7 days): {ctx['urgent_maintenance_count']}
