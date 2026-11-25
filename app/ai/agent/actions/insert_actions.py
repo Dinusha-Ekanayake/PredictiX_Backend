@@ -14,7 +14,6 @@ from app.ai.agent.scoping import scope_asset_query, scope_ticket_query
 from app.ai.agent.guardrails import clamp
 from app.deps import assert_can_assign
 from fastapi import HTTPException
-from app.services.user_ticket_service import generate_ticket_number
 
 log = logging.getLogger("predictix.actions")
 
@@ -249,14 +248,13 @@ def handle_action(question: str, ctx: ToolContext) -> dict:
                 except Exception:
                     pass
 
-            ticket_num = generate_ticket_number(db)
             priority_val = _normalize_priority(data.get("priority"))
             title_val = clamp(data.get("title") or "New Maintenance Ticket", 255)
             desc_val = clamp(data.get("description") or "Created via Sidekick Chatbot", 5000)
 
             new_ticket = Ticket(
                 id=uuid.uuid4(),
-                ticket_number=ticket_num,
+                # ticket_number is assigned by the database (ticket_number_seq).
                 title=title_val,
                 description=desc_val,
                 priority=priority_val,

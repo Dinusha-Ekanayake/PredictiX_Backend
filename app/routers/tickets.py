@@ -81,11 +81,6 @@ def _normalize_category(v: str | None) -> str | None:
     return normalized
 
 
-def _generate_ticket_number(db: Session) -> str:
-    count = db.query(func.count(Ticket.id)).scalar() or 0
-    return f"T-{count + 1:04d}"
-
-
 @router.post("/", response_model=TicketOut)
 def create_ticket(
     payload: TicketCreate,
@@ -94,7 +89,9 @@ def create_ticket(
     current_user: Profile = Depends(get_current_user),
 ):
     data = payload.model_dump()
-    data["ticket_number"] = _generate_ticket_number(db)
+    # ticket_number is left unset: the database assigns it from ticket_number_seq
+    # (trigger trg_generate_ticket_number), which is atomic and never reuses a
+    # number. Counting rows here collided as soon as any ticket was deleted.
     if data.get("priority"):
         data["priority"] = _normalize_priority(data["priority"])
     if data.get("predicted_priority"):

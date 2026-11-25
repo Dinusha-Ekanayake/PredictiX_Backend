@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -16,26 +15,18 @@ from app.services import user_ticket_service as svc
 # ---------------------------------------------------------------------------
 
 
-def test_generate_ticket_number_uses_year_and_count():
-    db = MagicMock()
-    db.query.return_value.filter.return_value.count.return_value = 4
+def test_the_api_leaves_ticket_numbers_to_the_database():
+    """The number comes from ticket_number_seq via a trigger; the API never
+    computes one, since counting rows collided after any deletion."""
+    import inspect
 
-    number = svc.generate_ticket_number(
-        db, now=datetime(2026, 5, 30, tzinfo=timezone.utc)
-    )
+    import app.ai.agent.actions.insert_actions as chatbot_actions
+    import app.routers.tickets as tickets_router
 
-    assert number == "TKT-2026-0005"
-
-
-def test_generate_ticket_number_pads_to_four_digits():
-    db = MagicMock()
-    db.query.return_value.filter.return_value.count.return_value = 0
-
-    number = svc.generate_ticket_number(
-        db, now=datetime(2026, 1, 1, tzinfo=timezone.utc)
-    )
-
-    assert number == "TKT-2026-0001"
+    assert not hasattr(svc, "generate_ticket_number")
+    assert not hasattr(tickets_router, "_generate_ticket_number")
+    for module in (svc, tickets_router, chatbot_actions):
+        assert "ticket_number=" not in inspect.getsource(module).replace("ticket_number=None", "")
 
 
 # ---------------------------------------------------------------------------
