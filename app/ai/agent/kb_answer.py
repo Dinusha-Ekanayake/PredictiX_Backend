@@ -28,6 +28,8 @@ log = logging.getLogger("predictix.agent.kb")
 
 NOT_FOUND = "NOT_FOUND"
 MAX_PASSAGES = 4
+#: Per-source cap before back-filling, so one document cannot take every slot.
+MAX_PER_SOURCE = 2
 #: Passages scoring this far below the best one are not used or cited.
 SCORE_MARGIN = 0.12
 
@@ -77,10 +79,34 @@ def sources_footer(hits: list[KBHit]) -> str:
 
 
 def _select(hits: list[KBHit]) -> list[KBHit]:
+    """The passages the model answers from: relevant, in rank order, and varied.
+
+    At most MAX_PER_SOURCE passages per source on the first pass, so one long
+    document split into many similar chunks cannot fill every slot and push
+    out a different source that answers the question. Remaining slots are then
+    back-filled in rank order, so a question only one source covers still gets
+    MAX_PASSAGES passages.
+    """
     if not hits:
         return []
     best = max(h.cosine for h in hits)
-    return [h for h in hits if h.cosine >= best - SCORE_MARGIN][:MAX_PASSAGES]
+    relevant = [h for h in hits if h.cosine >= best - SCORE_MARGIN]
+
+    chosen: list[KBHit] = []
+    per_source: dict[str, int] = {}
+    for h in relevant:
+        if len(chosen) == MAX_PASSAGES:
+            break
+        if per_source.get(h.source_id, 0) < MAX_PER_SOURCE:
+            chosen.append(h)
+            per_source[h.source_id] = per_source.get(h.source_id, 0) + 1
+    for h in relevant:
+        if len(chosen) == MAX_PASSAGES:
+            break
+        if h not in chosen:
+            chosen.append(h)
+    rank = {id(h): i for i, h in enumerate(relevant)}
+    return sorted(chosen, key=lambda h: rank[id(h)])
 
 
 def answer_from_kb(question: str, user: Any, warehouse_id: Optional[str], db) -> Optional[dict]:
