@@ -13,6 +13,10 @@ from __future__ import annotations
 
 import re
 
+from app.services.health_bands import CRITICAL_THRESHOLD, band_bounds
+
+AT_RISK_BELOW = band_bounds("moderate")[0]
+
 SHAP_KB_MAP: dict[str, dict] = {
     "engine hours since last service": {
         "kb_threshold": ">500 hrs → overdue",
@@ -379,7 +383,7 @@ def compute_benchmark_alerts(ctx: dict) -> list[dict]:
     total_assets = max(ctx.get("total_assets", 1), 1)
 
     # 1. Critical rate benchmark (ISO 55000 / SMRP: <5%)
-    # Use the Critical band (<50% health) consistently — the same figure shown on the
+    # Use the Critical band (app.services.health_bands) consistently — the same figure shown on the
     # "Critical Assets" KPI card — so the narrative and the card never disagree.
     # (Previously this used at_risk_count (<60%) while labelling it "critical", which
     # produced a higher percentage than the card/prose.)
@@ -411,10 +415,10 @@ def compute_benchmark_alerts(ctx: dict) -> list[dict]:
             "type": "BENCHMARK",
             "message": (
                 f"Industry standards (ISO 55000 / SMRP Best Practices) target fewer than "
-                f"{target:g}% of a fleet in critical condition (<50% health). At {critical_pct}% "
+                f"{target:g}% of a fleet in critical condition (<{CRITICAL_THRESHOLD:g}% health). At {critical_pct}% "
                 f"({critical_count} of {total_assets} assets), PredictiX is currently "
                 f"{gap} percentage points above the benchmark, signalling an elevated collective "
-                f"failure risk; a further {at_risk_count} assets are at-risk (<60% health)."
+                f"failure risk; {at_risk_count} assets in total are at-risk (<{AT_RISK_BELOW:g}% health)."
                 f"{pm_text}"
             ),
         })
@@ -481,7 +485,7 @@ def generate_recommendations(ctx: dict) -> dict:
     hp_tickets       = ctx.get("high_priority_active_tickets", 0)
     active_tickets   = ctx.get("active_tickets", 0)
     total_assets     = max(ctx.get("total_assets", 1), 1)
-    # "critical %" must use the Critical band (<50%), matching the card and benchmark box.
+    # "critical %" must use the shared Critical band, matching the card and benchmark box.
     critical_pct     = round((critical_count / total_assets) * 100, 1)
 
     # Count forklifts from asset_type_breakdown if available
